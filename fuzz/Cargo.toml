@@ -1,0 +1,32 @@
+[package]
+name = "solen-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+solen-types = { path = "../crates/solen-types" }
+solen-crypto = { path = "../crates/solen-crypto" }
+solen-execution = { path = "../crates/solen-execution" }
+solen-storage = { path = "../crates/solen-storage" }
+solen-vm = { path = "../crates/solen-vm" }
+
+[[bin]]
+name = "fuzz_executor"
+path = "fuzz_targets/fuzz_executor.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_vm"
+path = "fuzz_targets/fuzz_vm.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tx_decode"
+path = "fuzz_targets/fuzz_tx_decode.rs"
+doc = false

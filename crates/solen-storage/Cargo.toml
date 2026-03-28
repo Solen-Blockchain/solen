@@ -1,0 +1,22 @@
+[package]
+name = "solen-storage"
+description = "State storage abstraction for Solen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]
+
+[dependencies]
+solen-types = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+rocksdb = { workspace = true, optional = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3"

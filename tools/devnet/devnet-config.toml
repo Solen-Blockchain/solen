@@ -1,0 +1,11 @@
+[network]
+chain_id = 1337
+listen_addr = "127.0.0.1:9944"
+
+[consensus]
+block_time_ms = 2000
+validators = 1
+
+[rpc]
+enabled = true
+addr = "127.0.0.1:8545"

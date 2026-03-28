@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/solen-types",
+    "crates/solen-crypto",
+    "crates/solen-consensus",
+    "crates/solen-execution",
+    "crates/solen-system-contracts",
+    "crates/solen-vm",
+    "crates/solen-rollup-kit",
+    "crates/solen-rpc",
+    "crates/solen-p2p",
+    "crates/solen-storage",
+    "crates/solen-indexer",
+    "crates/solen-node",
+    "sdks/wallet-sdk-rs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/solen-labs/solen"
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+borsh = { version = "1", features = ["derive"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Networking
+libp2p = "0.54"
+
+# Crypto
+ed25519-dalek = "2"
+sha2 = "0.10"
+blake3 = "1"
+
+# Storage
+rocksdb = "0.22"
+
+# RPC
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+axum = "0.7"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Testing
+proptest = "1"
+
+# Internal crates
+solen-types = { path = "crates/solen-types" }
+solen-crypto = { path = "crates/solen-crypto" }
+solen-consensus = { path = "crates/solen-consensus" }
+solen-execution = { path = "crates/solen-execution" }
+solen-system-contracts = { path = "crates/solen-system-contracts" }
+solen-vm = { path = "crates/solen-vm" }
+solen-rollup-kit = { path = "crates/solen-rollup-kit" }
+solen-rpc = { path = "crates/solen-rpc" }
+solen-p2p = { path = "crates/solen-p2p" }
+solen-indexer = { path = "crates/solen-indexer" }
+solen-storage = { path = "crates/solen-storage" }

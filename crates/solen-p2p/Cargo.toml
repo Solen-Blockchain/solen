@@ -1,0 +1,25 @@
+[package]
+name = "solen-p2p"
+description = "P2P networking layer for Solen validators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solen-types = { workspace = true }
+libp2p = { workspace = true, features = [
+    "gossipsub",
+    "identify",
+    "noise",
+    "tcp",
+    "tokio",
+    "yamux",
+    "macros",
+    "mdns",
+] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }

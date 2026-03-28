@@ -1,0 +1,13 @@
+[package]
+name = "solen-system-contracts"
+description = "System contracts: governance, bridge, staking, treasury"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solen-types = { workspace = true }
+solen-vm = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

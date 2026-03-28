@@ -1,0 +1,16 @@
+[package]
+name = "solen-vm"
+description = "WASM-like virtual machine for Solen contract execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solen-types = { workspace = true }
+solen-storage = { workspace = true }
+wasmtime = "29"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wat = "1"

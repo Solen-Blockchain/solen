@@ -1,0 +1,16 @@
+[package]
+name = "solen-indexer"
+description = "Event indexer and explorer API for Solen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solen-types = { workspace = true }
+solen-consensus = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

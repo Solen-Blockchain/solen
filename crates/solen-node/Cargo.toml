@@ -1,0 +1,31 @@
+[package]
+name = "solen-node"
+description = "Solen validator node binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "solen-node"
+path = "src/main.rs"
+
+[features]
+default = ["rocksdb"]
+rocksdb = ["solen-storage/rocksdb"]
+
+[dependencies]
+solen-types = { workspace = true }
+solen-crypto = { workspace = true }
+solen-consensus = { workspace = true }
+solen-execution = { workspace = true }
+solen-rpc = { workspace = true }
+solen-indexer = { workspace = true }
+solen-p2p = { workspace = true }
+solen-storage = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

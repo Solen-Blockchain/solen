@@ -1,0 +1,21 @@
+[package]
+name = "solen-execution"
+description = "Settlement execution engine, state management, proof verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solen-types = { workspace = true }
+solen-crypto = { workspace = true }
+solen-vm = { workspace = true }
+solen-storage = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+wat = "1"

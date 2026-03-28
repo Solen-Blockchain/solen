@@ -1,6 +1,6 @@
 [package]
-name = "solen-rollup-kit"
-description = "Rollup framework: sequencer, batch publisher, prover adapter, messenger"
+name = "solen-intents"
+description = "Intent-aware execution: users express outcomes, solvers compete to fulfill them"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,7 @@ license.workspace = true
 [dependencies]
 solen-types = { workspace = true }
 solen-crypto = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

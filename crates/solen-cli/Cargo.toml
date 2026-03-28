@@ -1,0 +1,21 @@
+[package]
+name = "solen-cli"
+description = "Command-line interface for interacting with the Solen network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "solen"
+path = "src/main.rs"
+
+[dependencies]
+solen-types = { workspace = true }
+solen-crypto = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }

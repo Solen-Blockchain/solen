@@ -1,0 +1,6 @@
+[package]
+name = "solen-contract-sdk"
+description = "SDK for writing Solen smart contracts in Rust, compiled to WASM"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

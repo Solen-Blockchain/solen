@@ -11,6 +11,8 @@ members = [
     "crates/solen-rpc",
     "crates/solen-p2p",
     "crates/solen-storage",
+    "crates/solen-intents",
+    "crates/solen-cli",
     "crates/solen-indexer",
     "crates/solen-node",
     "sdks/wallet-sdk-rs",
@@ -58,6 +60,9 @@ anyhow = "1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
 
 # Testing
 proptest = "1"

@@ -7,6 +7,7 @@
 //! on a fixed interval.
 
 pub mod checkpoint;
+pub mod encrypted_mempool;
 pub mod engine;
 pub mod epoch;
 pub mod mempool;

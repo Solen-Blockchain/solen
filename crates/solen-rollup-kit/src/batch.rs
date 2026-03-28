@@ -33,7 +33,7 @@ impl BatchPublisher {
     pub fn prepare_commitment(
         &self,
         batch: &TransactionBatch,
-        pre_state_root: Hash,
+        _pre_state_root: Hash,
         post_state_root: Hash,
         proof: Vec<u8>,
     ) -> Result<BatchCommitment, PublishError> {

@@ -5,7 +5,7 @@ use solen_crypto::{blake3_hash, Keypair};
 use solen_types::transaction::{Action, UserOperation};
 
 use crate::rpc::RpcClient;
-use crate::wallet::{self, hex_decode, hex_encode, Keystore};
+use crate::wallet::{self, hex_decode, hex_encode};
 
 // ── Status ──────────────────────────────────────────────────────
 

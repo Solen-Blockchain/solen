@@ -29,7 +29,7 @@ impl IntentSolver for DirectTransferSolver {
         let mut actions = Vec::new();
         for constraint in &intent.constraints {
             if let Constraint::RequireTransfer {
-                from,
+                from: _,
                 to,
                 min_amount,
             } = constraint

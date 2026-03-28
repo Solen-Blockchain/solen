@@ -115,6 +115,7 @@ pub struct AccountInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BlockInfo {
     pub height: u64,
     pub epoch: u64,

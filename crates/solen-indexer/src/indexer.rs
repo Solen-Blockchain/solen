@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use solen_consensus::engine::{block_hash, ConsensusEngine, FinalizedBlock};
+use solen_consensus::engine::{ConsensusEngine, FinalizedBlock};
 use tracing::debug;
 
 use crate::store::{IndexStore, IndexedBlock, IndexedEvent, IndexedTx};

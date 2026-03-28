@@ -1,6 +1,6 @@
 //! Authentication: Ed25519 key management and signature verification.
 
-use solen_crypto::{verify, Keypair, SigningError};
+use solen_crypto::{verify, Keypair};
 use solen_types::account::AuthMethod;
 
 /// Verify that a signature matches one of the account's auth methods.

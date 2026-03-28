@@ -39,8 +39,8 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/blocks", get(get_blocks))
-        .route("/api/blocks/{height}", get(get_block))
-        .route("/api/accounts/{account}/txs", get(get_account_txs))
+        .route("/api/blocks/:height", get(get_block))
+        .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
         .with_state(state)
 }

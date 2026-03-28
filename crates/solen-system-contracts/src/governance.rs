@@ -5,7 +5,7 @@
 //! multi-phase qualification.
 
 use serde::{Deserialize, Serialize};
-use solen_types::{AccountId, ValidatorId};
+use solen_types::AccountId;
 use thiserror::Error;
 
 /// Voting period in epochs.

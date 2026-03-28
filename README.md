@@ -6,6 +6,8 @@ Solen narrows the responsibilities of the base layer and treats execution domain
 
 > **Status:** Development prototype (v0.1.0). Not audited. Not for production use.
 
+> **Getting started?** Follow the [Build Your First dApp](docs/tutorial-build-your-first-dapp.md) tutorial to deploy a token contract in 15 minutes.
+
 ---
 
 ## Architecture

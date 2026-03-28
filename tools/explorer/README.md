@@ -1,32 +1,5 @@
-# Solen Explorer
+# Solen Explorer (Deprecated)
 
-Block explorer frontend for the Solen network, built with Next.js.
+> **This in-repo explorer is deprecated.** The production block explorer is developed separately at [solenscan](../../docs/solenscan.md). The indexer crate (`solen-indexer`) and its REST API remain active — they serve the external explorer.
 
-## Features
-
-- Live chain status dashboard (height, blocks, txs, events)
-- Recent blocks table with auto-refresh
-- Connects to the indexer REST API
-
-## Setup
-
-```bash
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-## Configuration
-
-Set the API URL via environment variable:
-
-```bash
-NEXT_PUBLIC_API_URL=http://127.0.0.1:9955 npm run dev
-```
-
-Default: `http://127.0.0.1:9955` (the node's `--explorer-port`).
-
-## Requirements
-
-The Solen node must be running with the indexer enabled (default). The explorer reads from the indexer REST API, not directly from the node RPC.
+This directory contains a minimal Next.js placeholder that was used during early development.

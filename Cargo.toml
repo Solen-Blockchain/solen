@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+exclude = [
+    "examples/contracts/counter",
+    "examples/contracts/token",
+]
 members = [
     "crates/solen-types",
     "crates/solen-crypto",

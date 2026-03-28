@@ -1,0 +1,1 @@
+/home/michael/solen/examples/contracts/counter/target/wasm32-unknown-unknown/release/solen_example_counter.wasm: /home/michael/solen/crates/solen-contract-sdk/src/lib.rs /home/michael/solen/examples/contracts/counter/src/lib.rs

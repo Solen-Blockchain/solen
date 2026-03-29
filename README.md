@@ -9,6 +9,8 @@ A modular settlement network with native rollups, smart accounts, privacy primit
 Solen narrows the responsibilities of the base layer and treats execution domains as first-class components. The design combines a minimal settlement chain, native rollups, smart accounts by default, privacy-capable proof interfaces, and intent-oriented transaction flow.
 
 > **Status:** Development prototype (v0.1.0). Not audited. Not for production use.
+>
+> **[Tokenomics](TOKENOMICS.md)** | **[Build Your First dApp](docs/tutorial-build-your-first-dapp.md)** | **[Deploy a Testnet](deploy/README.md)**
 
 > **Getting started?** Follow the [Build Your First dApp](docs/tutorial-build-your-first-dapp.md) tutorial to deploy a token contract in 15 minutes.
 

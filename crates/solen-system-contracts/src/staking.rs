@@ -12,7 +12,7 @@ use thiserror::Error;
 pub const UNBONDING_PERIOD: u64 = 7;
 
 /// Minimum stake to register as a validator.
-pub const MIN_VALIDATOR_STAKE: u128 = 1000;
+pub const MIN_VALIDATOR_STAKE: u128 = 10_000;
 
 #[derive(Debug, Error)]
 pub enum StakingError {
@@ -247,12 +247,12 @@ mod tests {
     fn register_and_delegate() {
         let mut sc = StakingContract::new();
 
-        sc.register_validator(vid(1), 5000).unwrap();
-        sc.delegate(aid(10), vid(1), 2000).unwrap();
+        sc.register_validator(vid(1), 50_000).unwrap();
+        sc.delegate(aid(10), vid(1), 20_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.total_stake(), 7000);
-        assert_eq!(sc.delegator_total_stake(&aid(10)), 2000);
+        assert_eq!(val.total_stake(), 70_000);
+        assert_eq!(sc.delegator_total_stake(&aid(10)), 20_000);
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn undelegate_and_withdraw() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 5000).unwrap();
+        sc.register_validator(vid(1), 50_000).unwrap();
         sc.delegate(aid(10), vid(1), 3000).unwrap();
 
         // Undelegate at epoch 5.
@@ -284,21 +284,21 @@ mod tests {
     #[test]
     fn reward_distribution() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 5000).unwrap();
-        sc.delegate(aid(10), vid(1), 5000).unwrap();
+        sc.register_validator(vid(1), 50_000).unwrap();
+        sc.delegate(aid(10), vid(1), 50_000).unwrap();
 
-        // Total stake = 10000. Distribute 1000 reward.
-        sc.distribute_rewards(vid(1), 1000).unwrap();
+        // Total stake = 100,000. Distribute 10,000 reward.
+        sc.distribute_rewards(vid(1), 10_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.accumulated_reward_per_token, 1000 * 1_000_000 / 10000);
+        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / 100_000);
     }
 
     #[test]
     fn duplicate_registration_fails() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 5000).unwrap();
-        let err = sc.register_validator(vid(1), 5000).unwrap_err();
+        sc.register_validator(vid(1), 50_000).unwrap();
+        let err = sc.register_validator(vid(1), 50_000).unwrap_err();
         assert!(matches!(err, StakingError::AlreadyRegistered));
     }
 }

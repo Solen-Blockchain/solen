@@ -80,6 +80,25 @@ impl StateStore for RocksStore {
     fn len(&self) -> usize {
         self.db.iterator(IteratorMode::Start).count()
     }
+
+    fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let keys_to_delete: Vec<Vec<u8>> = self
+            .db
+            .prefix_iterator(prefix)
+            .filter_map(|item| item.ok())
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.to_vec())
+            .collect();
+
+        let count = keys_to_delete.len();
+        for key in keys_to_delete {
+            self.db
+                .delete(&key)
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+        }
+
+        Ok(count)
+    }
 }
 
 /// Compute a binary Merkle root from leaf hashes (same algorithm as MemoryStore).

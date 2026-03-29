@@ -362,8 +362,11 @@ impl ConsensusEngine {
                 if header.parent_hash != expected_parent && header.parent_hash != [0u8; 32] {
                     warn!(
                         height = header.height,
-                        "parent hash mismatch — possible fork, rejecting"
+                        "parent hash mismatch — fork detected, initiating rollback"
                     );
+                    drop(chain); // release read lock
+                    self.handle_fork(header.height);
+                    // After rollback, try accepting the block again via fast-forward.
                     return false;
                 }
             }
@@ -411,6 +414,68 @@ impl ConsensusEngine {
         );
 
         true
+    }
+
+    /// Handle a fork: wipe account state and forked blocks, reset chain
+    /// to height 0, and let the sync protocol rebuild from peers.
+    fn handle_fork(&self, fork_height: u64) {
+        let our_height = self.height();
+        warn!(fork_height, our_height, "rolling back forked state");
+
+        // 1. Clear the in-memory chain.
+        self.chain.write().unwrap().clear();
+
+        // 2. Wipe account state, contract storage, and system state.
+        {
+            let mut store = self.store.write().unwrap();
+
+            let mut total_deleted = 0usize;
+            for prefix in &[b"acc/" as &[u8], b"cs/", b"code/"] {
+                if let Ok(n) = store.delete_prefix(prefix) {
+                    total_deleted += n;
+                }
+            }
+            for key in &[
+                b"__staking_state__" as &[u8],
+                b"__governance_state__",
+                b"__bridge_state__",
+                b"__treasury_state__",
+            ] {
+                let _ = store.delete(*key);
+            }
+
+            info!(deleted = total_deleted, "wiped account state");
+            save_chain_meta(store.as_mut(), 0, 0);
+        }
+
+        // 3. Remove persisted blocks from the fork point onward.
+        {
+            let mut store = self.store.write().unwrap();
+            let mut h = fork_height;
+            let mut deleted = 0u64;
+            loop {
+                let key = format!("block/{}", h);
+                match store.get(key.as_bytes()) {
+                    Ok(Some(_)) => {
+                        let _ = store.delete(key.as_bytes());
+                        h += 1;
+                        deleted += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if deleted > 0 {
+                info!(from = fork_height, count = deleted, "deleted forked blocks");
+            }
+        }
+
+        // 4. Reset epoch manager and clear pending state.
+        self.epoch_manager.write().unwrap().current_epoch = 0;
+        self.pending_blocks.write().unwrap().clear();
+        self.pending_attestations.write().unwrap().clear();
+        self.pending_reward_receipts.write().unwrap().clear();
+
+        info!("fork rollback complete — will re-sync from peers via StatusAnnounce");
     }
 
     /// Fast-forward the chain height to catch up with the network.

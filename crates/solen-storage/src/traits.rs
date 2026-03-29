@@ -45,4 +45,10 @@ pub trait StateStore: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Delete all keys matching a prefix.
+    /// Default implementation does nothing — backends should override.
+    fn delete_prefix(&mut self, _prefix: &[u8]) -> Result<usize, StorageError> {
+        Ok(0)
+    }
 }

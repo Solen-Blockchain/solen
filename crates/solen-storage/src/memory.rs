@@ -127,6 +127,27 @@ impl StateStore for MemoryStore {
     fn len(&self) -> usize {
         self.data.len()
     }
+
+    fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let keys_to_delete: Vec<Vec<u8>> = self
+            .data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let count = keys_to_delete.len();
+        for key in keys_to_delete {
+            self.data.remove(&key);
+            self.leaf_hashes.remove(&key);
+        }
+
+        if count > 0 {
+            self.invalidate();
+        }
+
+        Ok(count)
+    }
 }
 
 fn hash_leaf(key: &[u8], value: &[u8]) -> Hash {

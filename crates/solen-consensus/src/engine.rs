@@ -93,6 +93,8 @@ pub struct ConsensusEngine {
     /// Proposed blocks waiting for attestations before finalization.
     /// Value: (header, result, operations, proposed_at_instant)
     pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
+    /// Reward events from epoch transitions, included in the next block's receipts.
+    pending_reward_receipts: Arc<RwLock<Vec<solen_execution::receipt::ExecutionReceipt>>>,
 }
 
 impl ConsensusEngine {
@@ -159,6 +161,7 @@ impl ConsensusEngine {
             epoch_manager: Arc::new(RwLock::new(epoch_manager)),
             pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
+            pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -204,7 +207,7 @@ impl ConsensusEngine {
         let op_count = ops.len();
 
         let mut store = self.store.write().unwrap();
-        let result = self.executor.execute_block(store.as_mut(), &ops);
+        let mut result = self.executor.execute_block(store.as_mut(), &ops);
 
         let (parent_hash, height) = {
             let chain = self.chain.read().unwrap();
@@ -215,6 +218,15 @@ impl ConsensusEngine {
             let h = chain.last().map(|b| b.header.height + 1).unwrap_or(1);
             (parent, h)
         };
+
+        // Include any pending reward receipts from the last epoch transition.
+        {
+            let mut pending = self.pending_reward_receipts.write().unwrap();
+            if !pending.is_empty() {
+                result.receipts.extend(pending.drain(..));
+                result.gas_used += 0; // rewards don't consume gas
+            }
+        }
 
         let epoch = {
             let em = self.epoch_manager.read().unwrap();
@@ -609,7 +621,9 @@ impl ConsensusEngine {
             }
         }
 
-        // Distribute to validators proportionally.
+        // Distribute to validators proportionally and generate receipts.
+        let mut reward_events = Vec::new();
+
         for validator in &active {
             let share = actual_reward * validator.total_stake() / total_stake;
             if share == 0 {
@@ -630,8 +644,32 @@ impl ConsensusEngine {
                     if let Ok(encoded) = borsh::to_vec(&account) {
                         let _ = store.put(&key, &encoded);
                     }
+
+                    // Build event data: validator_id[32] + amount[16]
+                    let mut event_data = Vec::with_capacity(48);
+                    event_data.extend_from_slice(&validator.id);
+                    event_data.extend_from_slice(&share.to_le_bytes());
+
+                    reward_events.push(solen_execution::receipt::Event {
+                        emitter: solen_types::system::STAKING_POOL_ADDRESS,
+                        topic: b"epoch_reward".to_vec(),
+                        data: event_data,
+                    });
                 }
             }
+        }
+
+        // Create a synthetic receipt for the reward distribution.
+        if !reward_events.is_empty() {
+            let receipt = solen_execution::receipt::ExecutionReceipt {
+                sender: solen_types::system::STAKING_POOL_ADDRESS,
+                nonce: 0,
+                success: true,
+                gas_used: 0,
+                error: None,
+                events: reward_events,
+            };
+            self.pending_reward_receipts.write().unwrap().push(receipt);
         }
 
         let epoch = self.epoch_manager.read().unwrap().current_epoch;

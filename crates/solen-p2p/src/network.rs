@@ -157,7 +157,6 @@ impl NetworkService {
             .listen_on(listen_addr)
             .map_err(|e| NetworkError::Listen(e.to_string()))?;
 
-        // Dial bootstrap peers and add them to Kademlia.
         for addr in &config.bootstrap_peers {
             info!(%addr, "dialing bootstrap peer");
             match swarm.dial(addr.clone()) {
@@ -271,10 +270,10 @@ impl NetworkService {
                                 debug!(%peer_id, ?cause, "peer disconnected");
                             }
                             SwarmEvent::OutgoingConnectionError { error, .. } => {
-                                warn!(%error, "outgoing connection failed");
+                                debug!(%error, "outgoing connection failed");
                             }
                             SwarmEvent::IncomingConnectionError { error, .. } => {
-                                warn!(%error, "incoming connection failed");
+                                debug!(%error, "incoming connection failed");
                             }
                             _ => {}
                         }

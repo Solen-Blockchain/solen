@@ -1,5 +1,5 @@
 [Unit]
-Description=Solen Testnet Node
+Description=Solen Testnet Validator 1 (Seed Node)
 After=network.target
 Wants=network-online.target
 
@@ -12,13 +12,11 @@ ExecStart=/opt/solen/bin/solen-node \
     --network testnet \
     --genesis /opt/solen/config/genesis.json \
     --data-dir /opt/solen/data/testnet \
-    --bootstrap /ip4/testnet-seed1.solenchain.com/tcp/40333 \
-    --bootstrap /ip4/testnet-seed2.solenchain.com/tcp/40333
+    --validator-seed 0101010101010101010101010101010101010101010101010101010101010101
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
 
-# Environment
 Environment=RUST_LOG=info
 
 [Install]

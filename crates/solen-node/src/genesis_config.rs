@@ -198,7 +198,7 @@ impl GenesisConfig {
             block_time_ms: 2000,
             epoch_length: 100,
             validators: vec![ValidatorConfig {
-                name: "validator-0".into(),
+                name: "validator-1".into(),
                 seed_hex: "01".repeat(32),
                 stake: 1_000_000,
             }],
@@ -236,18 +236,23 @@ impl GenesisConfig {
             epoch_length: 100,
             validators: vec![
                 ValidatorConfig {
-                    name: "validator-0".into(),
+                    name: "validator-1".into(),
                     seed_hex: "01".repeat(32),
                     stake: 1_000_000,
                 },
                 ValidatorConfig {
-                    name: "validator-1".into(),
+                    name: "validator-2".into(),
                     seed_hex: "02".repeat(32),
                     stake: 1_000_000,
                 },
                 ValidatorConfig {
-                    name: "validator-2".into(),
+                    name: "validator-3".into(),
                     seed_hex: "03".repeat(32),
+                    stake: 1_000_000,
+                },
+                ValidatorConfig {
+                    name: "validator-4".into(),
+                    seed_hex: "04".repeat(32),
                     stake: 1_000_000,
                 },
             ],

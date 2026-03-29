@@ -3,20 +3,22 @@ set -euo pipefail
 
 # Solen Testnet — Additional Validator Setup
 #
-# Run this on servers 2 and 3 to join the testnet.
-# Server 1 (seed node) should already be running via setup.sh.
+# Run this on servers 2, 3, and 4 to join the testnet.
+# Server 1 (validator-1 / seed node) should already be running via setup.sh.
 #
 # Usage:
-#   ./setup-validator.sh <validator-index>
+#   ./setup-validator.sh <validator-number>
 #
 # Examples:
-#   ./setup-validator.sh 1    # validator-1 (seed 0202...02)
-#   ./setup-validator.sh 2    # validator-2 (seed 0303...03)
+#   ./setup-validator.sh 2    # validator-2 (server 2)
+#   ./setup-validator.sh 3    # validator-3 (server 3)
+#   ./setup-validator.sh 4    # validator-4 (server 4)
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <validator-index>"
+    echo "Usage: $0 <validator-number>"
     echo ""
-    echo "  validator-index:  1 or 2 (validator-0 is the seed node)"
+    echo "  validator-number:  2, 3, or 4"
+    echo "  (validator-1 is the seed node — use setup.sh for that)"
     exit 1
 fi
 
@@ -24,10 +26,12 @@ INDEX=$1
 
 # Map index to seed.
 case $INDEX in
-    1) SEED="0202020202020202020202020202020202020202020202020202020202020202" ;;
-    2) SEED="0303030303030303030303030303030303030303030303030303030303030303" ;;
+    2) SEED="0202020202020202020202020202020202020202020202020202020202020202" ;;
+    3) SEED="0303030303030303030303030303030303030303030303030303030303030303" ;;
+    4) SEED="0404040404040404040404040404040404040404040404040404040404040404" ;;
     *)
-        echo "Error: validator-index must be 1 or 2"
+        echo "Error: validator-number must be 2, 3, or 4"
+        echo "  (validator-1 is the seed node — use setup.sh for that)"
         exit 1
         ;;
 esac
@@ -54,7 +58,7 @@ cargo build --release --bin solen-node --bin solen
 sudo cp target/release/solen-node /opt/solen/bin/
 sudo cp target/release/solen /opt/solen/bin/
 
-# Install genesis config (same genesis as seed node).
+# Install genesis config (must match seed node).
 sudo cp deploy/testnet/genesis.json /opt/solen/config/
 
 # Create systemd service for this validator.

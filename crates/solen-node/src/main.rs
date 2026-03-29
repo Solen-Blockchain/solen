@@ -210,6 +210,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // --- Consensus engine ---
+    // Build validator set from genesis config using public keys (not names).
+    let validator_set = {
+        use solen_consensus::validator::{ValidatorInfo, ValidatorSet};
+        let mut validators = Vec::new();
+        for v in &genesis.validators {
+            let seed = hex_decode(&v.seed_hex)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&seed);
+            let kp = Keypair::from_seed(&arr);
+            validators.push(ValidatorInfo::new(kp.public_key(), v.stake));
+        }
+        ValidatorSet::new(validators)
+    };
+
+    info!(
+        validator_id = hex(&validator_id),
+        validators = validator_set.active_count(),
+        "validator set initialized from genesis"
+    );
+
     let config = EngineConfig {
         block_time_ms: block_time,
         max_ops_per_block: 100,
@@ -217,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mempool = Mempool::new(10_000);
-    let engine = Arc::new(ConsensusEngine::new(config, store, mempool));
+    let engine = Arc::new(ConsensusEngine::with_validators(config, store, mempool, validator_set));
 
     // --- P2P networking ---
     let net_handle = if !cli.no_p2p {

@@ -356,15 +356,30 @@ async fn main() -> anyhow::Result<()> {
             info!("starting block production");
         }
 
-        let mut tick =
-            tokio::time::interval(tokio::time::Duration::from_millis(block_time));
+        // Poll frequently but enforce block_time between proposals.
+        let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(200));
+        let min_interval = std::time::Duration::from_millis(block_time);
+        let mut last_finalized_height = engine_clone.height();
+        let mut last_finalized_at = std::time::Instant::now();
 
         loop {
-            tick.tick().await;
+            poll.tick().await;
 
             if *shutdown_rx.borrow() {
                 info!("consensus engine stopping");
                 break;
+            }
+
+            // Track when new blocks finalize (from any source).
+            let current_height = engine_clone.height();
+            if current_height > last_finalized_height {
+                last_finalized_height = current_height;
+                last_finalized_at = std::time::Instant::now();
+            }
+
+            // Enforce minimum interval since last finalized block.
+            if last_finalized_at.elapsed() < min_interval {
+                continue;
             }
 
             // Only produce if it's our turn (or single-validator mode).
@@ -374,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
 
             if engine_clone.active_validator_count() <= 1 || (engine_clone.is_next_proposer() && !already_pending) {
                 let produced = engine_clone.produce_block();
+                last_finalized_at = std::time::Instant::now();
 
                 // Broadcast the proposed block with full operations.
                 if let Some(ref handle) = net_for_blocks {

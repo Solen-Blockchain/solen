@@ -6,7 +6,7 @@ use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity};
 use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{kad, mdns, noise, tcp, yamux, Multiaddr, SwarmBuilder};
+use libp2p::{identify, kad, mdns, noise, tcp, yamux, Multiaddr, SwarmBuilder};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -103,10 +103,19 @@ impl NetworkService {
         let mut kademlia = libp2p::kad::Behaviour::new(local_peer_id, kad_store);
         kademlia.set_mode(Some(libp2p::kad::Mode::Server));
 
+        // Identify protocol — exchanges peer info and keeps connections alive.
+        let identify = libp2p::identify::Behaviour::new(
+            libp2p::identify::Config::new(
+                "/solen/1.0.0".to_string(),
+                local_key.public(),
+            )
+            .with_push_listen_addr_updates(true),
+        );
+
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-        let behaviour = SolenBehaviour { gossipsub, kademlia, mdns };
+        let behaviour = SolenBehaviour { gossipsub, kademlia, identify, mdns };
 
         let total_limit = config.max_inbound + config.max_outbound;
 
@@ -230,6 +239,16 @@ impl NetworkService {
                                     swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                                 }
                             }
+                            SwarmEvent::Behaviour(SolenBehaviourEvent::Identify(
+                                identify::Event::Received { peer_id, info, .. },
+                            )) => {
+                                // Add the peer's listen addresses to Kademlia for discovery.
+                                for addr in &info.listen_addrs {
+                                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                                }
+                                debug!(%peer_id, addrs = info.listen_addrs.len(), "identify received");
+                            }
+                            SwarmEvent::Behaviour(SolenBehaviourEvent::Identify(_)) => {}
                             SwarmEvent::NewListenAddr { address, .. } => {
                                 info!(%address, "listening on");
                             }
@@ -243,13 +262,13 @@ impl NetworkService {
                                 // Other Kademlia events (query results, etc.)
                             }
                             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                                info!(%peer_id, ?endpoint, "peer connected");
+                                debug!(%peer_id, ?endpoint, "peer connected");
                                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                                 // Add to Kademlia so other peers can discover this one.
                                 swarm.behaviour_mut().kademlia.add_address(&peer_id, endpoint.get_remote_address().clone());
                             }
                             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                                info!(%peer_id, ?cause, "peer disconnected");
+                                debug!(%peer_id, ?cause, "peer disconnected");
                             }
                             SwarmEvent::OutgoingConnectionError { error, .. } => {
                                 warn!(%error, "outgoing connection failed");

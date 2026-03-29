@@ -89,6 +89,19 @@ impl IndexStore {
         self.blocks.iter().rev().take(limit).collect()
     }
 
+    pub fn get_tx(&self, block_height: u64, index: usize) -> Option<&IndexedTx> {
+        self.transactions
+            .iter()
+            .find(|tx| tx.block_height == block_height && tx.index == index)
+    }
+
+    pub fn get_block_txs(&self, block_height: u64) -> Vec<&IndexedTx> {
+        self.transactions
+            .iter()
+            .filter(|tx| tx.block_height == block_height)
+            .collect()
+    }
+
     pub fn get_account_txs(&self, account: &str, limit: usize) -> Vec<&IndexedTx> {
         self.account_txs
             .get(account)

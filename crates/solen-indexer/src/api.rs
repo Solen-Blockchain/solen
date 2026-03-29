@@ -58,6 +58,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/blocks", get(get_blocks))
         .route("/api/blocks/:height", get(get_block))
+        .route("/api/blocks/:height/txs", get(get_block_txs))
+        .route("/api/tx/:height/:index", get(get_tx))
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
@@ -93,6 +95,22 @@ async fn get_block(
 ) -> Json<Option<IndexedBlock>> {
     let store = state.store.read().unwrap();
     Json(store.get_block(height).cloned())
+}
+
+async fn get_block_txs(
+    State(state): State<ApiState>,
+    Path(height): Path<u64>,
+) -> Json<Vec<IndexedTx>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_block_txs(height).into_iter().cloned().collect())
+}
+
+async fn get_tx(
+    State(state): State<ApiState>,
+    Path((height, index)): Path<(u64, usize)>,
+) -> Json<Option<IndexedTx>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_tx(height, index).cloned())
 }
 
 async fn get_account_txs(

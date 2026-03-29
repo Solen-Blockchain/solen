@@ -78,12 +78,27 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 }
 
 /// Run the indexer as a background task, polling the consensus engine for new blocks.
+/// On startup, replays persisted blocks from the state store so historical
+/// data is available in the explorer.
 pub async fn run_indexer(
     engine: Arc<ConsensusEngine>,
     index_store: Arc<RwLock<IndexStore>>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut last_indexed = 0u64;
+    // Replay persisted blocks from previous sessions.
+    let persisted = engine.load_persisted_blocks();
+    if !persisted.is_empty() {
+        let count = persisted.len();
+        {
+            let mut store = index_store.write().unwrap();
+            for block in &persisted {
+                index_block(&mut store, block);
+            }
+        }
+        tracing::info!(blocks = count, "replayed persisted blocks into indexer");
+    }
+
+    let mut last_indexed = engine.height();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
 
     loop {

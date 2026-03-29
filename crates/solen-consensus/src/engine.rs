@@ -263,6 +263,7 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
+            self.persist_block(&block);
 
             // Persist chain height.
             {
@@ -528,6 +529,7 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
+            self.persist_block(&block);
 
             // Persist chain height.
             {
@@ -682,6 +684,39 @@ impl ConsensusEngine {
         );
     }
 
+    /// Persist a finalized block to the state store for replay after restart.
+    fn persist_block(&self, block: &FinalizedBlock) {
+        let key = format!("block/{}", block.header.height);
+        if let Ok(data) = serde_json::to_vec(&SerializableBlock::from(block)) {
+            let mut store = self.store.write().unwrap();
+            let _ = store.put(key.as_bytes(), &data);
+        }
+    }
+
+    /// Load all persisted blocks from the state store (for indexer replay).
+    pub fn load_persisted_blocks(&self) -> Vec<FinalizedBlock> {
+        let store = self.store.read().unwrap();
+        let mut blocks = Vec::new();
+        let mut height = 1u64;
+
+        loop {
+            let key = format!("block/{}", height);
+            match store.get(key.as_bytes()) {
+                Ok(Some(data)) => {
+                    if let Ok(sb) = serde_json::from_slice::<SerializableBlock>(&data) {
+                        blocks.push(sb.into());
+                        height += 1;
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        blocks
+    }
+
     /// Check if a block is pending at the given height (proposed but not finalized).
     pub fn has_pending_block(&self, height: u64) -> bool {
         self.pending_blocks.read().unwrap().contains_key(&height)
@@ -800,6 +835,40 @@ fn load_chain_meta(store: &dyn StateStore) -> (u64, u64) {
             (u64::from_le_bytes(h), u64::from_le_bytes(e))
         }
         _ => (0, 0),
+    }
+}
+
+/// Serializable block for persistence (BlockResult doesn't derive Serialize).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerializableBlock {
+    header: BlockHeader,
+    state_root: [u8; 32],
+    receipts: Vec<solen_execution::receipt::ExecutionReceipt>,
+    gas_used: u64,
+}
+
+impl From<&FinalizedBlock> for SerializableBlock {
+    fn from(b: &FinalizedBlock) -> Self {
+        Self {
+            header: b.header.clone(),
+            state_root: b.result.state_root,
+            receipts: b.result.receipts.clone(),
+            gas_used: b.result.gas_used,
+        }
+    }
+}
+
+impl From<SerializableBlock> for FinalizedBlock {
+    fn from(sb: SerializableBlock) -> Self {
+        Self {
+            header: sb.header,
+            result: BlockResult {
+                state_root: sb.state_root,
+                receipts: sb.receipts,
+                gas_used: sb.gas_used,
+            },
+            attestations: vec![],
+        }
     }
 }
 

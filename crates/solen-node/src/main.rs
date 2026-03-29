@@ -348,6 +348,14 @@ async fn main() -> anyhow::Result<()> {
     let engine_clone = engine.clone();
     let net_for_blocks = net_handle.clone();
     let consensus_handle = tokio::spawn(async move {
+        // Wait for P2P mesh to form before producing blocks.
+        // Gossipsub needs several heartbeats to build the mesh after peers connect.
+        if engine_clone.active_validator_count() > 1 {
+            info!("waiting 15s for P2P mesh to form before block production...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            info!("starting block production");
+        }
+
         let mut tick =
             tokio::time::interval(tokio::time::Duration::from_millis(block_time));
 
@@ -360,7 +368,11 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Only produce if it's our turn (or single-validator mode).
-            if engine_clone.active_validator_count() <= 1 || engine_clone.is_next_proposer() {
+            // Don't re-propose if we already proposed at this height.
+            let next_height = engine_clone.height() + 1;
+            let already_pending = engine_clone.has_pending_block(next_height);
+
+            if engine_clone.active_validator_count() <= 1 || (engine_clone.is_next_proposer() && !already_pending) {
                 let produced = engine_clone.produce_block();
 
                 // Broadcast the proposed block with full operations.

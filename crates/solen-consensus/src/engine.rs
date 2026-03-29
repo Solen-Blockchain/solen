@@ -412,6 +412,11 @@ impl ConsensusEngine {
         }
     }
 
+    /// Check if a block is pending at the given height (proposed but not finalized).
+    pub fn has_pending_block(&self, height: u64) -> bool {
+        self.pending_blocks.read().unwrap().contains_key(&height)
+    }
+
     /// Number of active validators.
     pub fn active_validator_count(&self) -> usize {
         self.validator_set.read().unwrap().active_count()

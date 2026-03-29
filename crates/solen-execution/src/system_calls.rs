@@ -118,10 +118,14 @@ fn execute_staking_call(
 
             match staking.delegate(*sender, validator, amount) {
                 Ok(()) => {
+                    // Data: validator[32] + amount[16 LE]
+                    let mut data = Vec::with_capacity(48);
+                    data.extend_from_slice(&validator);
+                    data.extend_from_slice(&amount.to_le_bytes());
                     events.push(Event {
                         emitter: STAKING_ADDRESS,
                         topic: b"delegate".to_vec(),
-                        data: amount.to_le_bytes().to_vec(),
+                        data,
                     });
                     Ok(())
                 }
@@ -142,10 +146,13 @@ fn execute_staking_call(
 
             match staking.undelegate(*sender, validator, amount, epoch) {
                 Ok(()) => {
+                    let mut data = Vec::with_capacity(48);
+                    data.extend_from_slice(&validator);
+                    data.extend_from_slice(&amount.to_le_bytes());
                     events.push(Event {
                         emitter: STAKING_ADDRESS,
                         topic: b"undelegate".to_vec(),
-                        data: amount.to_le_bytes().to_vec(),
+                        data,
                     });
                     Ok(())
                 }

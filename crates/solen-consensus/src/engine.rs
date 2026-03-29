@@ -206,8 +206,10 @@ impl ConsensusEngine {
         let ops = self.mempool.drain(self.config.max_ops_per_block);
         let op_count = ops.len();
 
-        let mut store = self.store.write().unwrap();
-        let mut result = self.executor.execute_block(store.as_mut(), &ops);
+        let mut result = {
+            let mut store = self.store.write().unwrap();
+            self.executor.execute_block(store.as_mut(), &ops)
+        }; // store lock released here
 
         let (parent_hash, height) = {
             let chain = self.chain.read().unwrap();
@@ -224,7 +226,6 @@ impl ConsensusEngine {
             let mut pending = self.pending_reward_receipts.write().unwrap();
             if !pending.is_empty() {
                 result.receipts.extend(pending.drain(..));
-                result.gas_used += 0; // rewards don't consume gas
             }
         }
 
@@ -413,21 +414,21 @@ impl ConsensusEngine {
         }
 
         // Execute the operations against our current state.
-        let mut store = self.store.write().unwrap();
-        let result = self.executor.execute_block(store.as_mut(), operations);
+        let result = {
+            let mut store = self.store.write().unwrap();
+            self.executor.execute_block(store.as_mut(), operations)
+        }; // store lock released
 
         // If this is an epoch boundary, distribute rewards (same as proposer did).
-        let epoch_mgr = self.epoch_manager.read().unwrap();
-        if epoch_mgr.is_epoch_boundary(header.height) {
-            drop(epoch_mgr);
-            drop(store);
-            self.distribute_epoch_rewards();
-        } else {
-            drop(epoch_mgr);
-            drop(store);
+        {
+            let em = self.epoch_manager.read().unwrap();
+            if em.is_epoch_boundary(header.height) {
+                drop(em);
+                self.distribute_epoch_rewards();
+            }
         }
 
-        // Re-read state root after potential reward distribution.
+        // Read state root after execution + potential rewards.
         let current_root = self.store.read().unwrap().state_root();
 
         // For the next block after our height, verify state root.

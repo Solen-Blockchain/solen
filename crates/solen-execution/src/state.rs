@@ -162,7 +162,9 @@ impl<'a> StateManager<'a> {
             Some(acc) => acc,
             None => {
                 // Auto-create recipient account on first transfer.
-                self.create_account(*to, vec![], 0)?;
+                // Since account ID = public key, use it as the auth method.
+                let auth = vec![AuthMethod::Ed25519 { public_key: *to }];
+                self.create_account(*to, auth, 0)?;
                 self.require_account(to)?
             }
         };

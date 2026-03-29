@@ -455,8 +455,8 @@ async fn main() -> anyhow::Result<()> {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
         if engine_clone.active_validator_count() > 1 {
-            info!("waiting 15s for P2P mesh to form before block production...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            info!("waiting 10s for P2P mesh to form before block production...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             info!("starting block production");
         }
 
@@ -476,7 +476,16 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Force-finalize blocks stuck waiting for quorum.
-            engine_clone.finalize_timed_out_blocks(quorum_timeout);
+            let force_finalized = engine_clone.finalize_timed_out_blocks(quorum_timeout);
+
+            // If we force-finalized, broadcast status so peers can sync.
+            if force_finalized > 0 {
+                if let Some(ref handle) = net_for_blocks {
+                    let height = engine_clone.height();
+                    let state_root = engine_clone.store().read().unwrap().state_root();
+                    handle.broadcast(NetworkMessage::StatusAnnounce { height, state_root });
+                }
+            }
 
             // Track when new blocks finalize (from any source).
             let current_height = engine_clone.height();

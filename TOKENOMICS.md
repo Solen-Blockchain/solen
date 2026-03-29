@@ -8,7 +8,7 @@ The native token of the Solen network. Used for staking, fees, governance, and s
 |-----------|-------|
 | **Total initial supply** | 2,000,000,000 (2B) |
 | **Token symbol** | SOLEN |
-| **Smallest unit** | 1 (no decimals in base unit; UIs display with 18 decimal places) |
+| **Decimals** | 8 (1 SOLEN = 100,000,000 base units) |
 | **Inflation** | None at launch. Validator rewards come from the staking allocation. Governance can vote to enable inflation if the staking pool is depleted. |
 
 ## Initial Distribution

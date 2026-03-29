@@ -60,12 +60,20 @@ impl IndexStore {
         self.blocks.push(block);
     }
 
-    pub fn add_tx(&mut self, tx: IndexedTx) {
+    pub fn add_tx(&mut self, tx: IndexedTx, related_accounts: &[String]) {
         let idx = self.transactions.len();
         self.account_txs
             .entry(tx.sender.clone())
             .or_default()
             .push(idx);
+        for account in related_accounts {
+            if account != &tx.sender {
+                self.account_txs
+                    .entry(account.clone())
+                    .or_default()
+                    .push(idx);
+            }
+        }
         self.transactions.push(tx);
     }
 

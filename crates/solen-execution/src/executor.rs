@@ -330,10 +330,14 @@ impl BlockExecutor {
         match action {
             Action::Transfer { to, amount } => {
                 state.transfer(sender, to, *amount)?;
+                // Emit event with recipient + amount in data.
+                let mut data = Vec::with_capacity(32 + 16);
+                data.extend_from_slice(to);
+                data.extend_from_slice(&amount.to_le_bytes());
                 events.push(Event {
                     emitter: *sender,
                     topic: b"transfer".to_vec(),
-                    data: amount.to_le_bytes().to_vec(),
+                    data,
                 });
                 Ok(TRANSFER_GAS)
             }

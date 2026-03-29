@@ -158,7 +158,14 @@ impl<'a> StateManager<'a> {
         sender.balance -= amount;
         self.save_account(&sender)?;
 
-        let mut receiver = self.require_account(to)?;
+        let mut receiver = match self.get_account(to)? {
+            Some(acc) => acc,
+            None => {
+                // Auto-create recipient account on first transfer.
+                self.create_account(*to, vec![], 0)?;
+                self.require_account(to)?
+            }
+        };
         receiver.balance += amount;
         self.save_account(&receiver)?;
 

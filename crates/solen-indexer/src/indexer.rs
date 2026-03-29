@@ -26,17 +26,33 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
     store.add_block(block_summary);
 
     for (i, receipt) in block.result.receipts.iter().enumerate() {
+        let mut related_accounts: Vec<String> = Vec::new();
+
         let events: Vec<IndexedEvent> = receipt
             .events
             .iter()
             .map(|e| {
-                let ie = IndexedEvent {
+                // For transfer events, extract the recipient from the data field.
+                // Data format: [recipient_id (32 bytes)][amount (16 bytes)]
+                if e.topic == b"transfer" && e.data.len() >= 32 {
+                    let recipient = hex(&e.data[..32]);
+                    if !related_accounts.contains(&recipient) {
+                        related_accounts.push(recipient);
+                    }
+                }
+
+                // Also track event emitters as related accounts.
+                let emitter_hex = hex(&e.emitter);
+                if !related_accounts.contains(&emitter_hex) {
+                    related_accounts.push(emitter_hex.clone());
+                }
+
+                IndexedEvent {
                     block_height: block.header.height,
                     tx_index: i,
-                    emitter: hex(&e.emitter),
+                    emitter: emitter_hex,
                     topic: String::from_utf8_lossy(&e.topic).to_string(),
-                };
-                ie
+                }
             })
             .collect();
 
@@ -54,7 +70,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
             error: receipt.error.clone(),
             events,
         };
-        store.add_tx(tx);
+        store.add_tx(tx, &related_accounts);
     }
 
     debug!(height = block.header.height, "indexed block");

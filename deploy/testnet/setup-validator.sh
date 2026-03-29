@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Solen Testnet — Additional Validator Setup
+#
+# Run this on servers 2 and 3 to join the testnet.
+# Server 1 (seed node) should already be running via setup.sh.
+#
+# Usage:
+#   ./setup-validator.sh <validator-index>
+#
+# Examples:
+#   ./setup-validator.sh 1    # validator-1 (seed 0202...02)
+#   ./setup-validator.sh 2    # validator-2 (seed 0303...03)
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <validator-index>"
+    echo ""
+    echo "  validator-index:  1 or 2 (validator-0 is the seed node)"
+    exit 1
+fi
+
+INDEX=$1
+
+# Map index to seed.
+case $INDEX in
+    1) SEED="0202020202020202020202020202020202020202020202020202020202020202" ;;
+    2) SEED="0303030303030303030303030303030303030303030303030303030303030303" ;;
+    *)
+        echo "Error: validator-index must be 1 or 2"
+        exit 1
+        ;;
+esac
+
+echo "=== Solen Testnet — Validator $INDEX Setup ==="
+echo ""
+
+# Create solen user if needed.
+if ! id -u solen &>/dev/null; then
+    sudo useradd -r -m -s /bin/bash solen
+    echo "Created solen user"
+fi
+
+# Create directories.
+sudo mkdir -p /opt/solen/{bin,config,data/testnet}
+sudo chown -R solen:solen /opt/solen
+
+# Build release binaries.
+echo "Building release binaries..."
+export C_INCLUDE_PATH=${C_INCLUDE_PATH:-/usr/lib/gcc/x86_64-linux-gnu/11/include}
+cargo build --release --bin solen-node --bin solen
+
+# Install binaries.
+sudo cp target/release/solen-node /opt/solen/bin/
+sudo cp target/release/solen /opt/solen/bin/
+
+# Install genesis config (same genesis as seed node).
+sudo cp deploy/testnet/genesis.json /opt/solen/config/
+
+# Create systemd service for this validator.
+cat <<EOF | sudo tee /etc/systemd/system/solen-node.service > /dev/null
+[Unit]
+Description=Solen Testnet Validator $INDEX
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solen
+Group=solen
+WorkingDirectory=/opt/solen
+ExecStart=/opt/solen/bin/solen-node \\
+    --network testnet \\
+    --genesis /opt/solen/config/genesis.json \\
+    --data-dir /opt/solen/data/testnet \\
+    --validator-seed $SEED \\
+    --bootstrap /ip4/testnet-seed1.solenchain.com/tcp/40333
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+
+echo ""
+echo "=== Setup Complete ==="
+echo ""
+echo "Start the validator:"
+echo "  sudo systemctl start solen-node"
+echo ""
+echo "Enable on boot:"
+echo "  sudo systemctl enable solen-node"
+echo ""
+echo "View logs:"
+echo "  journalctl -u solen-node -f"
+echo ""
+echo "Check status:"
+echo "  /opt/solen/bin/solen --rpc http://127.0.0.1:19944 status"
+echo ""
+echo "This node will connect to testnet-seed1.solenchain.com"
+echo "and participate as validator-$INDEX in consensus."

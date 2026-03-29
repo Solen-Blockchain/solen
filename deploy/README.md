@@ -2,6 +2,13 @@
 
 Deployment configurations for running Solen network infrastructure.
 
+## Subdomain Scheme
+
+| Network | RPC | Faucet | API | P2P Seeds |
+|---------|-----|--------|-----|-----------|
+| **Mainnet** | `rpc.solenchain.com` | — | `api.solenchain.com` | `seed1.solenchain.com` |
+| **Testnet** | `testnet-rpc.solenchain.com` | `testnet-faucet.solenchain.com` | `testnet-api.solenchain.com` | `testnet-seed1.solenchain.com` |
+
 ## Testnet
 
 The `testnet/` directory contains everything needed to run a public testnet:
@@ -13,16 +20,6 @@ The `testnet/` directory contains everything needed to run a public testnet:
 | `solen-faucet.service` | systemd unit for the faucet HTTP service |
 | `nginx.conf` | Reverse proxy for public endpoints |
 | `setup.sh` | Automated deployment script |
-
-### Public Endpoints
-
-| Service | URL | Port (internal) |
-|---------|-----|-----------------|
-| JSON-RPC | `https://rpc.solenchain.com` | 19944 |
-| Faucet | `https://faucet.solenchain.com` | 8080 |
-| Explorer API | `https://api.solenchain.com` | 19955 |
-| Explorer | `https://explorer.solenchain.com` | (solenscan) |
-| P2P | `seed1.solenchain.com:40333` | 40333 |
 
 ### Quick Deploy
 
@@ -37,7 +34,7 @@ sudo systemctl start solen-node solen-faucet
 ### Get Testnet Tokens
 
 ```bash
-curl -X POST https://faucet.solenchain.com/drip \
+curl -X POST https://testnet-faucet.solenchain.com/drip \
   -H "Content-Type: application/json" \
   -d '{"account": "myaccount"}'
 ```
@@ -45,16 +42,16 @@ curl -X POST https://faucet.solenchain.com/drip \
 Or with the CLI:
 
 ```bash
-solen --rpc https://rpc.solenchain.com key generate mykey
-# Then request tokens at faucet.solenchain.com
+solen --rpc https://testnet-rpc.solenchain.com key generate mykey
+# Then request tokens at testnet-faucet.solenchain.com
 ```
 
 ### DNS Records
 
 | Record | Type | Value |
 |--------|------|-------|
-| `rpc.solenchain.com` | A | `<server IP>` |
-| `faucet.solenchain.com` | A | `<server IP>` |
-| `api.solenchain.com` | A | `<server IP>` |
-| `seed1.solenchain.com` | A | `<server IP>` |
-| `seed2.solenchain.com` | A | `<server 2 IP>` |
+| `testnet-rpc.solenchain.com` | A | `<server IP>` |
+| `testnet-faucet.solenchain.com` | A | `<server IP>` |
+| `testnet-api.solenchain.com` | A | `<server IP>` |
+| `testnet-seed1.solenchain.com` | A | `<server IP>` |
+| `testnet-seed2.solenchain.com` | A | `<server 2 IP>` |

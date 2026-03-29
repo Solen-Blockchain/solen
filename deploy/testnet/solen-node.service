@@ -12,8 +12,8 @@ ExecStart=/opt/solen/bin/solen-node \
     --network testnet \
     --genesis /opt/solen/config/genesis.json \
     --data-dir /opt/solen/data/testnet \
-    --bootstrap /ip4/seed1.solenchain.com/tcp/40333 \
-    --bootstrap /ip4/seed2.solenchain.com/tcp/40333
+    --bootstrap /ip4/testnet-seed1.solenchain.com/tcp/40333 \
+    --bootstrap /ip4/testnet-seed2.solenchain.com/tcp/40333
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

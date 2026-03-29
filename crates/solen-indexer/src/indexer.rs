@@ -52,6 +52,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                     tx_index: i,
                     emitter: emitter_hex,
                     topic: String::from_utf8_lossy(&e.topic).to_string(),
+                    data: hex(&e.data),
                 }
             })
             .collect();

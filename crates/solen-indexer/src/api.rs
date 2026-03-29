@@ -60,6 +60,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/blocks/:height", get(get_block))
         .route("/api/blocks/:height/txs", get(get_block_txs))
         .route("/api/tx/:height/:index", get(get_tx))
+        .route("/api/txs", get(get_recent_txs))
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
@@ -111,6 +112,14 @@ async fn get_tx(
 ) -> Json<Option<IndexedTx>> {
     let store = state.store.read().unwrap();
     Json(store.get_tx(height, index).cloned())
+}
+
+async fn get_recent_txs(
+    State(state): State<ApiState>,
+    Query(params): Query<PaginationParams>,
+) -> Json<Vec<IndexedTx>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_recent_txs(params.limit).into_iter().cloned().collect())
 }
 
 async fn get_account_txs(

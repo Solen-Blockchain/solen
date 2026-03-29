@@ -37,6 +37,7 @@ pub struct IndexedEvent {
     pub tx_index: usize,
     pub emitter: String,
     pub topic: String,
+    pub data: String,
 }
 
 /// In-memory indexed store.
@@ -100,6 +101,10 @@ impl IndexStore {
             .iter()
             .filter(|tx| tx.block_height == block_height)
             .collect()
+    }
+
+    pub fn get_recent_txs(&self, limit: usize) -> Vec<&IndexedTx> {
+        self.transactions.iter().rev().take(limit).collect()
     }
 
     pub fn get_account_txs(&self, account: &str, limit: usize) -> Vec<&IndexedTx> {

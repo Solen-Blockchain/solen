@@ -359,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
         // Poll frequently but enforce block_time between proposals.
         let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(200));
         let min_interval = std::time::Duration::from_millis(block_time);
+        let quorum_timeout = std::time::Duration::from_secs(10);
         let mut last_finalized_height = engine_clone.height();
         let mut last_finalized_at = std::time::Instant::now();
 
@@ -369,6 +370,9 @@ async fn main() -> anyhow::Result<()> {
                 info!("consensus engine stopping");
                 break;
             }
+
+            // Force-finalize blocks stuck waiting for quorum.
+            engine_clone.finalize_timed_out_blocks(quorum_timeout);
 
             // Track when new blocks finalize (from any source).
             let current_height = engine_clone.height();

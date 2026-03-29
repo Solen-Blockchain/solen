@@ -91,7 +91,8 @@ pub struct ConsensusEngine {
     /// Pending attestations for blocks not yet finalized, keyed by block height.
     pending_attestations: Arc<RwLock<HashMap<u64, Vec<Attestation>>>>,
     /// Proposed blocks waiting for attestations before finalization.
-    pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>)>>>,
+    /// Value: (header, result, operations, proposed_at_instant)
+    pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
 }
 
 impl ConsensusEngine {
@@ -237,7 +238,7 @@ impl ConsensusEngine {
             // wait for peer attestations to reach quorum.
             self.pending_blocks.write().unwrap().insert(
                 height,
-                (header.clone(), result, ops.clone()),
+                (header.clone(), result, ops.clone(), std::time::Instant::now()),
             );
 
             // Self-attest.
@@ -319,7 +320,7 @@ impl ConsensusEngine {
         // Store as pending, waiting for attestations.
         self.pending_blocks.write().unwrap().insert(
             header.height,
-            (header.clone(), result, operations.to_vec()),
+            (header.clone(), result, operations.to_vec(), std::time::Instant::now()),
         );
 
         info!(
@@ -386,7 +387,7 @@ impl ConsensusEngine {
             .remove(&height)
             .unwrap_or_default();
 
-        if let Some((header, result, _ops)) = block_data {
+        if let Some((header, result, _ops, _proposed_at)) = block_data {
             let block = FinalizedBlock {
                 header: header.clone(),
                 result,
@@ -415,6 +416,27 @@ impl ConsensusEngine {
     /// Check if a block is pending at the given height (proposed but not finalized).
     pub fn has_pending_block(&self, height: u64) -> bool {
         self.pending_blocks.read().unwrap().contains_key(&height)
+    }
+
+    /// Force-finalize any pending blocks that have been waiting longer than
+    /// the timeout. This prevents the chain from stalling when validators
+    /// are offline and quorum can't be reached.
+    pub fn finalize_timed_out_blocks(&self, timeout: std::time::Duration) -> usize {
+        let stale_heights: Vec<u64> = {
+            let blocks = self.pending_blocks.read().unwrap();
+            blocks
+                .iter()
+                .filter(|(_, (_, _, _, proposed_at))| proposed_at.elapsed() > timeout)
+                .map(|(h, _)| *h)
+                .collect()
+        };
+
+        let count = stale_heights.len();
+        for height in stale_heights {
+            warn!(height, "quorum timeout — force-finalizing block");
+            self.finalize_pending_block(height);
+        }
+        count
     }
 
     /// Number of active validators.

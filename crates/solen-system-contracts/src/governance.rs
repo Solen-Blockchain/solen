@@ -197,11 +197,17 @@ impl GovernanceContract {
         }
 
         let total_voted = proposal.total_for + proposal.total_against;
-        let quorum_met = total_stake > 0
-            && total_voted * 10_000 / total_stake >= QUORUM_BPS as u128;
 
+        // Use multiplication instead of division to avoid precision loss.
+        // quorum: total_voted / total_stake >= QUORUM_BPS / 10_000
+        //   →     total_voted * 10_000 >= total_stake * QUORUM_BPS
+        let quorum_met = total_stake > 0
+            && total_voted * 10_000 >= total_stake * QUORUM_BPS as u128;
+
+        // threshold: total_for / total_voted >= PASS_THRESHOLD_BPS / 10_000
+        //   →        total_for * 10_000 >= total_voted * PASS_THRESHOLD_BPS
         let threshold_met = total_voted > 0
-            && proposal.total_for * 10_000 / total_voted >= PASS_THRESHOLD_BPS as u128;
+            && proposal.total_for * 10_000 >= total_voted * PASS_THRESHOLD_BPS as u128;
 
         proposal.status = if quorum_met && threshold_met {
             ProposalStatus::Passed

@@ -93,24 +93,18 @@ impl GenesisConfig {
     }
 
     /// Apply this genesis config to a state store.
+    ///
+    /// Account IDs are derived from public keys. The account address
+    /// IS the Ed25519 public key — no hashing, no name-based derivation.
     pub fn apply(&self, store: &mut dyn StateStore) -> Result<()> {
         let mut genesis_accounts = Vec::new();
 
-        // Add validator accounts.
+        // Add validator accounts. Account ID = public key.
         for v in &self.validators {
-            let public_key = if let Some(seed_hex) = &v.seed_hex {
-                // Testnet: derive public key from seed.
-                let seed = hex_decode_32(seed_hex)?;
-                let kp = Keypair::from_seed(&seed);
-                kp.public_key()
-            } else if let Some(pk_hex) = &v.public_key_hex {
-                // Mainnet: use public key directly.
-                hex_decode_32(pk_hex)?
-            } else {
-                anyhow::bail!("validator '{}' needs either seed_hex or public_key_hex", v.name);
-            };
+            let public_key = resolve_validator_pubkey(v)?;
 
-            let id = name_to_id(&v.name);
+            // Account ID IS the public key.
+            let id = public_key;
 
             genesis_accounts.push(GenesisAccount {
                 id,
@@ -120,8 +114,7 @@ impl GenesisConfig {
 
             info!(
                 name = %v.name,
-                id = hex_encode(&id),
-                pubkey = hex_encode(&public_key),
+                address = hex_encode(&id),
                 stake = v.stake,
                 "genesis validator"
             );
@@ -129,23 +122,30 @@ impl GenesisConfig {
 
         // Add allocated accounts.
         for a in &self.accounts {
-            let id = match &a.id_hex {
-                Some(hex) => hex_decode_32(hex)?,
-                None => name_to_id(&a.name),
-            };
-
-            let auth_methods = if let Some(seed_hex) = &a.seed_hex {
+            let (public_key, auth_methods) = if let Some(seed_hex) = &a.seed_hex {
                 let seed = hex_decode_32(seed_hex)?;
                 let kp = Keypair::from_seed(&seed);
-                vec![AuthMethod::Ed25519 {
-                    public_key: kp.public_key(),
-                }]
+                let pk = kp.public_key();
+                (pk, vec![AuthMethod::Ed25519 { public_key: pk }])
             } else if let Some(pk_hex) = &a.public_key_hex {
                 let pk = hex_decode_32(pk_hex)?;
-                vec![AuthMethod::Ed25519 { public_key: pk }]
+                (pk, vec![AuthMethod::Ed25519 { public_key: pk }])
+            } else if let Some(id_hex) = &a.id_hex {
+                // Explicit ID with no auth (e.g., treasury).
+                let id = hex_decode_32(id_hex)?;
+                genesis_accounts.push(GenesisAccount {
+                    id,
+                    balance: a.balance,
+                    auth_methods: vec![],
+                });
+                info!(name = %a.name, address = hex_encode(&id), balance = a.balance, "genesis account (no auth)");
+                continue;
             } else {
-                vec![]
+                anyhow::bail!("account '{}' needs seed_hex, public_key_hex, or id_hex", a.name);
             };
+
+            // Account ID IS the public key.
+            let id = public_key;
 
             genesis_accounts.push(GenesisAccount {
                 id,
@@ -155,38 +155,36 @@ impl GenesisConfig {
 
             info!(
                 name = %a.name,
-                id = hex_encode(&id),
+                address = hex_encode(&id),
                 balance = a.balance,
                 "genesis account"
             );
         }
 
-        // Add faucet account.
+        // Add faucet account. Account ID = faucet's public key.
         if let Some(faucet) = &self.faucet {
             let seed = hex_decode_32(&faucet.seed_hex)?;
             let kp = Keypair::from_seed(&seed);
-            let id = name_to_id(&faucet.account_name);
+            let public_key = kp.public_key();
+            let id = public_key; // Account ID IS the public key.
 
             genesis_accounts.push(GenesisAccount {
                 id,
-                balance: 1_000_000_000_000, // 1T tokens for faucet
-                auth_methods: vec![AuthMethod::Ed25519 {
-                    public_key: kp.public_key(),
-                }],
+                balance: 1_000_000_000_000,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key }],
             });
 
             info!(
                 name = %faucet.account_name,
-                id = hex_encode(&id),
+                address = hex_encode(&id),
                 drip = faucet.drip_amount,
                 "genesis faucet"
             );
         }
 
-        // Add treasury account.
-        let treasury_id = name_to_id("treasury");
+        // Treasury account — uses a well-known constant address (no keypair).
         genesis_accounts.push(GenesisAccount {
-            id: treasury_id,
+            id: TREASURY_ADDRESS,
             balance: 0,
             auth_methods: vec![],
         });
@@ -286,12 +284,26 @@ impl GenesisConfig {
     }
 }
 
-fn name_to_id(name: &str) -> [u8; 32] {
-    let mut id = [0u8; 32];
-    let bytes = name.as_bytes();
-    let len = bytes.len().min(32);
-    id[..len].copy_from_slice(&bytes[..len]);
-    id
+/// Well-known treasury address (not derived from any keypair).
+/// This is a constant so all nodes agree on it.
+pub const TREASURY_ADDRESS: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x74, 0x72, 0x65, 0x61, 0x73, 0x75, 0x72, 0x79, // "treasury"
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+];
+
+/// Resolve a validator's public key from its config.
+pub fn resolve_validator_pubkey(v: &ValidatorConfig) -> Result<[u8; 32]> {
+    if let Some(seed_hex) = &v.seed_hex {
+        let seed = hex_decode_32(seed_hex)?;
+        let kp = Keypair::from_seed(&seed);
+        Ok(kp.public_key())
+    } else if let Some(pk_hex) = &v.public_key_hex {
+        hex_decode_32(pk_hex)
+    } else {
+        anyhow::bail!("validator '{}' needs either seed_hex or public_key_hex", v.name)
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

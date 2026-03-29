@@ -51,14 +51,12 @@ pub fn generate_key(name: &str) -> Result<StoredKey> {
     let kp = Keypair::from_seed(&seed);
     let public_key = kp.public_key();
 
-    // Account ID = name padded to 32 bytes (for devnet friendliness)
-    let account_id = name_to_account_id(name);
-
+    // Account ID = public key. Your address IS your public key.
     Ok(StoredKey {
         name: name.to_string(),
         seed_hex: hex_encode(&seed),
         public_key_hex: hex_encode(&public_key),
-        account_id_hex: hex_encode(&account_id),
+        account_id_hex: hex_encode(&public_key), // same as public key
     })
 }
 
@@ -71,13 +69,14 @@ pub fn import_key(name: &str, seed_hex: &str) -> Result<StoredKey> {
     seed.copy_from_slice(&seed_bytes);
 
     let kp = Keypair::from_seed(&seed);
-    let account_id = name_to_account_id(name);
+    let public_key = kp.public_key();
 
+    // Account ID = public key.
     Ok(StoredKey {
         name: name.to_string(),
         seed_hex: hex_encode(&seed),
-        public_key_hex: hex_encode(&kp.public_key()),
-        account_id_hex: hex_encode(&account_id),
+        public_key_hex: hex_encode(&public_key),
+        account_id_hex: hex_encode(&public_key), // same as public key
     })
 }
 

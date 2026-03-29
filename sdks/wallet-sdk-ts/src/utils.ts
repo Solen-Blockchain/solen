@@ -19,7 +19,11 @@ export function bytesToHex(bytes: number[] | Uint8Array): string {
     .join("");
 }
 
-/** Create a 32-byte account ID from a human-readable name (padded with zeros). */
+/**
+ * @deprecated Account IDs are now Ed25519 public keys.
+ * Use the public key hex directly as the account ID.
+ * This function only exists for backward compatibility with devnet scripts.
+ */
 export function nameToAccountId(name: string): number[] {
   const bytes = new Array(32).fill(0);
   const encoder = new TextEncoder();
@@ -30,7 +34,10 @@ export function nameToAccountId(name: string): number[] {
   return bytes;
 }
 
-/** Create a hex account ID from a name. */
+/**
+ * @deprecated Account IDs are now Ed25519 public keys.
+ * Use the public key hex directly as the account ID.
+ */
 export function nameToHex(name: string): string {
   return bytesToHex(nameToAccountId(name));
 }

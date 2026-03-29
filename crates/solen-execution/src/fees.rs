@@ -18,13 +18,19 @@ pub struct FeeConfig {
     pub burn_rate_bps: u64,
 }
 
+/// Well-known treasury address constant.
+pub const TREASURY_ADDRESS: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x74, 0x72, 0x65, 0x61, 0x73, 0x75, 0x72, 0x79,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+];
+
 impl Default for FeeConfig {
     fn default() -> Self {
-        let mut treasury = [0u8; 32];
-        treasury[..8].copy_from_slice(b"treasury");
         Self {
             base_fee_per_gas: 1,
-            treasury_account: treasury,
+            treasury_account: TREASURY_ADDRESS,
             burn_rate_bps: 5000, // 50% burned, 50% to treasury
         }
     }

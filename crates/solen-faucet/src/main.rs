@@ -329,13 +329,8 @@ async fn main() -> anyhow::Result<()> {
 
     let seed = hex_decode_32(&cli.seed)?;
     let keypair = Arc::new(Keypair::from_seed(&seed));
-    let faucet_id = {
-        let mut id = [0u8; 32];
-        let bytes = cli.account_name.as_bytes();
-        let len = bytes.len().min(32);
-        id[..len].copy_from_slice(&bytes[..len]);
-        id
-    };
+    // Faucet account ID = its public key.
+    let faucet_id = keypair.public_key();
 
     info!(
         port = cli.port,

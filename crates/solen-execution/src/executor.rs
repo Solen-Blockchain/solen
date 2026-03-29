@@ -458,9 +458,7 @@ mod tests {
     use crate::genesis::{apply_genesis, GenesisAccount};
 
     fn treasury_id() -> AccountId {
-        let mut id = [0u8; 32];
-        id[..8].copy_from_slice(b"treasury");
-        id
+        crate::fees::TREASURY_ADDRESS
     }
 
     fn setup() -> (MemoryStore, Keypair, AccountId, AccountId) {

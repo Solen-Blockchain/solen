@@ -347,6 +347,21 @@ impl ConsensusEngine {
             return false;
         }
 
+        // Verify parent hash matches our latest block (monotonicity check).
+        if header.height == expected_height {
+            let chain = self.chain.read().unwrap();
+            if let Some(last_block) = chain.last() {
+                let expected_parent = block_hash(&last_block.header);
+                if header.parent_hash != expected_parent && header.parent_hash != [0u8; 32] {
+                    warn!(
+                        height = header.height,
+                        "parent hash mismatch — possible fork, rejecting"
+                    );
+                    return false;
+                }
+            }
+        }
+
         if header.height > expected_height {
             // We're behind — fast-forward to catch up.
             // Skip to just before this block's height so we can accept it.

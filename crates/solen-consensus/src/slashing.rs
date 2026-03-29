@@ -56,11 +56,24 @@ pub fn check_double_sign(a: &BlockHeader, b: &BlockHeader) -> Option<SlashingEvi
     }
 }
 
-/// Process slashing evidence: apply penalty and jail the offender.
-pub fn process_slashing(validator_set: &mut ValidatorSet, evidence: &SlashingEvidence) {
+/// Result of processing slashing evidence.
+#[derive(Debug, Clone)]
+pub struct SlashingResult {
+    pub offender: ValidatorId,
+    pub penalty: u128,
+    pub remaining_stake: u128,
+    pub reason: String,
+}
+
+/// Process slashing evidence: apply penalty, jail the offender,
+/// and return a record for persistence.
+pub fn process_slashing(
+    validator_set: &mut ValidatorSet,
+    evidence: &SlashingEvidence,
+) -> Option<SlashingResult> {
     let penalty_bps = evidence.reason.penalty_bps();
 
-    if let Some(v) = validator_set.get_mut(&evidence.offender) {
+    let result = if let Some(v) = validator_set.get_mut(&evidence.offender) {
         let penalty = v.stake * penalty_bps as u128 / 10_000;
         v.stake = v.stake.saturating_sub(penalty);
         let remaining = v.stake;
@@ -71,8 +84,37 @@ pub fn process_slashing(validator_set: &mut ValidatorSet, evidence: &SlashingEvi
             remaining_stake = remaining,
             "validator slashed and jailed"
         );
-    }
+
+        Some(SlashingResult {
+            offender: evidence.offender,
+            penalty,
+            remaining_stake: remaining,
+            reason: format!("{:?}", evidence.reason),
+        })
+    } else {
+        None
+    };
+
     validator_set.jail(&evidence.offender);
+    result
+}
+
+/// Persist slashing evidence to the state store for audit trail.
+pub fn persist_slashing_evidence(
+    store: &mut dyn solen_storage::StateStore,
+    result: &SlashingResult,
+    height: u64,
+) {
+    let key = format!("slash/{}/{}", hex_encode(&result.offender), height);
+    let value = format!(
+        "penalty={},remaining={},reason={}",
+        result.penalty, result.remaining_stake, result.reason
+    );
+    let _ = store.put(key.as_bytes(), value.as_bytes());
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Record a missed block for the proposer. Returns slashing evidence if threshold hit.
@@ -150,10 +192,14 @@ mod tests {
             },
         };
 
-        process_slashing(&mut vs, &evidence);
+        let result = process_slashing(&mut vs, &evidence);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.penalty, 100); // 10% of 1000
+        assert_eq!(result.remaining_stake, 900);
 
         let v1 = vs.get_mut(&vid(1)).unwrap();
-        assert_eq!(v1.stake, 900); // 10% slashed
+        assert_eq!(v1.stake, 900);
         assert_eq!(v1.status, ValidatorStatus::Jailed);
     }
 

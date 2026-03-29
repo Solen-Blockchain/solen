@@ -181,7 +181,9 @@ impl<'a> StateManager<'a> {
                 got: nonce,
             });
         }
-        account.nonce += 1;
+        account.nonce = account.nonce.checked_add(1).ok_or_else(|| {
+            StateError::Serialization("nonce overflow".into())
+        })?;
         self.save_account(&account)?;
         Ok(())
     }

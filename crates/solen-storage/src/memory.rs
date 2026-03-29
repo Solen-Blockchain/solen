@@ -25,11 +25,7 @@ pub struct MemoryStore {
 /// Cached Merkle tree over sorted leaves.
 #[derive(Clone, Debug)]
 struct MerkleTree {
-    /// Internal nodes. nodes[0] = leaves, nodes[last] has root.
-    /// Stored as a flat vector of levels.
     root: Hash,
-    /// Ordered keys for positional lookup.
-    keys: Vec<Vec<u8>>,
 }
 
 impl MemoryStore {
@@ -110,18 +106,13 @@ impl StateStore for MemoryStore {
         }
 
         if self.leaf_hashes.is_empty() {
-            self.tree_cache = Some(MerkleTree {
-                root: [0u8; 32],
-                keys: Vec::new(),
-            });
+            self.tree_cache = Some(MerkleTree { root: [0u8; 32] });
             return;
         }
 
         let leaves: Vec<Hash> = self.leaf_hashes.values().copied().collect();
         let root = merkle_root(&leaves);
-        let keys: Vec<Vec<u8>> = self.leaf_hashes.keys().cloned().collect();
-
-        self.tree_cache = Some(MerkleTree { root, keys });
+        self.tree_cache = Some(MerkleTree { root });
     }
 
     fn snapshot(&self) -> Box<dyn StateStore> {

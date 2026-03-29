@@ -8,37 +8,6 @@ use std::collections::BTreeMap;
 
 use solen_types::Hash;
 
-/// Node in the Merkle trie.
-#[derive(Clone, Debug)]
-enum Node {
-    Leaf {
-        key: Vec<u8>,
-        value_hash: Hash,
-    },
-    Branch {
-        left: Box<Node>,
-        right: Box<Node>,
-        hash: Hash,
-        dirty: bool,
-    },
-    Empty,
-}
-
-impl Node {
-    fn hash(&self) -> Hash {
-        match self {
-            Node::Leaf { key, value_hash } => {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(key);
-                hasher.update(value_hash);
-                *hasher.finalize().as_bytes()
-            }
-            Node::Branch { hash, .. } => *hash,
-            Node::Empty => [0u8; 32],
-        }
-    }
-}
-
 /// An incremental Merkle tree that tracks dirty nodes.
 #[derive(Clone, Debug)]
 pub struct IncrementalMerkle {

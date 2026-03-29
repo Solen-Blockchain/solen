@@ -59,6 +59,7 @@ impl Network {
         }
     }
 
+    #[allow(dead_code)]
     fn default_block_time(self) -> u64 {
         match self {
             Network::Devnet => 2000,
@@ -135,7 +136,6 @@ async fn main() -> anyhow::Result<()> {
         .data_dir
         .clone()
         .unwrap_or_else(|| net.default_data_dir().to_string());
-    let block_time = cli.block_time.unwrap_or(net.default_block_time());
 
     tracing_subscriber::fmt()
         .with_env_filter(

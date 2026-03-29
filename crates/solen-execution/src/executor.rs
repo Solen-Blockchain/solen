@@ -187,13 +187,6 @@ impl BlockExecutor {
         }
     }
 
-    fn all_same_sender(&self, ops: &[UserOperation]) -> bool {
-        if ops.is_empty() {
-            return true;
-        }
-        let first = ops[0].sender;
-        ops.iter().all(|op| op.sender == first)
-    }
 
     /// Execute a single user operation.
     fn execute_operation(

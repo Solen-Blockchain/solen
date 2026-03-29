@@ -4,7 +4,7 @@
 //! the `StateStore` trait. Keys are prefixed: `acc/<id>` for accounts,
 //! `code/<hash>` for bytecode, `cs/<id>/<key>` for contract storage.
 
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshDeserialize;
 use solen_storage::{StateStore, StorageError};
 use solen_types::account::{Account, AuthMethod};
 use solen_types::{AccountId, Hash};

@@ -2,19 +2,21 @@
 //!
 //! Wires together consensus, execution, networking, and RPC.
 
+mod genesis_config;
+
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use genesis_config::GenesisConfig;
 use solen_consensus::engine::{ConsensusEngine, EngineConfig};
 use solen_consensus::mempool::Mempool;
 use solen_crypto::Keypair;
-use solen_execution::genesis::{apply_genesis, GenesisAccount};
 use solen_p2p::messages::NetworkMessage;
 use solen_p2p::network::{NetworkConfig, NetworkService};
 use solen_rpc::server::start_rpc_server;
 use solen_storage::StateStore;
-use solen_types::account::AuthMethod;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -110,6 +112,14 @@ struct Cli {
     /// Explorer API port. Set to 0 to disable. Defaults: mainnet=9955, testnet=19955, devnet=29955.
     #[arg(long)]
     explorer_port: Option<u16>,
+
+    /// Path to genesis.json config file. If not set, uses default config for the network.
+    #[arg(long)]
+    genesis: Option<String>,
+
+    /// Generate a genesis.json file for the selected network and exit.
+    #[arg(long)]
+    init_genesis: bool,
 }
 
 #[tokio::main]
@@ -134,8 +144,32 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("=== Solen Node v0.1.0 ===");
+
+    // --- Load genesis config ---
+    let genesis = if let Some(path) = &cli.genesis {
+        GenesisConfig::load(&PathBuf::from(path))?
+    } else {
+        match net {
+            Network::Devnet => GenesisConfig::default_devnet(),
+            Network::Testnet => GenesisConfig::default_testnet(),
+            Network::Mainnet => GenesisConfig::default_testnet(), // TODO: mainnet config
+        }
+    };
+
+    // Handle --init-genesis: write config to file and exit.
+    if cli.init_genesis {
+        let out_path = PathBuf::from(&data_dir).join("genesis.json");
+        genesis.save(&out_path)?;
+        info!(path = %out_path.display(), "genesis config written");
+        return Ok(());
+    }
+
+    let block_time = cli.block_time.unwrap_or(genesis.block_time_ms);
+
     info!(
         network = ?net,
+        chain = %genesis.chain_name,
+        chain_id = genesis.chain_id,
         rpc_port,
         p2p_port,
         explorer_port,
@@ -153,55 +187,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // --- Validator key ---
-    let validator_kp = match &cli.validator_seed {
-        Some(hex) => {
-            let bytes = hex_decode(hex)?;
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&bytes);
-            Keypair::from_seed(&seed)
-        }
-        None => Keypair::from_seed(&[1u8; 32]),
+    let validator_kp = if let Some(hex) = &cli.validator_seed {
+        let bytes = hex_decode(hex)?;
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&bytes);
+        Keypair::from_seed(&seed)
+    } else if let Some(v) = genesis.validators.first() {
+        let seed = hex_decode(&v.seed_hex)?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&seed);
+        Keypair::from_seed(&arr)
+    } else {
+        Keypair::from_seed(&[1u8; 32])
     };
     let validator_id = validator_kp.public_key();
 
-    // --- Genesis accounts ---
-    let faucet_kp = Keypair::from_seed(&[42u8; 32]);
-    let faucet_id = name_to_id(b"faucet");
-    let alice_kp = Keypair::from_seed(&[10u8; 32]);
-    let alice_id = name_to_id(b"alice");
-    let bob_id = name_to_id(b"bob");
-
+    // --- Apply genesis if store is empty ---
     if store.is_empty() {
-        apply_genesis(
-            store.as_mut(),
-            vec![
-                GenesisAccount {
-                    id: faucet_id,
-                    balance: 1_000_000_000,
-                    auth_methods: vec![AuthMethod::Ed25519 {
-                        public_key: faucet_kp.public_key(),
-                    }],
-                },
-                GenesisAccount {
-                    id: alice_id,
-                    balance: 10_000,
-                    auth_methods: vec![AuthMethod::Ed25519 {
-                        public_key: alice_kp.public_key(),
-                    }],
-                },
-                GenesisAccount {
-                    id: bob_id,
-                    balance: 5_000,
-                    auth_methods: vec![],
-                },
-            ],
-        )?;
-        info!(
-            faucet = hex(&faucet_id),
-            alice = hex(&alice_id),
-            bob = hex(&bob_id),
-            "genesis state initialized"
-        );
+        genesis.apply(store.as_mut())?;
     } else {
         info!(state_root = hex(&store.state_root()), "loaded existing state");
     }
@@ -348,13 +351,6 @@ fn create_persistent_store(data_dir: &str) -> anyhow::Result<Box<dyn StateStore>
         info!("RocksDB not compiled in, using in-memory storage");
         Ok(Box::new(solen_storage::MemoryStore::new()))
     }
-}
-
-fn name_to_id(name: &[u8]) -> [u8; 32] {
-    let mut id = [0u8; 32];
-    let len = name.len().min(32);
-    id[..len].copy_from_slice(&name[..len]);
-    id
 }
 
 fn hex(bytes: &[u8]) -> String {

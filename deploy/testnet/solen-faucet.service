@@ -1,0 +1,23 @@
+[Unit]
+Description=Solen Testnet Faucet
+After=solen-node.service
+Wants=solen-node.service
+
+[Service]
+Type=simple
+User=solen
+Group=solen
+WorkingDirectory=/opt/solen
+ExecStart=/opt/solen/bin/solen-faucet \
+    --port 8080 \
+    --rpc http://127.0.0.1:19944 \
+    --seed 2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a \
+    --drip-amount 100000 \
+    --cooldown 300
+Restart=always
+RestartSec=5
+
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

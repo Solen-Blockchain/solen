@@ -17,6 +17,7 @@ members = [
     "crates/solen-storage",
     "crates/solen-intents",
     "crates/solen-cli",
+    "crates/solen-faucet",
     "crates/solen-indexer",
     "crates/solen-node",
     "sdks/wallet-sdk-rs",

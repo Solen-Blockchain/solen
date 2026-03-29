@@ -233,7 +233,7 @@ impl ConsensusEngine {
             em.epoch_for_height(height)
         };
 
-        let header = BlockHeader {
+        let mut header = BlockHeader {
             height,
             epoch,
             parent_hash,
@@ -249,7 +249,18 @@ impl ConsensusEngine {
         let is_single = self.validator_set.read().unwrap().active_count() <= 1;
 
         if is_single {
-            // Single validator: immediately finalize.
+            // Distribute epoch rewards as part of block execution (proposer only).
+            let is_epoch = {
+                let em = self.epoch_manager.read().unwrap();
+                em.is_epoch_boundary(height)
+            };
+            if is_epoch {
+                self.distribute_epoch_rewards();
+                // Update state root after rewards.
+                result.state_root = self.store.read().unwrap().state_root();
+                header.state_root = result.state_root;
+            }
+
             let attestations = vec![Attestation {
                 validator_id: self.config.validator_id,
                 block_height: height,
@@ -265,13 +276,16 @@ impl ConsensusEngine {
             self.chain.write().unwrap().push(block.clone());
             self.persist_block(&block);
 
-            // Persist chain height.
             {
                 let mut store = self.store.write().unwrap();
                 save_chain_meta(store.as_mut(), height, epoch);
             }
 
-            self.maybe_process_epoch(height);
+            if is_epoch {
+                let mut em = self.epoch_manager.write().unwrap();
+                let mut vs = self.validator_set.write().unwrap();
+                em.process_epoch_transition(&mut vs);
+            }
 
             info!(height, ops = op_count, epoch, "block finalized (single validator)");
 
@@ -281,7 +295,21 @@ impl ConsensusEngine {
                 operations: ops,
             }
         } else {
-            // Multi-validator: store as pending, self-attest,
+            // Multi-validator: distribute epoch rewards before proposing.
+            {
+                let em = self.epoch_manager.read().unwrap();
+                if em.is_epoch_boundary(height) {
+                    drop(em);
+                    self.distribute_epoch_rewards();
+                    // Recompute state root after rewards.
+                    let store = self.store.read().unwrap();
+                    result.state_root = store.state_root();
+                    // Update header with new state root.
+                    header.state_root = result.state_root;
+                }
+            }
+
+            // Store as pending, self-attest,
             // wait for peer attestations to reach quorum.
             self.pending_blocks.write().unwrap().insert(
                 height,
@@ -388,12 +416,23 @@ impl ConsensusEngine {
         let mut store = self.store.write().unwrap();
         let result = self.executor.execute_block(store.as_mut(), operations);
 
+        // If this is an epoch boundary, distribute rewards (same as proposer did).
+        let epoch_mgr = self.epoch_manager.read().unwrap();
+        if epoch_mgr.is_epoch_boundary(header.height) {
+            drop(epoch_mgr);
+            drop(store);
+            self.distribute_epoch_rewards();
+        } else {
+            drop(epoch_mgr);
+            drop(store);
+        }
+
+        // Re-read state root after potential reward distribution.
+        let current_root = self.store.read().unwrap().state_root();
+
         // For the next block after our height, verify state root.
-        // If we fast-forwarded, our state may differ — accept the block
-        // on trust and adopt the peer's state root going forward.
-        let state_matches = result.state_root == header.state_root;
+        let state_matches = current_root == header.state_root;
         if !state_matches && header.height == expected_height {
-            // Only reject if we're at the expected height (not catching up).
             warn!(
                 height = header.height,
                 "state root mismatch — rejecting block"
@@ -602,7 +641,14 @@ impl ConsensusEngine {
                 save_chain_meta(store.as_mut(), height, header.epoch);
             }
 
-            self.maybe_process_epoch(height);
+            // Only advance epoch counter — rewards already applied by proposer.
+            {
+                let mut em = self.epoch_manager.write().unwrap();
+                if em.is_epoch_boundary(height) {
+                    let mut vs = self.validator_set.write().unwrap();
+                    em.process_epoch_transition(&mut vs);
+                }
+            }
 
             info!(
                 height,
@@ -612,25 +658,10 @@ impl ConsensusEngine {
         }
     }
 
-    /// Process epoch transition if this height is an epoch boundary.
-    /// Distributes staking rewards to active validators and updates state.
-    fn maybe_process_epoch(&self, height: u64) {
-        let is_boundary = {
-            let em = self.epoch_manager.read().unwrap();
-            em.is_epoch_boundary(height)
-        };
-
-        if !is_boundary {
-            return;
-        }
-
-        // Epoch transition: rotate validators.
-        {
-            let mut em = self.epoch_manager.write().unwrap();
-            let mut vs = self.validator_set.write().unwrap();
-            em.process_epoch_transition(&mut vs);
-        }
-
+    /// Distribute epoch rewards from the staking pool to validators.
+    /// Called by the proposer as part of block production, and by
+    /// accept_block so all nodes reach the same state.
+    fn distribute_epoch_rewards(&self) {
         // Distribute staking rewards from the staking pool account.
         // ~317 SOLEN per epoch (50M/year ÷ 157,680 epochs), with 8 decimals.
         let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN in base units
@@ -845,7 +876,16 @@ impl ConsensusEngine {
         }
 
         // Epoch transition if needed.
-        self.maybe_process_epoch(height);
+        {
+            let em = self.epoch_manager.read().unwrap();
+            if em.is_epoch_boundary(height) {
+                drop(em);
+                self.distribute_epoch_rewards();
+                let mut em = self.epoch_manager.write().unwrap();
+                let mut vs = self.validator_set.write().unwrap();
+                em.process_epoch_transition(&mut vs);
+            }
+        }
     }
 
     /// Check if a block is pending at the given height (proposed but not finalized).

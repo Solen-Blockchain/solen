@@ -126,8 +126,10 @@ impl NetworkService {
 
         // Dial bootstrap peers.
         for addr in &config.bootstrap_peers {
-            if let Err(e) = swarm.dial(addr.clone()) {
-                warn!(%addr, error = %e, "failed to dial bootstrap peer");
+            info!(%addr, "dialing bootstrap peer");
+            match swarm.dial(addr.clone()) {
+                Ok(_) => info!(%addr, "dial initiated"),
+                Err(e) => warn!(%addr, error = %e, "failed to dial bootstrap peer"),
             }
         }
 
@@ -174,6 +176,19 @@ impl NetworkService {
                             }
                             SwarmEvent::NewListenAddr { address, .. } => {
                                 info!(%address, "listening on");
+                            }
+                            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                                info!(%peer_id, ?endpoint, "peer connected");
+                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                            }
+                            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                                info!(%peer_id, ?cause, "peer disconnected");
+                            }
+                            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                                warn!(%error, "outgoing connection failed");
+                            }
+                            SwarmEvent::IncomingConnectionError { error, .. } => {
+                                warn!(%error, "incoming connection failed");
                             }
                             _ => {}
                         }

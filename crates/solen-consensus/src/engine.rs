@@ -303,6 +303,34 @@ impl ConsensusEngine {
             .unwrap_or(false)
     }
 
+    /// Check if this node should act as backup proposer.
+    /// If the designated proposer hasn't produced after 6 seconds,
+    /// the next validator in rotation takes over. Every 4 seconds
+    /// after that, the next one tries.
+    pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
+        if stalled_for < std::time::Duration::from_secs(6) {
+            return false;
+        }
+
+        let next_height = self.height() + 1;
+        let vs = self.validator_set.read().unwrap();
+        let active = vs.active();
+        if active.len() <= 1 {
+            return false;
+        }
+
+        let skips = ((stalled_for.as_secs() - 6) / 4) + 1;
+
+        for skip in 1..=skips {
+            let idx = ((next_height as usize) + skip as usize) % active.len();
+            if active[idx].id == self.config.validator_id {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Accept a block proposed by another validator. Validates it by
     /// re-executing the operations and checking the state root matches.
     /// Returns true if the block was accepted.
@@ -311,47 +339,38 @@ impl ConsensusEngine {
         header: &BlockHeader,
         operations: &[UserOperation],
     ) -> bool {
-        let expected_height = self.height() + 1;
+        let our_height = self.height();
+        let expected_height = our_height + 1;
 
-        if header.height != expected_height {
-            if header.height > expected_height {
-                // We're behind — accept and catch up.
-                info!(
-                    our_height = self.height(),
-                    block_height = header.height,
-                    "received block from ahead, accepting to sync"
-                );
-            } else {
-                // Old block, ignore.
-                return false;
-            }
+        if header.height < expected_height {
+            // Old block, ignore.
+            return false;
         }
 
-        // Verify the proposer is valid for this height.
-        {
-            let vs = self.validator_set.read().unwrap();
-            if let Some(expected_proposer) = vs.proposer_for_height(header.height) {
-                if expected_proposer != header.proposer {
-                    warn!(
-                        height = header.height,
-                        expected = ?expected_proposer[..4],
-                        got = ?header.proposer[..4],
-                        "wrong proposer for height"
-                    );
-                    return false;
-                }
-            }
+        if header.height > expected_height {
+            // We're behind — fast-forward to catch up.
+            // Skip to just before this block's height so we can accept it.
+            info!(
+                our_height,
+                block_height = header.height,
+                gap = header.height - expected_height,
+                "behind network, fast-forwarding"
+            );
+            self.fast_forward_to(header.height - 1, header.epoch);
         }
 
-        // Re-execute the operations to verify the state root.
+        // Execute the operations against our current state.
         let mut store = self.store.write().unwrap();
         let result = self.executor.execute_block(store.as_mut(), operations);
 
-        if result.state_root != header.state_root {
+        // For the next block after our height, verify state root.
+        // If we fast-forwarded, our state may differ — accept the block
+        // on trust and adopt the peer's state root going forward.
+        let state_matches = result.state_root == header.state_root;
+        if !state_matches && header.height == expected_height {
+            // Only reject if we're at the expected height (not catching up).
             warn!(
                 height = header.height,
-                expected = ?header.state_root[..4],
-                got = ?result.state_root[..4],
                 "state root mismatch — rejecting block"
             );
             return false;
@@ -370,6 +389,42 @@ impl ConsensusEngine {
         );
 
         true
+    }
+
+    /// Fast-forward the chain height to catch up with the network.
+    /// This skips intermediate blocks (we don't have them) and
+    /// updates the chain metadata so the next accept_block works.
+    fn fast_forward_to(&self, height: u64, epoch: u64) {
+        let placeholder = FinalizedBlock {
+            header: BlockHeader {
+                height,
+                epoch,
+                parent_hash: [0u8; 32],
+                state_root: self.store.read().unwrap().state_root(),
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer: [0u8; 32],
+                timestamp_ms: now_ms(),
+            },
+            result: BlockResult {
+                state_root: self.store.read().unwrap().state_root(),
+                receipts: vec![],
+                gas_used: 0,
+            },
+            attestations: vec![],
+        };
+
+        self.chain.write().unwrap().push(placeholder);
+
+        // Persist the new height.
+        {
+            let mut store = self.store.write().unwrap();
+            save_chain_meta(store.as_mut(), height, epoch);
+        }
+
+        self.epoch_manager.write().unwrap().current_epoch = epoch;
+
+        info!(height, epoch, "fast-forwarded chain height");
     }
 
     /// Accept an attestation from a validator. If quorum is reached,

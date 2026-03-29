@@ -404,12 +404,16 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            // Only produce if it's our turn (or single-validator mode).
-            // Don't re-propose if we already proposed at this height.
+            // Produce if it's our turn, or take over if the proposer is offline.
             let next_height = engine_clone.height() + 1;
             let already_pending = engine_clone.has_pending_block(next_height);
+            let stalled_for = last_finalized_at.elapsed();
 
-            if engine_clone.active_validator_count() <= 1 || (engine_clone.is_next_proposer() && !already_pending) {
+            let should_propose = engine_clone.active_validator_count() <= 1
+                || (engine_clone.is_next_proposer() && !already_pending)
+                || (!already_pending && engine_clone.is_backup_proposer(stalled_for));
+
+            if should_propose {
                 let produced = engine_clone.produce_block();
                 last_finalized_at = std::time::Instant::now();
 

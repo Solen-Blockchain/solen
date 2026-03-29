@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Solen Testnet Deployment Script
+# Solen Testnet Deployment Script — Server 1 (Seed Node + RPC + Faucet)
 #
 # Prerequisites:
-#   - Ubuntu 22.04+
-#   - Rust toolchain installed
-#   - nginx installed
-#   - certbot configured for solenchain.com
+#   1. Install Rust:
+#        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+#        source ~/.cargo/env
+#
+#   2. Install build tools and nginx (Ubuntu/Debian):
+#        sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev clang nginx
+#
+#   3. Set up SSL certs with certbot:
+#        sudo apt-get install -y certbot python3-certbot-nginx
+#        sudo certbot --nginx -d testnet-rpc.solenchain.com -d testnet-faucet.solenchain.com -d testnet-api.solenchain.com
+#
+#   4. Clone the repo:
+#        git clone <repo> ~/solen && cd ~/solen
 #
 # Usage:
-#   ./setup.sh
+#   ./deploy/testnet/setup.sh
 
 echo "=== Solen Testnet Setup ==="
 

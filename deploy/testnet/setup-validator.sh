@@ -6,13 +6,24 @@ set -euo pipefail
 # Run this on servers 2, 3, and 4 to join the testnet.
 # Server 1 (validator-1 / seed node) should already be running via setup.sh.
 #
+# Prerequisites:
+#   1. Install Rust:
+#        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+#        source ~/.cargo/env
+#
+#   2. Install build tools (Ubuntu/Debian):
+#        sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev clang
+#
+#   3. Clone the repo:
+#        git clone <repo> ~/solen && cd ~/solen
+#
 # Usage:
-#   ./setup-validator.sh <validator-number>
+#   ./deploy/testnet/setup-validator.sh <validator-number>
 #
 # Examples:
-#   ./setup-validator.sh 2    # validator-2 (server 2)
-#   ./setup-validator.sh 3    # validator-3 (server 3)
-#   ./setup-validator.sh 4    # validator-4 (server 4)
+#   ./deploy/testnet/setup-validator.sh 2    # validator-2 (server 2)
+#   ./deploy/testnet/setup-validator.sh 3    # validator-3 (server 3)
+#   ./deploy/testnet/setup-validator.sh 4    # validator-4 (server 4)
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <validator-number>"

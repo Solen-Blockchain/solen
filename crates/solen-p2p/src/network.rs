@@ -157,9 +157,25 @@ impl NetworkService {
 
         let handle = NetworkHandle { outbound_tx };
 
+        let bootstrap_addrs = config.bootstrap_peers.clone();
+
         let task = tokio::spawn(async move {
+            // Periodically redial bootstrap peers to maintain connectivity.
+            let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
+            redial_interval.tick().await; // skip first immediate tick
+
             loop {
                 tokio::select! {
+                    // Redial bootstrap peers if we have few connections.
+                    _ = redial_interval.tick() => {
+                        let connected = swarm.connected_peers().count();
+                        if connected < 3 && !bootstrap_addrs.is_empty() {
+                            for addr in &bootstrap_addrs {
+                                let _ = swarm.dial(addr.clone());
+                            }
+                            debug!(connected, "redialing bootstrap peers");
+                        }
+                    }
                     // Handle outbound messages.
                     Some(msg) = outbound_rx.recv() => {
                         let topic = IdentTopic::new(msg.topic());

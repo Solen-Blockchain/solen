@@ -6,7 +6,7 @@ use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity};
 use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{mdns, noise, tcp, yamux, Multiaddr, SwarmBuilder};
+use libp2p::{kad, mdns, noise, tcp, yamux, Multiaddr, SwarmBuilder};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -98,10 +98,15 @@ impl NetworkService {
         )
         .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
+        // Kademlia DHT for peer discovery across the internet.
+        let kad_store = libp2p::kad::store::MemoryStore::new(local_peer_id);
+        let mut kademlia = libp2p::kad::Behaviour::new(local_peer_id, kad_store);
+        kademlia.set_mode(Some(libp2p::kad::Mode::Server));
+
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-        let behaviour = SolenBehaviour { gossipsub, mdns };
+        let behaviour = SolenBehaviour { gossipsub, kademlia, mdns };
 
         let total_limit = config.max_inbound + config.max_outbound;
 
@@ -143,11 +148,18 @@ impl NetworkService {
             .listen_on(listen_addr)
             .map_err(|e| NetworkError::Listen(e.to_string()))?;
 
-        // Dial bootstrap peers.
+        // Dial bootstrap peers and add them to Kademlia.
         for addr in &config.bootstrap_peers {
             info!(%addr, "dialing bootstrap peer");
             match swarm.dial(addr.clone()) {
-                Ok(_) => info!(%addr, "dial initiated"),
+                Ok(_) => {
+                    info!(%addr, "dial initiated");
+                    // Add to Kademlia routing table for peer discovery.
+                    swarm.behaviour_mut().kademlia.add_address(
+                        &libp2p::PeerId::random(), // placeholder — real peer ID learned on connect
+                        addr.clone(),
+                    );
+                }
                 Err(e) => warn!(%addr, error = %e, "failed to dial bootstrap peer"),
             }
         }
@@ -160,20 +172,28 @@ impl NetworkService {
         let bootstrap_addrs = config.bootstrap_peers.clone();
 
         let task = tokio::spawn(async move {
-            // Periodically redial bootstrap peers to maintain connectivity.
-            let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
-            redial_interval.tick().await; // skip first immediate tick
+            // Periodically run Kademlia bootstrap and redial if needed.
+            let mut maintenance_interval = tokio::time::interval(Duration::from_secs(30));
+            maintenance_interval.tick().await; // skip first immediate tick
 
             loop {
                 tokio::select! {
-                    // Redial bootstrap peers if we have few connections.
-                    _ = redial_interval.tick() => {
+                    _ = maintenance_interval.tick() => {
                         let connected = swarm.connected_peers().count();
+
+                        // Run Kademlia bootstrap to discover new peers.
+                        let _ = swarm.behaviour_mut().kademlia.bootstrap();
+
+                        // Redial bootstrap peers if we have few connections.
                         if connected < 3 && !bootstrap_addrs.is_empty() {
                             for addr in &bootstrap_addrs {
                                 let _ = swarm.dial(addr.clone());
                             }
                             debug!(connected, "redialing bootstrap peers");
+                        }
+
+                        if connected > 0 {
+                            debug!(connected, "peer connections active");
                         }
                     }
                     // Handle outbound messages.
@@ -213,9 +233,20 @@ impl NetworkService {
                             SwarmEvent::NewListenAddr { address, .. } => {
                                 info!(%address, "listening on");
                             }
+                            SwarmEvent::Behaviour(SolenBehaviourEvent::Kademlia(
+                                kad::Event::RoutingUpdated { peer, .. },
+                            )) => {
+                                debug!(%peer, "Kademlia discovered peer");
+                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                            }
+                            SwarmEvent::Behaviour(SolenBehaviourEvent::Kademlia(_)) => {
+                                // Other Kademlia events (query results, etc.)
+                            }
                             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                                 info!(%peer_id, ?endpoint, "peer connected");
                                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                // Add to Kademlia so other peers can discover this one.
+                                swarm.behaviour_mut().kademlia.add_address(&peer_id, endpoint.get_remote_address().clone());
                             }
                             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                                 info!(%peer_id, ?cause, "peer disconnected");

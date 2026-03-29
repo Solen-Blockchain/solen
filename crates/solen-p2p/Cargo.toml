@@ -10,6 +10,7 @@ solen-types = { workspace = true }
 libp2p = { workspace = true, features = [
     "gossipsub",
     "identify",
+    "kad",
     "noise",
     "tcp",
     "tokio",

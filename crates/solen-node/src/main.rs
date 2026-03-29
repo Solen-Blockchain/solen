@@ -318,7 +318,93 @@ async fn main() -> anyhow::Result<()> {
                             block_hash,
                         );
                     }
+                    NetworkMessage::StatusAnnounce { height, .. } => {
+                        let our_height = engine_for_p2p.height();
+                        if height > our_height {
+                            // Peer is ahead — request blocks to sync.
+                            tracing::info!(
+                                our_height,
+                                peer_height = height,
+                                "peer is ahead, requesting sync"
+                            );
+                            net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                from_height: our_height + 1,
+                                to_height: height,
+                            });
+                        }
+                    }
+                    NetworkMessage::SyncRequest { from_height, to_height } => {
+                        // Serve blocks to the requesting peer.
+                        let max_batch = 50;
+                        let _to = to_height.min(from_height + max_batch as u64 - 1);
+                        let blocks = engine_for_p2p.get_blocks_for_sync(from_height, max_batch);
+
+                        if !blocks.is_empty() {
+                            let sync_blocks: Vec<solen_p2p::messages::SyncBlock> = blocks
+                                .iter()
+                                .map(|b| solen_p2p::messages::SyncBlock {
+                                    header: b.header.clone(),
+                                    operations: vec![], // operations aren't stored in persisted blocks
+                                })
+                                .collect();
+
+                            tracing::info!(
+                                from = from_height,
+                                count = sync_blocks.len(),
+                                "serving sync blocks to peer"
+                            );
+
+                            net_for_attest.broadcast(NetworkMessage::SyncBlocks {
+                                blocks: sync_blocks,
+                            });
+                        }
+                    }
+                    NetworkMessage::SyncBlocks { blocks } => {
+                        if blocks.is_empty() {
+                            continue;
+                        }
+                        let our_height = engine_for_p2p.height();
+                        let mut synced = 0u64;
+
+                        for sync_block in &blocks {
+                            if sync_block.header.height <= our_height {
+                                continue; // already have this block
+                            }
+                            if sync_block.header.height != engine_for_p2p.height() + 1 {
+                                continue; // out of order
+                            }
+                            engine_for_p2p.replay_synced_block(
+                                &sync_block.header,
+                                &sync_block.operations,
+                            );
+                            synced += 1;
+                        }
+
+                        if synced > 0 {
+                            tracing::info!(
+                                synced,
+                                new_height = engine_for_p2p.height(),
+                                "synced blocks from peer"
+                            );
+                        }
+                    }
                 }
+            }
+        });
+
+        // Periodically broadcast our height so new nodes can request sync.
+        let status_engine = engine.clone();
+        let status_handle = handle.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                let height = status_engine.height();
+                let state_root = status_engine.store().read().unwrap().state_root();
+                status_handle.broadcast(NetworkMessage::StatusAnnounce {
+                    height,
+                    state_root,
+                });
             }
         });
 

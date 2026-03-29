@@ -717,6 +717,72 @@ impl ConsensusEngine {
         blocks
     }
 
+    /// Get blocks for sync — loads from persistent storage.
+    /// Returns up to `max_blocks` starting from `from_height`.
+    pub fn get_blocks_for_sync(&self, from_height: u64, max_blocks: usize) -> Vec<FinalizedBlock> {
+        let store = self.store.read().unwrap();
+        let mut blocks = Vec::new();
+        let mut height = from_height;
+
+        while blocks.len() < max_blocks {
+            let key = format!("block/{}", height);
+            match store.get(key.as_bytes()) {
+                Ok(Some(data)) => {
+                    if let Ok(sb) = serde_json::from_slice::<SerializableBlock>(&data) {
+                        blocks.push(sb.into());
+                        height += 1;
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        blocks
+    }
+
+    /// Replay a synced block: execute operations and finalize.
+    /// Used during initial sync from peers.
+    pub fn replay_synced_block(
+        &self,
+        header: &BlockHeader,
+        operations: &[UserOperation],
+    ) {
+        let height = header.height;
+
+        // Execute operations against our state.
+        {
+            let mut store = self.store.write().unwrap();
+            let _result = self.executor.execute_block(store.as_mut(), operations);
+        }
+
+        // Create finalized block and persist.
+        let result = BlockResult {
+            state_root: self.store.read().unwrap().state_root(),
+            receipts: vec![], // we don't have receipts from sync, just state
+            gas_used: 0,
+        };
+
+        let block = FinalizedBlock {
+            header: header.clone(),
+            result,
+            attestations: vec![],
+        };
+
+        self.chain.write().unwrap().push(block.clone());
+        self.persist_block(&block);
+
+        // Update chain metadata.
+        {
+            let mut store = self.store.write().unwrap();
+            save_chain_meta(store.as_mut(), height, header.epoch);
+        }
+
+        // Epoch transition if needed.
+        self.maybe_process_epoch(height);
+    }
+
     /// Check if a block is pending at the given height (proposed but not finalized).
     pub fn has_pending_block(&self, height: u64) -> bool {
         self.pending_blocks.read().unwrap().contains_key(&height)

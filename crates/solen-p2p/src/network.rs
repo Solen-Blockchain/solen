@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::behaviour::{SolenBehaviour, SolenBehaviourEvent};
-use crate::messages::{NetworkMessage, TOPIC_ATTESTATIONS, TOPIC_BLOCKS, TOPIC_TRANSACTIONS};
+use crate::messages::{NetworkMessage, TOPIC_ATTESTATIONS, TOPIC_BLOCKS, TOPIC_SYNC, TOPIC_TRANSACTIONS};
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -139,7 +139,7 @@ impl NetworkService {
         );
 
         // Subscribe to topics.
-        let topics = [TOPIC_BLOCKS, TOPIC_TRANSACTIONS, TOPIC_ATTESTATIONS];
+        let topics = [TOPIC_BLOCKS, TOPIC_TRANSACTIONS, TOPIC_ATTESTATIONS, TOPIC_SYNC];
         for topic_name in &topics {
             let topic = IdentTopic::new(*topic_name);
             swarm

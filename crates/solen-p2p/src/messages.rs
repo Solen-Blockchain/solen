@@ -9,6 +9,7 @@ use solen_types::{Hash, ValidatorId};
 pub const TOPIC_BLOCKS: &str = "solen/blocks/1";
 pub const TOPIC_TRANSACTIONS: &str = "solen/transactions/1";
 pub const TOPIC_ATTESTATIONS: &str = "solen/attestations/1";
+pub const TOPIC_SYNC: &str = "solen/sync/1";
 
 /// Messages that can be sent over the gossip network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +30,27 @@ pub enum NetworkMessage {
         block_hash: Hash,
         signature: Vec<u8>,
     },
+    /// Request blocks for sync. Peer should respond with SyncBlocks.
+    SyncRequest {
+        from_height: u64,
+        to_height: u64,
+    },
+    /// Response with historical blocks for sync.
+    SyncBlocks {
+        blocks: Vec<SyncBlock>,
+    },
+    /// Announce current height (for peers to know if they need to sync).
+    StatusAnnounce {
+        height: u64,
+        state_root: Hash,
+    },
+}
+
+/// A block sent during sync (header + operations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncBlock {
+    pub header: BlockHeader,
+    pub operations: Vec<UserOperation>,
 }
 
 impl NetworkMessage {
@@ -38,6 +60,9 @@ impl NetworkMessage {
             NetworkMessage::NewBlock { .. } => TOPIC_BLOCKS,
             NetworkMessage::NewTransaction(_) => TOPIC_TRANSACTIONS,
             NetworkMessage::Attestation { .. } => TOPIC_ATTESTATIONS,
+            NetworkMessage::SyncRequest { .. } => TOPIC_SYNC,
+            NetworkMessage::SyncBlocks { .. } => TOPIC_SYNC,
+            NetworkMessage::StatusAnnounce { .. } => TOPIC_SYNC,
         }
     }
 

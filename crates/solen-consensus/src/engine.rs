@@ -108,21 +108,55 @@ impl ConsensusEngine {
         Self::with_validators(config, store, mempool, validator_set)
     }
 
-    /// Create with a multi-validator set.
+    /// Create with a multi-validator set. Restores chain height from
+    /// persisted metadata if available.
     pub fn with_validators(
         config: EngineConfig,
         store: Box<dyn StateStore>,
         mempool: Mempool,
         validator_set: ValidatorSet,
     ) -> Self {
+        // Try to load persisted chain metadata.
+        let (restored_height, restored_epoch) = load_chain_meta(&*store);
+
+        let mut chain = Vec::new();
+        if restored_height > 0 {
+            // Insert a placeholder finalized block so height() returns
+            // the correct value. We don't have the full block data, but
+            // we need the height to be correct for proposer rotation.
+            let placeholder = FinalizedBlock {
+                header: BlockHeader {
+                    height: restored_height,
+                    epoch: restored_epoch,
+                    parent_hash: [0u8; 32],
+                    state_root: store.state_root(),
+                    transactions_root: [0u8; 32],
+                    receipts_root: [0u8; 32],
+                    proposer: [0u8; 32],
+                    timestamp_ms: 0,
+                },
+                result: BlockResult {
+                    state_root: store.state_root(),
+                    receipts: vec![],
+                    gas_used: 0,
+                },
+                attestations: vec![],
+            };
+            chain.push(placeholder);
+            info!(height = restored_height, epoch = restored_epoch, "restored chain height from state");
+        }
+
+        let mut epoch_manager = EpochManager::new();
+        epoch_manager.current_epoch = restored_epoch;
+
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
             mempool,
             executor: BlockExecutor::new(),
-            chain: Arc::new(RwLock::new(Vec::new())),
+            chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),
-            epoch_manager: Arc::new(RwLock::new(EpochManager::new())),
+            epoch_manager: Arc::new(RwLock::new(epoch_manager)),
             pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -217,6 +251,12 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
+
+            // Persist chain height.
+            {
+                let mut store = self.store.write().unwrap();
+                save_chain_meta(store.as_mut(), height, epoch);
+            }
 
             {
                 let mut em = self.epoch_manager.write().unwrap();
@@ -396,6 +436,12 @@ impl ConsensusEngine {
 
             self.chain.write().unwrap().push(block.clone());
 
+            // Persist chain height.
+            {
+                let mut store = self.store.write().unwrap();
+                save_chain_meta(store.as_mut(), height, header.epoch);
+            }
+
             // Epoch transition.
             {
                 let mut em = self.epoch_manager.write().unwrap();
@@ -507,6 +553,31 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+/// Key for persisted chain metadata.
+const CHAIN_META_KEY: &[u8] = b"__chain_meta__";
+
+/// Persist chain height and epoch to the state store.
+fn save_chain_meta(store: &mut dyn StateStore, height: u64, epoch: u64) {
+    let mut data = Vec::with_capacity(16);
+    data.extend_from_slice(&height.to_le_bytes());
+    data.extend_from_slice(&epoch.to_le_bytes());
+    let _ = store.put(CHAIN_META_KEY, &data);
+}
+
+/// Load chain height and epoch from the state store.
+fn load_chain_meta(store: &dyn StateStore) -> (u64, u64) {
+    match store.get(CHAIN_META_KEY) {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut h = [0u8; 8];
+            let mut e = [0u8; 8];
+            h.copy_from_slice(&data[..8]);
+            e.copy_from_slice(&data[8..16]);
+            (u64::from_le_bytes(h), u64::from_le_bytes(e))
+        }
+        _ => (0, 0),
+    }
 }
 
 #[cfg(test)]

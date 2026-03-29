@@ -33,17 +33,22 @@ pub enum ExecutionError {
 /// Executes blocks of user operations against the state store.
 pub struct BlockExecutor {
     fee_config: FeeConfig,
+    vm_runtime: solen_vm::runtime::VmRuntime,
 }
 
 impl BlockExecutor {
     pub fn new() -> Self {
         Self {
             fee_config: FeeConfig::default(),
+            vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
         }
     }
 
     pub fn with_fee_config(fee_config: FeeConfig) -> Self {
-        Self { fee_config }
+        Self {
+            fee_config,
+            vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
+        }
     }
 
     /// Execute a batch of user operations, returning the block result.
@@ -51,7 +56,24 @@ impl BlockExecutor {
     /// Each operation is executed independently — a failure in one does not
     /// abort the block. Failed operations still consume gas and produce a
     /// receipt with `success: false`.
+    ///
+    /// Uses parallel execution for operations from different senders.
     pub fn execute_block(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+    ) -> BlockResult {
+        // For large batches, pre-verify signatures in parallel (the most
+        // expensive per-op cost) then execute state changes sequentially.
+        if operations.len() >= 200 {
+            return self.execute_block_parallel(store, operations);
+        }
+
+        self.execute_block_sequential(store, operations)
+    }
+
+    /// Sequential execution (original path).
+    fn execute_block_sequential(
         &self,
         store: &mut dyn StateStore,
         operations: &[UserOperation],
@@ -65,11 +87,112 @@ impl BlockExecutor {
             receipts.push(receipt);
         }
 
+        let root = store.state_root();
+        store.commit_root();
+
         BlockResult {
-            state_root: store.state_root(),
+            state_root: root,
             receipts,
             gas_used: total_gas,
         }
+    }
+
+    /// Parallel execution: pre-validate signatures in parallel (the most
+    /// expensive per-op work), then execute state changes sequentially.
+    fn execute_block_parallel(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+    ) -> BlockResult {
+        use rayon::prelude::*;
+
+        // Phase 1: pre-compute signing messages and load accounts (sequential,
+        // but fast — just reads + hashing).
+        let pre: Vec<(Vec<u8>, Option<Vec<solen_types::account::AuthMethod>>)> = operations
+            .iter()
+            .map(|op| {
+                let msg = self.operation_signing_message(op);
+                let auth = store
+                    .get(&{
+                        let mut k = b"acc/".to_vec();
+                        k.extend_from_slice(&op.sender);
+                        k
+                    })
+                    .ok()
+                    .flatten()
+                    .and_then(|data| {
+                        <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
+                            .ok()
+                            .map(|a| a.auth_methods)
+                    });
+                (msg, auth)
+            })
+            .collect();
+
+        // Phase 2: parallel Ed25519 signature verification.
+        let validations: Vec<bool> = operations
+            .par_iter()
+            .zip(pre.par_iter())
+            .map(|(op, (msg, auth))| {
+                let auth_methods = match auth {
+                    Some(methods) => methods,
+                    None => return false,
+                };
+                if auth_methods.is_empty() {
+                    return true;
+                }
+                auth_methods.iter().any(|method| match method {
+                    solen_types::account::AuthMethod::Ed25519 { public_key } => {
+                        if op.signature.len() != 64 {
+                            return false;
+                        }
+                        let mut sig = [0u8; 64];
+                        sig.copy_from_slice(&op.signature);
+                        solen_crypto::verify(public_key, msg, &sig).is_ok()
+                    }
+                    _ => false,
+                })
+            })
+            .collect();
+
+        // Phase 2: sequential state application, skipping ops that failed validation.
+        let mut receipts = Vec::with_capacity(operations.len());
+        let mut total_gas = 0u64;
+
+        for (i, op) in operations.iter().enumerate() {
+            if !validations[i] {
+                receipts.push(ExecutionReceipt {
+                    sender: op.sender,
+                    nonce: op.nonce,
+                    success: false,
+                    gas_used: 0,
+                    error: Some("signature verification failed".into()),
+                    events: vec![],
+                });
+                continue;
+            }
+
+            let receipt = self.execute_operation(store, op);
+            total_gas += receipt.gas_used;
+            receipts.push(receipt);
+        }
+
+        let root = store.state_root();
+        store.commit_root();
+
+        BlockResult {
+            state_root: root,
+            receipts,
+            gas_used: total_gas,
+        }
+    }
+
+    fn all_same_sender(&self, ops: &[UserOperation]) -> bool {
+        if ops.is_empty() {
+            return true;
+        }
+        let first = ops[0].sender;
+        ops.iter().all(|op| op.sender == first)
     }
 
     /// Execute a single user operation.
@@ -261,7 +384,7 @@ impl BlockExecutor {
                 let ctx = solen_vm::host::HostContext::new(*sender, 0)
                     .with_storage(contract_storage);
 
-                match solen_vm::runtime::execute(&bytecode, &input, ctx, None) {
+                match self.vm_runtime.execute(&target_account.code_hash, &bytecode, &input, ctx, None) {
                     Ok(result) => {
                         // Persist updated contract storage.
                         state.save_contract_storage(target, &result.storage)?;

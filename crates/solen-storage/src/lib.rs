@@ -1,6 +1,7 @@
 //! State storage abstraction and implementations.
 
 pub mod memory;
+pub mod merkle;
 #[cfg(feature = "rocksdb")]
 pub mod rocks;
 pub mod traits;

@@ -21,8 +21,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "solen", version = "0.1.0", about = "Solen CLI — interact with the Solen network")]
 struct Cli {
-    /// JSON-RPC endpoint URL
-    #[arg(long, default_value = "http://127.0.0.1:9944", global = true)]
+    /// JSON-RPC endpoint URL (default: devnet port)
+    #[arg(long, default_value = "http://127.0.0.1:29944", global = true)]
     rpc: String,
 
     #[command(subcommand)]

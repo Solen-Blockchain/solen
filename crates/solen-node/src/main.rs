@@ -18,25 +18,78 @@ use solen_types::account::AuthMethod;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+/// Network environment.
+///
+/// Port scheme:
+///   mainnet: RPC 9944,  P2P 30333,  Explorer 9955
+///   testnet: RPC 19944, P2P 40333,  Explorer 19955
+///   devnet:  RPC 29944, P2P 50333,  Explorer 29955
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum Network {
+    #[default]
+    Devnet,
+    Testnet,
+    Mainnet,
+}
+
+impl Network {
+    fn port_offset(self) -> u16 {
+        match self {
+            Network::Mainnet => 0,
+            Network::Testnet => 10000,
+            Network::Devnet => 20000,
+        }
+    }
+
+    fn p2p_offset(self) -> u16 {
+        match self {
+            Network::Mainnet => 0,
+            Network::Testnet => 10000,
+            Network::Devnet => 20000,
+        }
+    }
+
+    fn default_data_dir(self) -> &'static str {
+        match self {
+            Network::Devnet => "data/devnet",
+            Network::Testnet => "data/testnet",
+            Network::Mainnet => "data/mainnet",
+        }
+    }
+
+    fn default_block_time(self) -> u64 {
+        match self {
+            Network::Devnet => 2000,
+            Network::Testnet => 2000,
+            Network::Mainnet => 6000,
+        }
+    }
+}
+
 /// Solen blockchain node.
 #[derive(Parser)]
 #[command(name = "solen-node", version = "0.1.0")]
 struct Cli {
-    /// RPC server listen port.
-    #[arg(long, default_value = "9944")]
-    rpc_port: u16,
+    /// Network environment (devnet, testnet, mainnet).
+    /// Sets default ports, data directory, and block time.
+    #[arg(long, default_value = "devnet")]
+    network: Network,
 
-    /// P2P listen port.
-    #[arg(long, default_value = "30333")]
-    p2p_port: u16,
+    /// RPC server listen port. Defaults: mainnet=9944, testnet=19944, devnet=29944.
+    #[arg(long)]
+    rpc_port: Option<u16>,
+
+    /// P2P listen port. Defaults: mainnet=30333, testnet=40333, devnet=50333.
+    #[arg(long)]
+    p2p_port: Option<u16>,
 
     /// Data directory for persistent storage.
-    #[arg(long, default_value = "data/solen-db")]
-    data_dir: String,
+    #[arg(long)]
+    data_dir: Option<String>,
 
     /// Block production interval in milliseconds.
-    #[arg(long, default_value = "2000")]
-    block_time: u64,
+    #[arg(long)]
+    block_time: Option<u64>,
 
     /// Bootstrap peer multiaddrs (can be repeated).
     #[arg(long)]
@@ -54,14 +107,25 @@ struct Cli {
     #[arg(long)]
     in_memory: bool,
 
-    /// Explorer API port. Set to 0 to disable.
-    #[arg(long, default_value = "9955")]
-    explorer_port: u16,
+    /// Explorer API port. Set to 0 to disable. Defaults: mainnet=9955, testnet=19955, devnet=29955.
+    #[arg(long)]
+    explorer_port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Resolve defaults from network.
+    let net = cli.network;
+    let rpc_port = cli.rpc_port.unwrap_or(9944 + net.port_offset());
+    let p2p_port = cli.p2p_port.unwrap_or(30333 + net.p2p_offset());
+    let explorer_port = cli.explorer_port.unwrap_or(9955 + net.port_offset());
+    let data_dir = cli
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| net.default_data_dir().to_string());
+    let block_time = cli.block_time.unwrap_or(net.default_block_time());
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -71,10 +135,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("=== Solen Node v0.1.0 ===");
     info!(
-        rpc_port = cli.rpc_port,
-        p2p_port = cli.p2p_port,
-        data_dir = %cli.data_dir,
-        block_time_ms = cli.block_time,
+        network = ?net,
+        rpc_port,
+        p2p_port,
+        explorer_port,
+        data_dir = %data_dir,
+        block_time_ms = block_time,
         p2p = !cli.no_p2p,
     );
 
@@ -83,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         info!("using in-memory storage (data will not persist)");
         Box::new(solen_storage::MemoryStore::new())
     } else {
-        create_persistent_store(&cli.data_dir)?
+        create_persistent_store(&data_dir)?
     };
 
     // --- Validator key ---
@@ -142,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Consensus engine ---
     let config = EngineConfig {
-        block_time_ms: cli.block_time,
+        block_time_ms: block_time,
         max_ops_per_block: 100,
         validator_id,
     };
@@ -159,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
             .collect();
 
         let net_config = NetworkConfig {
-            listen_port: cli.p2p_port,
+            listen_port: p2p_port,
             bootstrap_peers,
         };
 
@@ -193,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // --- RPC server ---
-    let rpc_addr: SocketAddr = format!("127.0.0.1:{}", cli.rpc_port).parse()?;
+    let rpc_addr: SocketAddr = format!("127.0.0.1:{}", rpc_port).parse()?;
     let _rpc_handle = start_rpc_server(rpc_addr, engine.clone()).await?;
 
     // --- Event indexer + Explorer API ---
@@ -212,9 +278,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    if cli.explorer_port > 0 {
+    if explorer_port > 0 {
         let explorer_addr: SocketAddr =
-            format!("127.0.0.1:{}", cli.explorer_port).parse()?;
+            format!("127.0.0.1:{}", explorer_port).parse()?;
         let explorer_store = index_store.clone();
         tokio::spawn(async move {
             if let Err(e) =
@@ -231,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
     let net_for_blocks = net_handle.clone();
     let consensus_handle = tokio::spawn(async move {
         let mut tick =
-            tokio::time::interval(tokio::time::Duration::from_millis(cli.block_time));
+            tokio::time::interval(tokio::time::Duration::from_millis(block_time));
 
         loop {
             tick.tick().await;

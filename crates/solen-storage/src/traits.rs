@@ -30,6 +30,12 @@ pub trait StateStore: Send + Sync {
     /// Compute the current state root hash over all stored key-value pairs.
     fn state_root(&self) -> Hash;
 
+    /// Cache the current state root. Call after a batch of writes to avoid
+    /// recomputing on subsequent `state_root()` calls.
+    fn commit_root(&mut self) {
+        // Default: no-op. Backends with caching override this.
+    }
+
     /// Create a snapshot that can be restored later.
     fn snapshot(&self) -> Box<dyn StateStore>;
 

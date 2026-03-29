@@ -1,11 +1,12 @@
 //! Smart account types.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{AccountId, Hash};
 
 /// Authentication method for a smart account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum AuthMethod {
     Passkey { credential_id: Vec<u8> },
     Ed25519 { public_key: [u8; 32] },
@@ -14,7 +15,7 @@ pub enum AuthMethod {
 }
 
 /// A smart account (no EOAs in Solen).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Account {
     pub id: AccountId,
     pub code_hash: Hash,

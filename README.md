@@ -1,4 +1,8 @@
-# Solen
+<p align="center">
+  <img src="solenlogo.png" alt="Solen" width="400" />
+</p>
+
+<h1 align="center">Solen</h1>
 
 A modular settlement network with native rollups, smart accounts, privacy primitives, and intent-aware execution.
 
@@ -98,7 +102,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-76 tests covering storage, crypto, execution, consensus, VM, system contracts, and 4 property-based invariant tests.
+135 tests covering storage, crypto, execution, consensus, VM, system contracts, rollup kit, intents, wallet SDK, and 4 property-based invariant tests.
 
 ### Start a Node
 
@@ -107,12 +111,34 @@ cargo run --bin solen-node
 ```
 
 This starts a single-validator devnet with:
-- JSON-RPC on `http://127.0.0.1:9944`
-- Explorer API on `http://127.0.0.1:9955`
-- P2P on port `30333`
-- RocksDB persistence at `data/solen-db`
+- JSON-RPC on `http://127.0.0.1:29944`
+- Explorer API on `http://127.0.0.1:29955`
+- P2P on port `50333`
+- RocksDB persistence at `data/devnet`
 - 2-second block times
 - Three genesis accounts (faucet with 1B tokens, alice with 10K, bob with 5K)
+
+### Network Environments
+
+Use `--network` to select the environment. Each sets default ports, data directory, and block time:
+
+```bash
+solen-node --network devnet    # default
+solen-node --network testnet
+solen-node --network mainnet
+```
+
+| | RPC | P2P | Explorer | Data Directory | Block Time |
+|---|---|---|---|---|---|
+| **mainnet** | 9944 | 30333 | 9955 | `data/mainnet` | 6s |
+| **testnet** | 19944 | 40333 | 19955 | `data/testnet` | 2s |
+| **devnet** | 29944 | 50333 | 29955 | `data/devnet` | 2s |
+
+Any default can be overridden explicitly:
+
+```bash
+solen-node --network testnet --rpc-port 8888
+```
 
 ### CLI Options
 
@@ -120,15 +146,16 @@ This starts a single-validator devnet with:
 solen-node [OPTIONS]
 
 Options:
-    --rpc-port <PORT>              JSON-RPC port [default: 9944]
-    --p2p-port <PORT>              P2P listen port [default: 30333]
-    --data-dir <DIR>               RocksDB data directory [default: data/solen-db]
-    --block-time <MS>              Block interval in ms [default: 2000]
+    --network <NETWORK>            devnet, testnet, or mainnet [default: devnet]
+    --rpc-port <PORT>              JSON-RPC port
+    --p2p-port <PORT>              P2P listen port
+    --data-dir <DIR>               RocksDB data directory
+    --block-time <MS>              Block interval in ms
     --bootstrap <MULTIADDR>        Bootstrap peer address (repeatable)
     --validator-seed <HEX>         32-byte hex seed for validator key
     --no-p2p                       Disable P2P networking
     --in-memory                    Use in-memory storage (no persistence)
-    --explorer-port <PORT>         Explorer API port [default: 9955]
+    --explorer-port <PORT>         Explorer API port (0 to disable)
 ```
 
 ### Multi-Node Devnet
@@ -137,13 +164,13 @@ Options:
 # Terminal 1 — Node A
 cargo run --bin solen-node
 
-# Terminal 2 — Node B
+# Terminal 2 — Node B (auto-avoids port conflicts with different data dir)
 cargo run --bin solen-node -- \
-    --rpc-port 9945 \
-    --p2p-port 30334 \
-    --data-dir data/solen-db-2 \
-    --explorer-port 9956 \
-    --bootstrap /ip4/127.0.0.1/tcp/30333
+    --rpc-port 29945 \
+    --p2p-port 50334 \
+    --data-dir data/devnet-2 \
+    --explorer-port 29956 \
+    --bootstrap /ip4/127.0.0.1/tcp/50333
 ```
 
 ---
@@ -312,14 +339,16 @@ const result = await alice.submit(op);
 
 | Metric | Value |
 |--------|-------|
-| Rust crates | 13 |
+| Rust crates | 17 |
 | TypeScript packages | 2 |
-| Rust source lines | ~12,000 |
-| Test functions | 76 |
+| Rust source lines | ~18,000 |
+| Test functions | 135 |
 | Property tests | 4 (hundreds of cases each) |
 | Fuzz targets | 3 |
 | RPC methods | 7 |
 | Explorer endpoints | 5 |
+| Transfer TPS | ~14,000 |
+| Contract call TPS | ~10,000 |
 
 ---
 

@@ -1,8 +1,10 @@
 //! State management: account lookups, balance changes, nonce tracking.
 //!
-//! All account state is serialized to JSON and stored via the `StateStore` trait.
-//! Keys are prefixed to separate namespaces: `acc/<id>` for accounts.
+//! Account state is serialized with borsh (binary, fast) and stored via
+//! the `StateStore` trait. Keys are prefixed: `acc/<id>` for accounts,
+//! `code/<hash>` for bytecode, `cs/<id>/<key>` for contract storage.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use solen_storage::{StateStore, StorageError};
 use solen_types::account::{Account, AuthMethod};
 use solen_types::{AccountId, Hash};
@@ -33,7 +35,7 @@ fn load_account(store: &dyn StateStore, id: &AccountId) -> Result<Option<Account
     let key = account_key(id);
     match store.get(&key)? {
         Some(data) => {
-            let account: Account = serde_json::from_slice(&data)
+            let account = Account::try_from_slice(&data)
                 .map_err(|e| StateError::Serialization(e.to_string()))?;
             Ok(Some(account))
         }
@@ -48,8 +50,7 @@ fn require_account(store: &dyn StateStore, id: &AccountId) -> Result<Account, St
 
 fn save_account(store: &mut dyn StateStore, account: &Account) -> Result<(), StateError> {
     let key = account_key(&account.id);
-    let data =
-        serde_json::to_vec(account).map_err(|e| StateError::Serialization(e.to_string()))?;
+    let data = borsh::to_vec(account).map_err(|e| StateError::Serialization(e.to_string()))?;
     store.put(&key, &data)?;
     Ok(())
 }

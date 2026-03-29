@@ -13,8 +13,14 @@ solen-storage = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+borsh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rayon = { workspace = true }
+
+[[bench]]
+name = "tps"
+harness = false
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -4,6 +4,7 @@ pub mod account;
 pub mod block;
 pub mod crypto;
 pub mod rollup;
+pub mod system;
 pub mod transaction;
 
 /// Fixed-size 32-byte hash.

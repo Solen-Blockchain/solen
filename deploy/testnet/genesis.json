@@ -30,7 +30,7 @@
   "faucet": {
     "account_name": "faucet",
     "seed_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
-    "drip_amount": 100000,
+    "drip_amount": 100000000,
     "cooldown_secs": 300
   }
 }

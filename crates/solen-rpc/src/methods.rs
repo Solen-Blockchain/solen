@@ -65,6 +65,32 @@ pub struct ChainStatus {
     pub pending_ops: usize,
 }
 
+/// Validator info returned by the RPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorInfo {
+    pub address: String,
+    pub self_stake: String,
+    pub total_delegated: String,
+    pub total_stake: String,
+    pub is_active: bool,
+    pub is_genesis: bool,
+}
+
+/// Staking info for an account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakingInfo {
+    pub total_delegated: String,
+    pub delegations: Vec<DelegationInfo>,
+    pub pending_undelegations: usize,
+}
+
+/// A single delegation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationInfo {
+    pub validator: String,
+    pub amount: String,
+}
+
 #[rpc(server)]
 pub trait SolenApi {
     #[method(name = "solen_getBalance")]
@@ -87,6 +113,12 @@ pub trait SolenApi {
 
     #[method(name = "solen_chainStatus")]
     fn chain_status(&self) -> RpcResult<ChainStatus>;
+
+    #[method(name = "solen_getValidators")]
+    fn get_validators(&self) -> RpcResult<Vec<ValidatorInfo>>;
+
+    #[method(name = "solen_getStakingInfo")]
+    fn get_staking_info(&self, account_id: String) -> RpcResult<StakingInfo>;
 }
 
 /// Implementation of the Solen RPC API.
@@ -225,6 +257,63 @@ impl SolenApiServer for SolenRpc {
             height: self.engine.height(),
             latest_state_root: hex_encode(&store.state_root()),
             pending_ops: self.engine.mempool().len(),
+        })
+    }
+
+    fn get_validators(&self) -> RpcResult<Vec<ValidatorInfo>> {
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let staking =
+            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+
+        let validators: Vec<ValidatorInfo> = staking
+            .validators
+            .iter()
+            .map(|v| ValidatorInfo {
+                address: hex_encode(&v.id),
+                self_stake: v.self_stake.to_string(),
+                total_delegated: v.total_delegated.to_string(),
+                total_stake: v.total_stake().to_string(),
+                is_active: v.is_active,
+                is_genesis: v.is_genesis,
+            })
+            .collect();
+
+        Ok(validators)
+    }
+
+    fn get_staking_info(&self, account_id: String) -> RpcResult<StakingInfo> {
+        let id = parse_account_id(&account_id)?;
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let staking =
+            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+
+        let delegations: Vec<DelegationInfo> = staking
+            .delegations
+            .iter()
+            .filter(|d| d.delegator == id)
+            .map(|d| DelegationInfo {
+                validator: hex_encode(&d.validator),
+                amount: d.amount.to_string(),
+            })
+            .collect();
+
+        let total: u128 = delegations
+            .iter()
+            .map(|d| d.amount.parse::<u128>().unwrap_or(0))
+            .sum();
+
+        let pending = staking
+            .undelegations
+            .iter()
+            .filter(|u| u.delegator == id)
+            .count();
+
+        Ok(StakingInfo {
+            total_delegated: total.to_string(),
+            delegations,
+            pending_undelegations: pending,
         })
     }
 }

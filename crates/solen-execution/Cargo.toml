@@ -10,6 +10,7 @@ solen-types = { workspace = true }
 solen-crypto = { workspace = true }
 solen-vm = { workspace = true }
 solen-storage = { workspace = true }
+solen-system-contracts = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

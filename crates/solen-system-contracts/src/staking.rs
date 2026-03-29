@@ -306,6 +306,44 @@ impl StakingContract {
             .map(|d| d.amount)
             .sum()
     }
+
+    /// Number of active validators.
+    pub fn active_validator_count(&self) -> usize {
+        self.validators.iter().filter(|v| v.is_active).count()
+    }
+
+    /// Total stake across all active validators.
+    pub fn total_active_stake(&self) -> u128 {
+        self.validators
+            .iter()
+            .filter(|v| v.is_active)
+            .map(|v| v.total_stake())
+            .sum()
+    }
+
+    /// Get all active validators.
+    pub fn active_validators(&self) -> Vec<&StakingValidator> {
+        self.validators.iter().filter(|v| v.is_active).collect()
+    }
+
+    // ── Persistence ─────────────────────────────────────────────
+
+    const STORAGE_KEY: &'static [u8] = b"__staking_state__";
+
+    /// Load staking state from the store.
+    pub fn load(store: &dyn solen_storage::StateStore) -> Self {
+        match store.get(Self::STORAGE_KEY) {
+            Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+            _ => Self::default(),
+        }
+    }
+
+    /// Save staking state to the store.
+    pub fn save(&self, store: &mut dyn solen_storage::StateStore) {
+        if let Ok(data) = serde_json::to_vec(self) {
+            let _ = store.put(Self::STORAGE_KEY, &data);
+        }
+    }
 }
 
 #[cfg(test)]

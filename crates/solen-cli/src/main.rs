@@ -52,6 +52,29 @@ enum Commands {
         height: Option<u64>,
     },
 
+    /// List all validators and their stake
+    Validators,
+
+    /// Delegate tokens to a validator
+    Stake {
+        /// Your key name
+        from: String,
+        /// Validator address (hex)
+        validator: String,
+        /// Amount to stake
+        amount: u128,
+    },
+
+    /// Undelegate tokens from a validator
+    Unstake {
+        /// Your key name
+        from: String,
+        /// Validator address (hex)
+        validator: String,
+        /// Amount to unstake
+        amount: u128,
+    },
+
     /// Transfer tokens between accounts
     Transfer {
         /// Sender key name (must exist in keystore)
@@ -119,6 +142,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Balance { account } => commands::cmd_balance(&rpc, &account).await?,
         Commands::Account { account } => commands::cmd_account(&rpc, &account).await?,
         Commands::Block { height } => commands::cmd_block(&rpc, height).await?,
+        Commands::Validators => commands::cmd_validators(&rpc).await?,
+        Commands::Stake { from, validator, amount } => {
+            commands::cmd_stake(&rpc, &from, &validator, amount).await?
+        }
+        Commands::Unstake { from, validator, amount } => {
+            commands::cmd_unstake(&rpc, &from, &validator, amount).await?
+        }
         Commands::Transfer { from, to, amount } => {
             commands::cmd_transfer(&rpc, &from, &to, amount).await?
         }

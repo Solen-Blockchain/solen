@@ -27,6 +27,150 @@ pub async fn cmd_status(rpc: &RpcClient) -> Result<()> {
 
 // ── Balance ─────────────────────────────────────────────────────
 
+// ── Validators ──────────────────────────────────────────────────
+
+pub async fn cmd_validators(rpc: &RpcClient) -> Result<()> {
+    let validators = rpc.get_validators().await?;
+
+    if validators.is_empty() {
+        println!("No validators registered.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<6} {:<18} {:>14} {:>14} {:>14}",
+        "STATUS", "ADDRESS", "SELF STAKE", "DELEGATED", "TOTAL"
+    );
+    println!("{}", "─".repeat(70));
+
+    for v in &validators {
+        let status = if v.is_active {
+            if v.is_genesis { "GENSIS" } else { "ACTIVE" }
+        } else {
+            "INACTV"
+        };
+
+        println!(
+            "{:<6} {}...  {:>14} {:>14} {:>14}",
+            status,
+            &v.address[..16],
+            v.self_stake,
+            v.total_delegated,
+            v.total_stake,
+        );
+    }
+
+    println!("\n{} validators ({} active)",
+        validators.len(),
+        validators.iter().filter(|v| v.is_active).count(),
+    );
+
+    Ok(())
+}
+
+// ── Stake ───────────────────────────────────────────────────────
+
+pub async fn cmd_stake(
+    rpc: &RpcClient,
+    from: &str,
+    validator: &str,
+    amount: u128,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let validator_id = resolve_account_id(validator)?;
+    let validator_bytes = hex_decode(&validator_id)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Build args: validator[32] + amount[16]
+    let mut args = Vec::new();
+    args.extend_from_slice(&validator_bytes);
+    args.extend_from_slice(&amount.to_le_bytes());
+
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: {
+                let mut t = [0xFFu8; 32];
+                t[31] = 0x01;
+                t
+            },
+            method: "delegate".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Stake submitted successfully.");
+        println!("  Delegated {} to {}...", amount, &validator_id[..16]);
+    } else {
+        println!("Rejected: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_unstake(
+    rpc: &RpcClient,
+    from: &str,
+    validator: &str,
+    amount: u128,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let validator_id = resolve_account_id(validator)?;
+    let validator_bytes = hex_decode(&validator_id)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Build args: validator[32] + amount[16] + epoch[8]
+    let mut args = Vec::new();
+    args.extend_from_slice(&validator_bytes);
+    args.extend_from_slice(&amount.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes()); // epoch placeholder
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: {
+                let mut t = [0xFFu8; 32];
+                t[31] = 0x01;
+                t
+            },
+            method: "undelegate".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Unstake submitted successfully.");
+        println!("  Undelegating {} from {}...", amount, &validator_id[..16]);
+        println!("  Funds available after unbonding period (7 epochs).");
+    } else {
+        println!("Rejected: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+// ── Balance ─────────────────────────────────────────────────────
+
 pub async fn cmd_balance(rpc: &RpcClient, account: &str) -> Result<()> {
     let account_id = resolve_account_id(account)?;
     let balance = rpc.get_balance(&account_id).await?;

@@ -189,14 +189,29 @@ impl GenesisConfig {
             auth_methods: vec![],
         });
 
+        // Staking rewards pool — 500M SOLEN for validator rewards over 10 years.
+        genesis_accounts.push(GenesisAccount {
+            id: solen_types::system::STAKING_POOL_ADDRESS,
+            balance: 500_000_000_00_000_000, // 500M with 8 decimals
+            auth_methods: vec![],
+        });
+
         apply_genesis(store, genesis_accounts)?;
+
+        // Initialize staking contract with genesis validators.
+        let mut staking = solen_system_contracts::staking::StakingContract::new();
+        for v in &self.validators {
+            let public_key = resolve_validator_pubkey(v)?;
+            let _ = staking.register_genesis_validator(public_key, v.stake);
+        }
+        staking.save(store);
 
         info!(
             chain_name = %self.chain_name,
             chain_id = self.chain_id,
             validators = self.validators.len(),
             accounts = self.accounts.len(),
-            "genesis applied"
+            "genesis applied (staking initialized)"
         );
 
         Ok(())
@@ -277,7 +292,7 @@ impl GenesisConfig {
             faucet: Some(FaucetConfig {
                 account_name: "faucet".into(),
                 seed_hex: "2a".repeat(32),
-                drip_amount: 100_000,
+                drip_amount: 100_000_000, // 1 SOLEN (8 decimals)
                 cooldown_secs: 300,
             }),
         }

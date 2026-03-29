@@ -97,6 +97,10 @@ impl RpcClient {
         self.call("solen_simulateOperation", serde_json::json!([op]))
             .await
     }
+
+    pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>> {
+        self.call("solen_getValidators", serde_json::json!([])).await
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,4 +142,14 @@ pub struct SimulationResult {
     pub success: bool,
     pub gas_used: u64,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidatorInfo {
+    pub address: String,
+    pub self_stake: String,
+    pub total_delegated: String,
+    pub total_stake: String,
+    pub is_active: bool,
+    pub is_genesis: bool,
 }

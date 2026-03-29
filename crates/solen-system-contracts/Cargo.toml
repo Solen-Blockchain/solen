@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 solen-types = { workspace = true }
+solen-storage = { workspace = true }
 solen-vm = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

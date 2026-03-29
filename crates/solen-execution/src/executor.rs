@@ -214,6 +214,29 @@ impl BlockExecutor {
 
         // Execute each action.
         for action in &op.actions {
+            // Check for system contract calls (need raw store access).
+            if let Action::Call { target, method, args } = action {
+                if solen_types::system::is_system_contract(target) {
+                    let result = crate::system_calls::execute_system_call(
+                        store, &op.sender, target, method, args,
+                    );
+                    gas_used += result.gas_used;
+                    events.extend(result.events);
+                    if let Some(err) = result.error {
+                        warn!(sender = ?op.sender[..4], error = %err, "system call failed");
+                        return ExecutionReceipt {
+                            sender: op.sender,
+                            nonce: op.nonce,
+                            success: false,
+                            gas_used,
+                            error: Some(err),
+                            events,
+                        };
+                    }
+                    continue;
+                }
+            }
+
             let mut state = StateManager::new(store);
             match self.execute_action(&mut state, &op.sender, action, &mut events) {
                 Ok(gas) => gas_used += gas,
@@ -346,6 +369,8 @@ impl BlockExecutor {
                 method,
                 args,
             } => {
+                // System contract calls are handled at the operation level.
+                // If we get here, it's a user contract call.
                 let target_account = state.require_account(target)?;
 
                 // If the account has no code, it's not a contract.

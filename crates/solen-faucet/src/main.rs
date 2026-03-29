@@ -43,8 +43,8 @@ struct Cli {
     #[arg(long, default_value = "faucet")]
     account_name: String,
 
-    /// Amount to drip per request.
-    #[arg(long, default_value = "10000")]
+    /// Amount to drip per request (in base units, 1 SOLEN = 100000000).
+    #[arg(long, default_value = "100000000")]
     drip_amount: u128,
 
     /// Cooldown per recipient in seconds.

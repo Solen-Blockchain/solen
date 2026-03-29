@@ -1,0 +1,388 @@
+//! System contract call routing.
+//!
+//! When Action::Call targets a well-known system address, the call is
+//! routed here instead of the WASM VM. Arguments are encoded as:
+//! method_name + \0 + arg_bytes (same as WASM contracts).
+
+use solen_storage::StateStore;
+use solen_types::system::*;
+use solen_types::AccountId;
+
+use crate::receipt::Event;
+use crate::state::StateManager;
+
+/// Result of a system call.
+pub struct SystemCallResult {
+    pub gas_used: u64,
+    pub events: Vec<Event>,
+    pub error: Option<String>,
+}
+
+const SYSTEM_CALL_GAS: u64 = 200;
+
+/// Execute a system contract call.
+pub fn execute_system_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    target: &AccountId,
+    method: &str,
+    args: &[u8],
+) -> SystemCallResult {
+    if *target == STAKING_ADDRESS {
+        execute_staking_call(store, sender, method, args)
+    } else if *target == GOVERNANCE_ADDRESS {
+        execute_governance_call(store, sender, method, args)
+    } else if *target == BRIDGE_ADDRESS {
+        execute_bridge_call(store, sender, method, args)
+    } else if *target == TREASURY_ADDRESS {
+        execute_treasury_call(store, sender, method)
+    } else if *target == INTENT_ADDRESS {
+        execute_intent_call(store, sender, method, args)
+    } else {
+        SystemCallResult {
+            gas_used: 0,
+            events: vec![],
+            error: Some("unknown system contract".into()),
+        }
+    }
+}
+
+fn read_account_id(args: &[u8], offset: usize) -> Option<AccountId> {
+    if args.len() < offset + 32 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&args[offset..offset + 32]);
+    Some(id)
+}
+
+fn read_u128(args: &[u8], offset: usize) -> Option<u128> {
+    if args.len() < offset + 16 {
+        return None;
+    }
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&args[offset..offset + 16]);
+    Some(u128::from_le_bytes(buf))
+}
+
+fn read_u64(args: &[u8], offset: usize) -> Option<u64> {
+    if args.len() < offset + 8 {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&args[offset..offset + 8]);
+    Some(u64::from_le_bytes(buf))
+}
+
+// ── Staking ─────────────────────────────────────────────────────
+
+fn execute_staking_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+    args: &[u8],
+) -> SystemCallResult {
+    use solen_system_contracts::staking::StakingContract;
+
+    let mut staking = StakingContract::load(store);
+    let mut events = Vec::new();
+
+    let result = match method {
+        "delegate" => {
+            // args: validator_id[32] + amount[16]
+            let validator = match read_account_id(args, 0) {
+                Some(v) => v,
+                None => return err("invalid args: need validator[32] + amount[16]"),
+            };
+            let amount = match read_u128(args, 32) {
+                Some(a) => a,
+                None => return err("invalid args: need amount[16]"),
+            };
+
+            // Deduct from sender balance.
+            let mut state = StateManager::new(store);
+            match state.require_account(sender) {
+                Ok(mut acct) => {
+                    if acct.balance < amount {
+                        return err("insufficient balance for delegation");
+                    }
+                    acct.balance -= amount;
+                    let _ = state.save_account(&acct);
+                }
+                Err(e) => return err(&e.to_string()),
+            }
+            drop(state);
+
+            // Reload staking after state manager dropped.
+            staking = StakingContract::load(store);
+
+            match staking.delegate(*sender, validator, amount) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: STAKING_ADDRESS,
+                        topic: b"delegate".to_vec(),
+                        data: amount.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "undelegate" => {
+            // args: validator_id[32] + amount[16] + current_epoch[8]
+            let validator = match read_account_id(args, 0) {
+                Some(v) => v,
+                None => return err("invalid args"),
+            };
+            let amount = match read_u128(args, 32) {
+                Some(a) => a,
+                None => return err("invalid args"),
+            };
+            let epoch = read_u64(args, 48).unwrap_or(0);
+
+            match staking.undelegate(*sender, validator, amount, epoch) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: STAKING_ADDRESS,
+                        topic: b"undelegate".to_vec(),
+                        data: amount.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "withdraw" => {
+            let epoch = read_u64(args, 0).unwrap_or(0);
+            let withdrawn = staking.withdraw_undelegated(*sender, epoch);
+
+            if withdrawn > 0 {
+                // Credit sender balance.
+                let mut state = StateManager::new(store);
+                if let Ok(mut acct) = state.require_account(sender) {
+                    acct.balance = acct.balance.saturating_add(withdrawn);
+                    let _ = state.save_account(&acct);
+                }
+                drop(state);
+
+                staking = StakingContract::load(store);
+
+                events.push(Event {
+                    emitter: STAKING_ADDRESS,
+                    topic: b"withdraw".to_vec(),
+                    data: withdrawn.to_le_bytes().to_vec(),
+                });
+            }
+            Ok(())
+        }
+        _ => Err(format!("unknown staking method: {method}")),
+    };
+
+    staking.save(store);
+
+    match result {
+        Ok(()) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: None,
+        },
+        Err(e) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: Some(e),
+        },
+    }
+}
+
+// ── Governance ──────────────────────────────────────────────────
+
+fn execute_governance_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+    args: &[u8],
+) -> SystemCallResult {
+    use solen_system_contracts::governance::{GovernanceContract, ProposalAction};
+
+    let mut gov = GovernanceContract::load(store);
+    let mut events = Vec::new();
+
+    let result = match method {
+        "propose_set_base_fee" => {
+            let new_fee = match read_u128(args, 0) {
+                Some(f) => f,
+                None => return err("invalid args: need new_fee[16]"),
+            };
+            let desc = String::from_utf8_lossy(&args[16..]).to_string();
+            let epoch = read_u64(args, 0).unwrap_or(0); // TODO: get real epoch
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetBaseFee { new_fee },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
+        "vote" => {
+            // args: proposal_id[8] + support[1] + stake_weight[16]
+            let proposal_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args"),
+            };
+            let support = args.get(8).map(|&b| b != 0).unwrap_or(false);
+            let weight = read_u128(args, 9).unwrap_or(1);
+            let epoch = 0; // TODO: get real epoch
+
+            match gov.vote(proposal_id, *sender, support, weight, epoch) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: GOVERNANCE_ADDRESS,
+                        topic: b"voted".to_vec(),
+                        data: proposal_id.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        _ => Err(format!("unknown governance method: {method}")),
+    };
+
+    gov.save(store);
+
+    match result {
+        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
+        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+    }
+}
+
+// ── Bridge ──────────────────────────────────────────────────────
+
+fn execute_bridge_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+    args: &[u8],
+) -> SystemCallResult {
+    use solen_system_contracts::bridge::BridgeContract;
+
+    let mut bridge = BridgeContract::load(store);
+    let mut events = Vec::new();
+
+    let result = match method {
+        "deposit" => {
+            // args: rollup_id[8] + amount[16]
+            let rollup_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need rollup_id[8] + amount[16]"),
+            };
+            let amount = match read_u128(args, 8) {
+                Some(a) => a,
+                None => return err("invalid args"),
+            };
+
+            // Deduct from sender.
+            let mut state = StateManager::new(store);
+            if let Ok(mut acct) = state.require_account(sender) {
+                if acct.balance < amount {
+                    return err("insufficient balance for deposit");
+                }
+                acct.balance -= amount;
+                let _ = state.save_account(&acct);
+            }
+            drop(state);
+
+            bridge = BridgeContract::load(store);
+
+            match bridge.deposit(rollup_id, amount) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: BRIDGE_ADDRESS,
+                        topic: b"deposit".to_vec(),
+                        data: amount.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "register_vault" => {
+            let rollup_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args"),
+            };
+            match bridge.register_vault(rollup_id) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: BRIDGE_ADDRESS,
+                        topic: b"vault_registered".to_vec(),
+                        data: rollup_id.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        _ => Err(format!("unknown bridge method: {method}")),
+    };
+
+    bridge.save(store);
+
+    match result {
+        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
+        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+    }
+}
+
+// ── Treasury ────────────────────────────────────────────────────
+
+fn execute_treasury_call(
+    store: &mut dyn StateStore,
+    _sender: &AccountId,
+    method: &str,
+) -> SystemCallResult {
+    use solen_system_contracts::treasury::TreasuryContract;
+
+    let treasury = TreasuryContract::load(store);
+
+    match method {
+        "status" => {
+            let events = vec![Event {
+                emitter: TREASURY_ADDRESS,
+                topic: b"treasury_status".to_vec(),
+                data: format!(
+                    "balance={},collected={},burned={}",
+                    treasury.balance, treasury.total_fees_collected, treasury.total_burned
+                )
+                .into_bytes(),
+            }];
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+        }
+        _ => err(&format!("unknown treasury method: {method}")),
+    }
+}
+
+// ── Intents ─────────────────────────────────────────────────────
+
+fn execute_intent_call(
+    _store: &mut dyn StateStore,
+    _sender: &AccountId,
+    method: &str,
+    _args: &[u8],
+) -> SystemCallResult {
+    // Intent pool runs in-memory, not in state. Expose via RPC instead.
+    err(&format!("intent operations use RPC, not system calls: {method}"))
+}
+
+fn err(msg: &str) -> SystemCallResult {
+    SystemCallResult {
+        gas_used: SYSTEM_CALL_GAS,
+        events: vec![],
+        error: Some(msg.to_string()),
+    }
+}

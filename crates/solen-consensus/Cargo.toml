@@ -11,8 +11,10 @@ solen-crypto = { workspace = true }
 solen-execution = { workspace = true }
 solen-p2p = { workspace = true }
 solen-storage = { workspace = true }
+solen-system-contracts = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+borsh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

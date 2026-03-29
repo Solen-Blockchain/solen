@@ -253,6 +253,21 @@ impl GovernanceContract {
     pub fn get_proposal(&self, id: u64) -> Option<&Proposal> {
         self.proposals.iter().find(|p| p.id == id)
     }
+
+    const STORAGE_KEY: &'static [u8] = b"__governance_state__";
+
+    pub fn load(store: &dyn solen_storage::StateStore) -> Self {
+        match store.get(Self::STORAGE_KEY) {
+            Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+            _ => Self::default(),
+        }
+    }
+
+    pub fn save(&self, store: &mut dyn solen_storage::StateStore) {
+        if let Ok(data) = serde_json::to_vec(self) {
+            let _ = store.put(Self::STORAGE_KEY, &data);
+        }
+    }
 }
 
 #[cfg(test)]

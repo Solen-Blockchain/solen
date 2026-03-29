@@ -12,7 +12,7 @@ ExecStart=/opt/solen/bin/solen-faucet \
     --port 8080 \
     --rpc http://127.0.0.1:19944 \
     --seed 2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a \
-    --drip-amount 100000 \
+    --drip-amount 100000000 \
     --cooldown 300
 Restart=always
 RestartSec=5

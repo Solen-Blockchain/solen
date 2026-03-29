@@ -258,13 +258,7 @@ impl ConsensusEngine {
                 save_chain_meta(store.as_mut(), height, epoch);
             }
 
-            {
-                let mut em = self.epoch_manager.write().unwrap();
-                if em.is_epoch_boundary(height) {
-                    let mut vs = self.validator_set.write().unwrap();
-                    em.process_epoch_transition(&mut vs);
-                }
-            }
+            self.maybe_process_epoch(height);
 
             info!(height, ops = op_count, epoch, "block finalized (single validator)");
 
@@ -529,14 +523,7 @@ impl ConsensusEngine {
                 save_chain_meta(store.as_mut(), height, header.epoch);
             }
 
-            // Epoch transition.
-            {
-                let mut em = self.epoch_manager.write().unwrap();
-                if em.is_epoch_boundary(height) {
-                    let mut vs = self.validator_set.write().unwrap();
-                    em.process_epoch_transition(&mut vs);
-                }
-            }
+            self.maybe_process_epoch(height);
 
             info!(
                 height,
@@ -544,6 +531,117 @@ impl ConsensusEngine {
                 "block finalized with quorum"
             );
         }
+    }
+
+    /// Process epoch transition if this height is an epoch boundary.
+    /// Distributes staking rewards to active validators and updates state.
+    fn maybe_process_epoch(&self, height: u64) {
+        let is_boundary = {
+            let em = self.epoch_manager.read().unwrap();
+            em.is_epoch_boundary(height)
+        };
+
+        if !is_boundary {
+            return;
+        }
+
+        // Epoch transition: rotate validators.
+        {
+            let mut em = self.epoch_manager.write().unwrap();
+            let mut vs = self.validator_set.write().unwrap();
+            em.process_epoch_transition(&mut vs);
+        }
+
+        // Distribute staking rewards from the staking pool account.
+        // ~317 SOLEN per epoch (50M/year ÷ 157,680 epochs), with 8 decimals.
+        let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN in base units
+        let mut store = self.store.write().unwrap();
+
+        // Load staking state.
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+
+        let active = staking.active_validators();
+        let total_stake = staking.total_active_stake();
+
+        if total_stake == 0 || active.is_empty() {
+            return;
+        }
+
+        let total_reward = reward_per_epoch;
+
+        // Check staking pool balance — rewards stop when pool is empty.
+        let pool_key = {
+            let mut k = b"acc/".to_vec();
+            k.extend_from_slice(&solen_types::system::STAKING_POOL_ADDRESS);
+            k
+        };
+
+        let pool_balance = if let Ok(Some(data)) = store.get(&pool_key) {
+            if let Ok(account) =
+                <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
+            {
+                account.balance
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        if pool_balance == 0 {
+            let epoch = self.epoch_manager.read().unwrap().current_epoch;
+            info!(epoch, "staking pool exhausted — no rewards this epoch");
+            return;
+        }
+
+        // Cap reward to available pool balance.
+        let actual_reward = total_reward.min(pool_balance);
+
+        // Deduct from staking pool.
+        if let Ok(Some(data)) = store.get(&pool_key) {
+            if let Ok(mut pool_account) =
+                <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
+            {
+                pool_account.balance = pool_account.balance.saturating_sub(actual_reward);
+                if let Ok(encoded) = borsh::to_vec(&pool_account) {
+                    let _ = store.put(&pool_key, &encoded);
+                }
+            }
+        }
+
+        // Distribute to validators proportionally.
+        for validator in &active {
+            let share = actual_reward * validator.total_stake() / total_stake;
+            if share == 0 {
+                continue;
+            }
+
+            let key = {
+                let mut k = b"acc/".to_vec();
+                k.extend_from_slice(&validator.id);
+                k
+            };
+
+            if let Ok(Some(data)) = store.get(&key) {
+                if let Ok(mut account) =
+                    <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
+                {
+                    account.balance = account.balance.saturating_add(share);
+                    if let Ok(encoded) = borsh::to_vec(&account) {
+                        let _ = store.put(&key, &encoded);
+                    }
+                }
+            }
+        }
+
+        let epoch = self.epoch_manager.read().unwrap().current_epoch;
+        info!(
+            epoch,
+            validators = active.len(),
+            reward = actual_reward,
+            pool_remaining = pool_balance.saturating_sub(actual_reward),
+            "epoch rewards distributed from staking pool"
+        );
     }
 
     /// Check if a block is pending at the given height (proposed but not finalized).

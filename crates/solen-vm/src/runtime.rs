@@ -182,8 +182,27 @@ pub struct ExecutionResult {
     pub storage: std::collections::HashMap<Vec<u8>, Vec<u8>>,
 }
 
+/// Safely get memory from a caller. Returns None if memory export is missing.
+fn get_memory(caller: &mut Caller<'_, StoreData>) -> Option<wasmtime::Memory> {
+    caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+}
+
+/// Safely read bytes from WASM memory. Returns false on out-of-bounds.
+fn safe_read(caller: &Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr: usize, buf: &mut [u8]) -> bool {
+    memory.read(caller, ptr, buf).is_ok()
+}
+
+/// Safely write bytes to WASM memory. Returns false on out-of-bounds.
+fn safe_write(caller: &mut Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr: usize, data: &[u8]) -> bool {
+    memory.write(caller, ptr, data).is_ok()
+}
+
 /// Register host functions using typed Func API (no closures capturing context).
 /// Context is accessed via `Caller::data()` / `Caller::data_mut()`.
+/// All memory operations are bounds-checked — invalid pointers return error
+/// values instead of panicking.
 fn register_host_functions_typed(
     linker: &mut Linker<StoreData>,
 ) -> Result<(), VmError> {
@@ -196,14 +215,21 @@ fn register_host_functions_typed(
              key_len: i32,
              val_ptr: i32|
              -> i32 {
-                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return -1,
+                };
                 let mut key = vec![0u8; key_len as usize];
-                memory.read(&caller, key_ptr as usize, &mut key).unwrap();
+                if !safe_read(&caller, &memory, key_ptr as usize, &mut key) {
+                    return -1;
+                }
 
                 let val = caller.data().ctx.storage.get(&key).cloned();
                 match val {
                     Some(val) => {
-                        memory.write(&mut caller, val_ptr as usize, &val).unwrap();
+                        if !safe_write(&mut caller, &memory, val_ptr as usize, &val) {
+                            return -1;
+                        }
                         val.len() as i32
                     }
                     None => -1,
@@ -221,11 +247,14 @@ fn register_host_functions_typed(
              key_len: i32,
              val_ptr: i32,
              val_len: i32| {
-                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
                 let mut key = vec![0u8; key_len as usize];
                 let mut val = vec![0u8; val_len as usize];
-                memory.read(&caller, key_ptr as usize, &mut key).unwrap();
-                memory.read(&caller, val_ptr as usize, &mut val).unwrap();
+                if !safe_read(&caller, &memory, key_ptr as usize, &mut key) { return; }
+                if !safe_read(&caller, &memory, val_ptr as usize, &mut val) { return; }
                 caller.data_mut().ctx.storage.insert(key, val);
             },
         )
@@ -240,11 +269,14 @@ fn register_host_functions_typed(
              topic_len: i32,
              data_ptr: i32,
              data_len: i32| {
-                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
                 let mut topic = vec![0u8; topic_len as usize];
                 let mut data = vec![0u8; data_len as usize];
-                memory.read(&caller, topic_ptr as usize, &mut topic).unwrap();
-                memory.read(&caller, data_ptr as usize, &mut data).unwrap();
+                if !safe_read(&caller, &memory, topic_ptr as usize, &mut topic) { return; }
+                if !safe_read(&caller, &memory, data_ptr as usize, &mut data) { return; }
                 caller.data_mut().ctx.events.push(HostEvent { topic, data });
             },
         )
@@ -256,8 +288,11 @@ fn register_host_functions_typed(
             "get_caller",
             |mut caller: Caller<'_, StoreData>, out_ptr: i32| {
                 let id = caller.data().ctx.caller;
-                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
-                memory.write(&mut caller, out_ptr as usize, &id).unwrap();
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &id);
             },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
@@ -277,9 +312,12 @@ fn register_host_functions_typed(
             "env",
             "set_return_data",
             |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| {
-                let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
                 let mut data = vec![0u8; len as usize];
-                memory.read(&caller, ptr as usize, &mut data).unwrap();
+                if !safe_read(&caller, &memory, ptr as usize, &mut data) { return; }
                 caller.data_mut().ctx.return_data = data;
             },
         )

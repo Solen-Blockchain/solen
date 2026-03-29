@@ -378,8 +378,25 @@ impl ConsensusEngine {
         &self,
         validator_id: ValidatorId,
         block_height: u64,
-        _block_hash: Hash,
+        attested_hash: Hash,
     ) -> bool {
+        // Verify attestation is for a block we know about.
+        {
+            let pending = self.pending_blocks.read().unwrap();
+            if let Some((header, _, _, _)) = pending.get(&block_height) {
+                let expected_hash = block_hash(header);
+                if expected_hash != attested_hash {
+                    warn!(
+                        height = block_height,
+                        "attestation block hash mismatch — ignoring"
+                    );
+                    return false;
+                }
+            }
+            // If we don't have the block yet, still accept the attestation
+            // (it may arrive before the block in gossip ordering).
+        }
+
         // Add to pending attestations.
         {
             let mut atts = self.pending_attestations.write().unwrap();
@@ -393,7 +410,7 @@ impl ConsensusEngine {
             entry.push(Attestation {
                 validator_id,
                 block_height,
-                block_hash: _block_hash,
+                block_hash: attested_hash,
             });
         }
 

@@ -139,7 +139,7 @@ impl BlockExecutor {
                     None => return false,
                 };
                 if auth_methods.is_empty() {
-                    return true;
+                    return false; // no auth methods = reject (accounts must have auth)
                 }
                 auth_methods.iter().any(|method| match method {
                     solen_types::account::AuthMethod::Ed25519 { public_key } => {
@@ -246,7 +246,7 @@ impl BlockExecutor {
                     if let Ok(Some(mut treasury)) =
                         state.get_account(&self.fee_config.treasury_account)
                     {
-                        treasury.balance += treasury_share;
+                        treasury.balance = treasury.balance.saturating_add(treasury_share);
                         let _ = state.save_account(&treasury);
                     }
                 }
@@ -296,7 +296,7 @@ impl BlockExecutor {
             _ => false,
         });
 
-        if !sig_valid && !account.auth_methods.is_empty() {
+        if !sig_valid {
             return Err(ExecutionError::InvalidSignature);
         }
 

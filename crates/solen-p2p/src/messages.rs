@@ -42,8 +42,8 @@ impl NetworkMessage {
     }
 
     /// Serialize to JSON bytes for gossip.
-    pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("message serialization should not fail")
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
     }
 
     /// Deserialize from JSON bytes.

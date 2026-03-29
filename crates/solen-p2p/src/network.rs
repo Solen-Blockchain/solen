@@ -163,9 +163,10 @@ impl NetworkService {
                     // Handle outbound messages.
                     Some(msg) = outbound_rx.recv() => {
                         let topic = IdentTopic::new(msg.topic());
-                        let data = msg.encode();
-                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                            debug!(error = %e, "failed to publish message");
+                        if let Some(data) = msg.encode() {
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                debug!(error = %e, "failed to publish message");
+                            }
                         }
                     }
                     // Handle swarm events.
@@ -242,7 +243,7 @@ mod tests {
             gas_used: 1000,
         };
 
-        let encoded = msg.encode();
+        let encoded = msg.encode().unwrap();
         let decoded = NetworkMessage::decode(&encoded).unwrap();
 
         match decoded {
@@ -264,7 +265,7 @@ mod tests {
             signature: vec![1, 2, 3],
         };
 
-        let encoded = msg.encode();
+        let encoded = msg.encode().unwrap();
         let decoded = NetworkMessage::decode(&encoded).unwrap();
 
         match decoded {

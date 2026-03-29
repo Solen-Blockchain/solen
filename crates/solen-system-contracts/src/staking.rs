@@ -194,8 +194,8 @@ impl StakingContract {
             .find(|v| v.id == validator)
             .ok_or(StakingError::ValidatorNotFound)?;
 
-        val.total_delegated += amount;
-        let reward_debt = val.accumulated_reward_per_token * amount / 1_000_000;
+        val.total_delegated = val.total_delegated.saturating_add(amount);
+        let reward_debt = val.accumulated_reward_per_token.saturating_mul(amount) / 1_000_000;
 
         // Check if delegation already exists.
         if let Some(d) = self

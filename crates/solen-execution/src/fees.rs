@@ -33,17 +33,17 @@ impl Default for FeeConfig {
 impl FeeConfig {
     /// Calculate the total fee for a given gas amount.
     pub fn calculate_fee(&self, gas_used: u64) -> u128 {
-        self.base_fee_per_gas * gas_used as u128
+        self.base_fee_per_gas.saturating_mul(gas_used as u128)
     }
 
     /// Calculate the treasury portion (not burned).
     pub fn treasury_amount(&self, total_fee: u128) -> u128 {
-        total_fee * (10_000 - self.burn_rate_bps) as u128 / 10_000
+        total_fee.saturating_mul((10_000 - self.burn_rate_bps) as u128) / 10_000
     }
 
     /// Calculate the burned portion.
     pub fn burn_amount(&self, total_fee: u128) -> u128 {
-        total_fee * self.burn_rate_bps as u128 / 10_000
+        total_fee.saturating_mul(self.burn_rate_bps as u128) / 10_000
     }
 }
 

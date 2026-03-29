@@ -166,7 +166,7 @@ impl<'a> StateManager<'a> {
                 self.require_account(to)?
             }
         };
-        receiver.balance += amount;
+        receiver.balance = receiver.balance.saturating_add(amount);
         self.save_account(&receiver)?;
 
         Ok(())

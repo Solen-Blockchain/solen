@@ -203,6 +203,7 @@ mod tests {
                 proposer: [2; 32],
                 timestamp_ms: 12345,
             },
+            operations: vec![],
             tx_count: 5,
             gas_used: 1000,
         };
@@ -211,7 +212,7 @@ mod tests {
         let decoded = NetworkMessage::decode(&encoded).unwrap();
 
         match decoded {
-            NetworkMessage::NewBlock { header, tx_count, gas_used } => {
+            NetworkMessage::NewBlock { header, tx_count, gas_used, .. } => {
                 assert_eq!(header.height, 1);
                 assert_eq!(tx_count, 5);
                 assert_eq!(gas_used, 1000);

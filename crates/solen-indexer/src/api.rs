@@ -7,6 +7,7 @@ use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use solen_consensus::engine::ConsensusEngine;
 use tracing::info;
 
 use crate::store::{IndexStore, IndexedBlock, IndexedEvent, IndexedTx};
@@ -14,6 +15,7 @@ use crate::store::{IndexStore, IndexedBlock, IndexedEvent, IndexedTx};
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<RwLock<IndexStore>>,
+    pub engine: Option<Arc<ConsensusEngine>>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +36,22 @@ pub struct StatusResponse {
     pub total_events: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidatorResponse {
+    pub id: String,
+    pub stake: String,
+    pub status: String,
+    pub missed_blocks: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidatorSetResponse {
+    pub validators: Vec<ValidatorResponse>,
+    pub total_active_stake: String,
+    pub active_count: usize,
+    pub total_count: usize,
+}
+
 /// Build the explorer REST API router.
 pub fn router(state: ApiState) -> Router {
     Router::new()
@@ -42,6 +60,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/blocks/:height", get(get_block))
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
+        .route("/api/validators", get(get_validators))
         .with_state(state)
 }
 
@@ -103,12 +122,55 @@ async fn get_events(
     Json(events)
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetResponse> {
+    let Some(engine) = &state.engine else {
+        return Json(ValidatorSetResponse {
+            validators: vec![],
+            total_active_stake: "0".to_string(),
+            active_count: 0,
+            total_count: 0,
+        });
+    };
+
+    let vs = engine.validator_set();
+    let vs = vs.read().unwrap();
+
+    let validators: Vec<ValidatorResponse> = vs
+        .all()
+        .iter()
+        .map(|v| ValidatorResponse {
+            id: hex_encode(&v.id),
+            stake: v.stake.to_string(),
+            status: match v.status {
+                solen_consensus::validator::ValidatorStatus::Active => "Active".to_string(),
+                solen_consensus::validator::ValidatorStatus::Jailed => "Jailed".to_string(),
+                solen_consensus::validator::ValidatorStatus::Exiting => "Exiting".to_string(),
+            },
+            missed_blocks: v.missed_blocks,
+        })
+        .collect();
+
+    let total_count = validators.len();
+
+    Json(ValidatorSetResponse {
+        validators,
+        total_active_stake: vs.total_active_stake().to_string(),
+        active_count: vs.active_count(),
+        total_count,
+    })
+}
+
 /// Start the explorer API server.
 pub async fn start_explorer_api(
     addr: std::net::SocketAddr,
     store: Arc<RwLock<IndexStore>>,
+    engine: Option<Arc<ConsensusEngine>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ApiState { store };
+    let state = ApiState { store, engine };
     let app = router(state);
 
     info!(%addr, "explorer API started");

@@ -13,9 +13,10 @@ pub const TOPIC_ATTESTATIONS: &str = "solen/attestations/1";
 /// Messages that can be sent over the gossip network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
-    /// A new block has been produced.
+    /// A proposed block with its transactions for validators to verify.
     NewBlock {
         header: BlockHeader,
+        operations: Vec<UserOperation>,
         tx_count: usize,
         gas_used: u64,
     },

@@ -236,21 +236,49 @@ async fn main() -> anyhow::Result<()> {
 
         // Spawn a task to handle incoming P2P messages.
         let engine_for_p2p = engine.clone();
+        let net_for_attest = handle.clone();
         tokio::spawn(async move {
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
                     NetworkMessage::NewTransaction(op) => {
                         engine_for_p2p.mempool().submit(op);
                     }
-                    NetworkMessage::NewBlock { header, .. } => {
-                        tracing::debug!(
-                            height = header.height,
-                            proposer = hex(&header.proposer),
-                            "received block from peer"
-                        );
+                    NetworkMessage::NewBlock {
+                        header,
+                        operations,
+                        ..
+                    } => {
+                        // Validate and accept the block.
+                        if engine_for_p2p.accept_block(&header, &operations) {
+                            // Send our attestation back.
+                            let bh = solen_consensus::engine::block_hash(&header);
+                            let att_msg = NetworkMessage::Attestation {
+                                validator_id: engine_for_p2p.validator_id(),
+                                block_height: header.height,
+                                block_hash: bh,
+                                signature: vec![], // TODO: sign attestation
+                            };
+                            net_for_attest.broadcast(att_msg);
+
+                            // Also self-attest locally.
+                            engine_for_p2p.accept_attestation(
+                                engine_for_p2p.validator_id(),
+                                header.height,
+                                bh,
+                            );
+                        }
                     }
-                    NetworkMessage::Attestation { .. } => {
-                        // TODO: collect attestations for finality
+                    NetworkMessage::Attestation {
+                        validator_id,
+                        block_height,
+                        block_hash,
+                        ..
+                    } => {
+                        engine_for_p2p.accept_attestation(
+                            validator_id,
+                            block_height,
+                            block_hash,
+                        );
                     }
                 }
             }
@@ -285,9 +313,10 @@ async fn main() -> anyhow::Result<()> {
         let explorer_addr: SocketAddr =
             format!("127.0.0.1:{}", explorer_port).parse()?;
         let explorer_store = index_store.clone();
+        let explorer_engine = engine.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                solen_indexer::api::start_explorer_api(explorer_addr, explorer_store).await
+                solen_indexer::api::start_explorer_api(explorer_addr, explorer_store, Some(explorer_engine)).await
             {
                 tracing::error!(error = %e, "explorer API failed");
             }
@@ -310,15 +339,21 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
 
-            let block = engine_clone.produce_block();
+            // Only produce if it's our turn (or single-validator mode).
+            if engine_clone.active_validator_count() <= 1 || engine_clone.is_next_proposer() {
+                let produced = engine_clone.produce_block();
 
-            // Broadcast new block over P2P.
-            if let Some(ref handle) = net_for_blocks {
-                handle.broadcast(NetworkMessage::NewBlock {
-                    header: block.header.clone(),
-                    tx_count: block.result.receipts.len(),
-                    gas_used: block.result.gas_used,
-                });
+                // Broadcast the proposed block with full operations.
+                if let Some(ref handle) = net_for_blocks {
+                    let gas = produced.finalized.as_ref().map(|b| b.result.gas_used).unwrap_or(0);
+                    let tx_count = produced.operations.len();
+                    handle.broadcast(NetworkMessage::NewBlock {
+                        header: produced.header,
+                        operations: produced.operations,
+                        tx_count,
+                        gas_used: gas,
+                    });
+                }
             }
         }
     });

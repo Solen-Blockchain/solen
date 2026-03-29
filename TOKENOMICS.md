@@ -61,10 +61,16 @@ Validators run nodes, propose blocks, and participate in consensus.
 
 | Parameter | Value |
 |-----------|-------|
-| Minimum self-stake | 10,000 tokens |
+| Minimum self-stake | 50,000 SOLEN |
+| Minimum active validators | 20 |
+| Genesis validator lock | 1 year (~157,680 epochs) |
 | Slashing (double sign) | 10% of stake |
 | Slashing (downtime) | 1% after 50 missed blocks |
 | Unbonding period | 7 epochs |
+
+Genesis validators cannot unstake for 1 year after network launch. This ensures network stability during the bootstrap phase. After the lock expires, they can deregister like any other validator, subject to the minimum validator count.
+
+The network enforces a minimum of 20 active validators at all times. Any deregistration that would drop below this threshold is rejected.
 
 Validators earn rewards from two sources:
 1. **Epoch rewards** — distributed from the staking allocation at each epoch boundary, proportional to total stake (self-stake + delegations)
@@ -85,7 +91,18 @@ Delegators choose which validator to trust. If a validator is slashed, delegated
 
 ### Reward Calculation
 
-Each epoch, a fixed reward pool is distributed across all active validators proportional to their total stake:
+Rewards come from the staking allocation (500M SOLEN over 10 years).
+
+| Parameter | Value |
+|-----------|-------|
+| Total staking pool | 500,000,000 SOLEN |
+| Distribution period | 10 years |
+| Annual rewards | ~50,000,000 SOLEN (year 1, declining over time) |
+| Epoch length | 100 blocks (~200 seconds at 2s block time) |
+| Rewards per epoch | ~317 SOLEN |
+| Payout frequency | Every epoch (~3.3 minutes) |
+
+Each epoch, the reward pool is distributed across all active validators proportional to their total stake:
 
 ```
 validator_reward = epoch_reward_pool × (validator_total_stake / network_total_stake)
@@ -96,6 +113,35 @@ Within a validator, rewards are split between the validator and its delegators p
 ```
 delegator_reward = validator_reward × (delegator_stake / validator_total_stake)
 ```
+
+### Example Earnings
+
+Assuming 4 validators with equal stake and 50M SOLEN annual rewards:
+
+| Scenario | Annual per validator | Monthly | Daily |
+|----------|---------------------|---------|-------|
+| 4 validators, no delegators | 12,500,000 SOLEN | ~1,041,667 | ~34,247 |
+| 10 validators, no delegators | 5,000,000 SOLEN | ~416,667 | ~13,699 |
+| 50 validators, no delegators | 1,000,000 SOLEN | ~83,333 | ~2,740 |
+| 100 validators, no delegators | 500,000 SOLEN | ~41,667 | ~1,370 |
+
+A validator with more delegated stake earns a larger share. Delegators earn proportionally but the validator can set a commission rate (future feature).
+
+### Reward Schedule
+
+Rewards decrease over time to extend the staking pool:
+
+| Year | Annual Rewards | % of Pool |
+|------|---------------|-----------|
+| 1 | 50,000,000 | 10% |
+| 2 | 50,000,000 | 10% |
+| 3 | 50,000,000 | 10% |
+| 4-5 | 45,000,000/yr | 9% |
+| 6-7 | 40,000,000/yr | 8% |
+| 8-10 | 30,000,000/yr | 6% |
+| **Total** | **500,000,000** | **100%** |
+
+After year 10, governance votes on whether to enable inflation (recommended: 1-2% annually) to continue funding validators.
 
 ### Target Staking Ratio
 

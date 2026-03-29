@@ -35,8 +35,13 @@ pub struct GenesisConfig {
 pub struct ValidatorConfig {
     /// Human-readable name.
     pub name: String,
-    /// 32-byte seed as hex (used to derive keypair and account ID).
-    pub seed_hex: String,
+    /// 32-byte seed as hex (testnet only — derives keypair).
+    /// For mainnet, use `public_key_hex` instead and keep seeds offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_hex: Option<String>,
+    /// 32-byte public key as hex (mainnet — seed stays offline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key_hex: Option<String>,
     /// Initial stake.
     pub stake: u128,
 }
@@ -93,21 +98,30 @@ impl GenesisConfig {
 
         // Add validator accounts.
         for v in &self.validators {
-            let seed = hex_decode_32(&v.seed_hex)?;
-            let kp = Keypair::from_seed(&seed);
+            let public_key = if let Some(seed_hex) = &v.seed_hex {
+                // Testnet: derive public key from seed.
+                let seed = hex_decode_32(seed_hex)?;
+                let kp = Keypair::from_seed(&seed);
+                kp.public_key()
+            } else if let Some(pk_hex) = &v.public_key_hex {
+                // Mainnet: use public key directly.
+                hex_decode_32(pk_hex)?
+            } else {
+                anyhow::bail!("validator '{}' needs either seed_hex or public_key_hex", v.name);
+            };
+
             let id = name_to_id(&v.name);
 
             genesis_accounts.push(GenesisAccount {
                 id,
                 balance: v.stake,
-                auth_methods: vec![AuthMethod::Ed25519 {
-                    public_key: kp.public_key(),
-                }],
+                auth_methods: vec![AuthMethod::Ed25519 { public_key }],
             });
 
             info!(
                 name = %v.name,
                 id = hex_encode(&id),
+                pubkey = hex_encode(&public_key),
                 stake = v.stake,
                 "genesis validator"
             );
@@ -199,7 +213,8 @@ impl GenesisConfig {
             epoch_length: 100,
             validators: vec![ValidatorConfig {
                 name: "validator-1".into(),
-                seed_hex: "01".repeat(32),
+                seed_hex: Some("01".repeat(32)),
+                public_key_hex: None,
                 stake: 1_000_000,
             }],
             accounts: vec![
@@ -237,22 +252,26 @@ impl GenesisConfig {
             validators: vec![
                 ValidatorConfig {
                     name: "validator-1".into(),
-                    seed_hex: "01".repeat(32),
+                    seed_hex: Some("01".repeat(32)),
+                    public_key_hex: None,
                     stake: 1_000_000,
                 },
                 ValidatorConfig {
                     name: "validator-2".into(),
-                    seed_hex: "02".repeat(32),
+                    seed_hex: Some("02".repeat(32)),
+                    public_key_hex: None,
                     stake: 1_000_000,
                 },
                 ValidatorConfig {
                     name: "validator-3".into(),
-                    seed_hex: "03".repeat(32),
+                    seed_hex: Some("03".repeat(32)),
+                    public_key_hex: None,
                     stake: 1_000_000,
                 },
                 ValidatorConfig {
                     name: "validator-4".into(),
-                    seed_hex: "04".repeat(32),
+                    seed_hex: Some("04".repeat(32)),
+                    public_key_hex: None,
                     stake: 1_000_000,
                 },
             ],

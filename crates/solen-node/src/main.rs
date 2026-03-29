@@ -193,10 +193,18 @@ async fn main() -> anyhow::Result<()> {
         seed.copy_from_slice(&bytes);
         Keypair::from_seed(&seed)
     } else if let Some(v) = genesis.validators.first() {
-        let seed = hex_decode(&v.seed_hex)?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&seed);
-        Keypair::from_seed(&arr)
+        if let Some(seed_hex) = &v.seed_hex {
+            let seed = hex_decode(seed_hex)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&seed);
+            Keypair::from_seed(&arr)
+        } else {
+            anyhow::bail!(
+                "no --validator-seed provided and genesis validator '{}' has no seed_hex. \
+                 On mainnet, you must provide --validator-seed.",
+                v.name
+            );
+        }
     } else {
         Keypair::from_seed(&[1u8; 32])
     };
@@ -210,16 +218,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // --- Consensus engine ---
-    // Build validator set from genesis config using public keys (not names).
+    // Build validator set from genesis config using public keys.
     let validator_set = {
         use solen_consensus::validator::{ValidatorInfo, ValidatorSet};
         let mut validators = Vec::new();
         for v in &genesis.validators {
-            let seed = hex_decode(&v.seed_hex)?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&seed);
-            let kp = Keypair::from_seed(&arr);
-            validators.push(ValidatorInfo::new(kp.public_key(), v.stake));
+            let public_key = if let Some(seed_hex) = &v.seed_hex {
+                let seed = hex_decode(seed_hex)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&seed);
+                Keypair::from_seed(&arr).public_key()
+            } else if let Some(pk_hex) = &v.public_key_hex {
+                let bytes = hex_decode(pk_hex)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            } else {
+                anyhow::bail!("validator '{}' needs seed_hex or public_key_hex", v.name);
+            };
+            validators.push(ValidatorInfo::new(public_key, v.stake));
         }
         ValidatorSet::new(validators)
     };
@@ -250,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         let net_config = NetworkConfig {
             listen_port: p2p_port,
             bootstrap_peers,
+            ..Default::default()
         };
 
         let (handle, mut inbound_rx, _task) = NetworkService::start(net_config).await?;

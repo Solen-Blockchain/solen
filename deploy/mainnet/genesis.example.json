@@ -1,0 +1,31 @@
+{
+  "_comment": "MAINNET GENESIS — Example only. Replace public keys with real validator keys from the genesis ceremony.",
+  "chain_name": "Solen Mainnet",
+  "chain_id": 1,
+  "block_time_ms": 6000,
+  "epoch_length": 100,
+  "validators": [
+    {
+      "name": "validator-1",
+      "public_key_hex": "<VALIDATOR_1_PUBLIC_KEY_64_HEX_CHARS>",
+      "stake": 50000
+    },
+    {
+      "name": "validator-2",
+      "public_key_hex": "<VALIDATOR_2_PUBLIC_KEY_64_HEX_CHARS>",
+      "stake": 50000
+    },
+    {
+      "name": "validator-3",
+      "public_key_hex": "<VALIDATOR_3_PUBLIC_KEY_64_HEX_CHARS>",
+      "stake": 50000
+    },
+    {
+      "name": "validator-4",
+      "public_key_hex": "<VALIDATOR_4_PUBLIC_KEY_64_HEX_CHARS>",
+      "stake": 50000
+    }
+  ],
+  "accounts": [],
+  "faucet": null
+}

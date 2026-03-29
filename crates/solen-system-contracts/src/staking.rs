@@ -12,7 +12,16 @@ use thiserror::Error;
 pub const UNBONDING_PERIOD: u64 = 7;
 
 /// Minimum stake to register as a validator.
-pub const MIN_VALIDATOR_STAKE: u128 = 10_000;
+pub const MIN_VALIDATOR_STAKE: u128 = 50_000;
+
+/// Minimum number of active validators. The network will reject
+/// deregistrations that would drop below this count.
+pub const MIN_VALIDATOR_COUNT: usize = 20;
+
+/// Genesis validator lock period in epochs.
+/// At 100 blocks/epoch and 2s block time, 1 epoch ≈ 3.3 minutes.
+/// 157,680 epochs ≈ 1 year.
+pub const GENESIS_LOCK_EPOCHS: u64 = 157_680;
 
 #[derive(Debug, Error)]
 pub enum StakingError {
@@ -26,6 +35,10 @@ pub enum StakingError {
     UnbondingNotReady { remaining: u64 },
     #[error("already registered")]
     AlreadyRegistered,
+    #[error("genesis validator locked until epoch {unlock_epoch} (current: {current_epoch})")]
+    GenesisLocked { unlock_epoch: u64, current_epoch: u64 },
+    #[error("cannot deregister: would drop below minimum validator count ({min})")]
+    BelowMinValidators { min: usize },
 }
 
 /// A delegation from an account to a validator.
@@ -54,6 +67,10 @@ pub struct StakingValidator {
     pub total_delegated: u128,
     pub accumulated_reward_per_token: u128,
     pub is_active: bool,
+    /// Whether this validator was in the genesis set.
+    pub is_genesis: bool,
+    /// Epoch after which a genesis validator can unstake (0 = no lock).
+    pub genesis_lock_until: u64,
 }
 
 impl StakingValidator {
@@ -96,8 +113,72 @@ impl StakingContract {
             total_delegated: 0,
             accumulated_reward_per_token: 0,
             is_active: true,
+            is_genesis: false,
+            genesis_lock_until: 0,
         });
         Ok(())
+    }
+
+    /// Register a genesis validator. Their stake is locked for GENESIS_LOCK_EPOCHS.
+    pub fn register_genesis_validator(
+        &mut self,
+        id: ValidatorId,
+        self_stake: u128,
+    ) -> Result<(), StakingError> {
+        if self.validators.iter().any(|v| v.id == id) {
+            return Err(StakingError::AlreadyRegistered);
+        }
+        self.validators.push(StakingValidator {
+            id,
+            self_stake,
+            total_delegated: 0,
+            accumulated_reward_per_token: 0,
+            is_active: true,
+            is_genesis: true,
+            genesis_lock_until: GENESIS_LOCK_EPOCHS,
+        });
+        Ok(())
+    }
+
+    /// Deregister a validator and return their self-stake.
+    /// Fails if the validator is genesis-locked or if it would drop
+    /// below the minimum validator count.
+    pub fn deregister_validator(
+        &mut self,
+        id: &ValidatorId,
+        current_epoch: u64,
+    ) -> Result<u128, StakingError> {
+        let val = self
+            .validators
+            .iter()
+            .find(|v| v.id == *id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+
+        // Check genesis lock.
+        if val.is_genesis && current_epoch < val.genesis_lock_until {
+            return Err(StakingError::GenesisLocked {
+                unlock_epoch: val.genesis_lock_until,
+                current_epoch,
+            });
+        }
+
+        // Check minimum validator count.
+        let active_count = self.validators.iter().filter(|v| v.is_active).count();
+        if active_count <= MIN_VALIDATOR_COUNT {
+            return Err(StakingError::BelowMinValidators {
+                min: MIN_VALIDATOR_COUNT,
+            });
+        }
+
+        let stake = val.self_stake;
+
+        // Deactivate.
+        if let Some(v) = self.validators.iter_mut().find(|v| v.id == *id) {
+            v.is_active = false;
+            v.self_stake = 0;
+        }
+
+        Ok(stake)
     }
 
     /// Delegate tokens to a validator.
@@ -300,5 +381,65 @@ mod tests {
         sc.register_validator(vid(1), 50_000).unwrap();
         let err = sc.register_validator(vid(1), 50_000).unwrap_err();
         assert!(matches!(err, StakingError::AlreadyRegistered));
+    }
+
+    #[test]
+    fn genesis_validator_locked() {
+        let mut sc = StakingContract::new();
+        sc.register_genesis_validator(vid(1), 100_000).unwrap();
+
+        let val = sc.get_validator(&vid(1)).unwrap();
+        assert!(val.is_genesis);
+        assert_eq!(val.genesis_lock_until, GENESIS_LOCK_EPOCHS);
+
+        // Can't deregister during lock period.
+        let err = sc.deregister_validator(&vid(1), 1000).unwrap_err();
+        assert!(matches!(err, StakingError::GenesisLocked { .. }));
+
+        // Can deregister after lock period (if enough validators).
+        // But we need MIN_VALIDATOR_COUNT active validators first.
+        for i in 2..=25 {
+            sc.register_validator(vid(i), 50_000).unwrap();
+        }
+
+        let stake = sc.deregister_validator(&vid(1), GENESIS_LOCK_EPOCHS + 1).unwrap();
+        assert_eq!(stake, 100_000);
+        assert!(!sc.get_validator(&vid(1)).unwrap().is_active);
+    }
+
+    #[test]
+    fn minimum_validator_count_enforced() {
+        let mut sc = StakingContract::new();
+
+        // Register exactly MIN_VALIDATOR_COUNT validators.
+        for i in 1..=(MIN_VALIDATOR_COUNT as u8) {
+            sc.register_validator(vid(i), 50_000).unwrap();
+        }
+
+        // Can't deregister — would drop below minimum.
+        let err = sc.deregister_validator(&vid(1), 999_999).unwrap_err();
+        assert!(matches!(err, StakingError::BelowMinValidators { .. }));
+
+        // Add one more, then we can remove one.
+        sc.register_validator(vid(99), 50_000).unwrap();
+        let stake = sc.deregister_validator(&vid(1), 999_999).unwrap();
+        assert_eq!(stake, 50_000);
+    }
+
+    #[test]
+    fn non_genesis_can_deregister_freely() {
+        let mut sc = StakingContract::new();
+
+        // Register enough validators.
+        for i in 1..=25 {
+            sc.register_validator(vid(i), 50_000).unwrap();
+        }
+
+        // Non-genesis validator can deregister at any epoch.
+        let val = sc.get_validator(&vid(5)).unwrap();
+        assert!(!val.is_genesis);
+
+        let stake = sc.deregister_validator(&vid(5), 0).unwrap();
+        assert_eq!(stake, 50_000);
     }
 }

@@ -30,6 +30,10 @@ pub struct NetworkConfig {
     pub listen_port: u16,
     /// Bootstrap peer addresses.
     pub bootstrap_peers: Vec<Multiaddr>,
+    /// Maximum inbound connections.
+    pub max_inbound: u32,
+    /// Maximum outbound connections.
+    pub max_outbound: u32,
 }
 
 impl Default for NetworkConfig {
@@ -37,6 +41,8 @@ impl Default for NetworkConfig {
         Self {
             listen_port: 30333,
             bootstrap_peers: Vec::new(),
+            max_inbound: 50,
+            max_outbound: 20,
         }
     }
 }
@@ -75,10 +81,14 @@ impl NetworkService {
 
         info!(%local_peer_id, "starting P2P network");
 
-        // Build gossipsub.
+        // Build gossipsub with mesh limits.
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(1))
             .validation_mode(gossipsub::ValidationMode::Permissive)
+            .mesh_n(8)              // target mesh size
+            .mesh_n_low(4)          // minimum before requesting more
+            .mesh_n_high(12)        // maximum before pruning
+            .mesh_outbound_min(2)   // minimum outbound peers in mesh
             .build()
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
@@ -93,6 +103,8 @@ impl NetworkService {
 
         let behaviour = SolenBehaviour { gossipsub, mdns };
 
+        let total_limit = config.max_inbound + config.max_outbound;
+
         let mut swarm = SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
             .with_tcp(
@@ -104,6 +116,13 @@ impl NetworkService {
             .with_behaviour(|_| Ok(behaviour))
             .map_err(|e| NetworkError::Transport(e.to_string()))?
             .build();
+
+        info!(
+            max_inbound = config.max_inbound,
+            max_outbound = config.max_outbound,
+            total_limit,
+            "P2P connection limits configured"
+        );
 
         // Subscribe to topics.
         let topics = [TOPIC_BLOCKS, TOPIC_TRANSACTIONS, TOPIC_ATTESTATIONS];

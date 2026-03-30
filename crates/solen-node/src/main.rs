@@ -384,6 +384,15 @@ async fn main() -> anyhow::Result<()> {
                                 from_height: our_height + 1,
                                 to_height: height,
                             });
+                        } else if syncing_for_p2p.load(std::sync::atomic::Ordering::Relaxed) {
+                            // Peer is at our height (or behind) — we're in sync.
+                            if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                tracing::info!(
+                                    our_height,
+                                    peer_height = height,
+                                    "peer confirmed we are in sync — resuming block production"
+                                );
+                            }
                         }
                     }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
@@ -493,14 +502,20 @@ async fn main() -> anyhow::Result<()> {
                     state_root,
                 });
 
-                // If still in sync mode after 45s and we're at (or near) the known
-                // network height, assume we're caught up and resume production.
+                // If still in sync mode, check if we can resume production.
                 ticks_since_start += 1;
-                if ticks_since_start >= 3 && syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
+                if syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
                     let known = net_height_for_status.load(std::sync::atomic::Ordering::Relaxed);
-                    if known == 0 || height + 1 >= known {
-                        tracing::info!(height, network_height = known, "no sync needed — resuming block production");
-                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                    // At genesis (height 0), wait longer (60s / ~4 ticks) for peers
+                    // to join before starting solo production.
+                    let min_ticks = if height == 0 && known == 0 { 5 } else { 3 };
+
+                    if ticks_since_start >= min_ticks {
+                        if known == 0 || height + 1 >= known {
+                            tracing::info!(height, network_height = known, "no sync needed — resuming block production");
+                            syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 }
 

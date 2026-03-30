@@ -24,7 +24,8 @@
 //!
 //! | Method | Args | Description |
 //! |--------|------|-------------|
-//! | `init` | — | Initialize (sets caller as owner) |
+//! | `abi` | — | Returns JSON array of all methods |
+//! | `init` | `name_len[1]+name[]+symbol_len[1]+symbol[]` | Initialize with metadata |
 //! | `mint` | `to[32] + amount[16]` | Mint tokens (owner only) |
 //! | `transfer` | `to[32] + amount[16]` | Transfer tokens |
 //! | `approve` | `spender[32] + amount[16]` | Set allowance |
@@ -32,6 +33,9 @@
 //! | `balance_of` | `account[32]` | Query balance (returns u128) |
 //! | `allowance` | `owner[32] + spender[32]` | Query allowance (returns u128) |
 //! | `total_supply` | — | Query total supply (returns u128) |
+//! | `name` | — | Token name (UTF-8 string) |
+//! | `symbol` | — | Token symbol/ticker (UTF-8 string) |
+//! | `decimals` | — | Decimal places (1 byte, default 8) |
 
 #![no_std]
 
@@ -136,7 +140,8 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
     };
 
     match method {
-        b"init" => do_init(),
+        b"abi" => do_abi(),
+        b"init" => do_init(args),
         b"mint" => do_mint(args),
         b"transfer" => do_transfer(args),
         b"approve" => do_approve(args),
@@ -144,17 +149,74 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
         b"balance_of" => do_balance_of(args),
         b"allowance" => do_allowance(args),
         b"total_supply" => do_total_supply(),
+        b"name" => do_name(),
+        b"symbol" => do_symbol(),
+        b"decimals" => do_decimals(),
         _ => sdk::return_value(b"unknown method"),
     }
 }
 
 // ── Method implementations ──────────────────────────────────────
 
-fn do_init() -> i32 {
+fn do_abi() -> i32 {
+    sdk::return_value(br#"[
+{"name":"init","args":"name_len[1]+name[]+symbol_len[1]+symbol[]","mutates":true},
+{"name":"mint","args":"to[32]+amount[16]","mutates":true},
+{"name":"transfer","args":"to[32]+amount[16]","mutates":true},
+{"name":"approve","args":"spender[32]+amount[16]","mutates":true},
+{"name":"transfer_from","args":"from[32]+to[32]+amount[16]","mutates":true},
+{"name":"balance_of","args":"account[32]","mutates":false},
+{"name":"allowance","args":"owner[32]+spender[32]","mutates":false},
+{"name":"total_supply","args":"","mutates":false},
+{"name":"name","args":"","mutates":false},
+{"name":"symbol","args":"","mutates":false},
+{"name":"decimals","args":"","mutates":false}
+]"#)
+}
+
+fn do_init(args: &[u8]) -> i32 {
     let caller = sdk::caller();
     set_owner(&caller);
+
+    // Parse optional name and symbol from args: name_len[1] + name[N] + symbol_len[1] + symbol[M]
+    if args.len() >= 2 {
+        let name_len = args[0] as usize;
+        if args.len() >= 1 + name_len + 1 {
+            storage::set(b"name", &args[1..1 + name_len]);
+            let sym_start = 1 + name_len;
+            let sym_len = args[sym_start] as usize;
+            if args.len() >= sym_start + 1 + sym_len {
+                storage::set(b"symbol", &args[sym_start + 1..sym_start + 1 + sym_len]);
+            }
+        }
+    }
+
+    // Default decimals to 8 (matching SOLEN native).
+    storage::set(b"decimals", &[8]);
+
     events::emit(b"initialized", &caller);
     sdk::return_value(b"ok")
+}
+
+fn do_name() -> i32 {
+    match storage::get(b"name") {
+        Some(name) => sdk::return_value(name),
+        None => sdk::return_value(b""),
+    }
+}
+
+fn do_symbol() -> i32 {
+    match storage::get(b"symbol") {
+        Some(sym) => sdk::return_value(sym),
+        None => sdk::return_value(b""),
+    }
+}
+
+fn do_decimals() -> i32 {
+    match storage::get(b"decimals") {
+        Some(d) => sdk::return_value(d),
+        None => sdk::return_value(&[8]),
+    }
 }
 
 fn do_mint(args: &[u8]) -> i32 {

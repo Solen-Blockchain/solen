@@ -261,12 +261,7 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
-            self.persist_block(&block);
-
-            {
-                let mut store = self.store.write().unwrap();
-                save_chain_meta(store.as_mut(), height, epoch);
-            }
+            self.persist_block_and_meta(&block);
 
             self.try_epoch_transition(height);
 
@@ -407,6 +402,25 @@ impl ConsensusEngine {
                 "state root mismatch — rejecting block"
             );
             return false;
+        }
+
+        // Check for double-sign: if we already have a pending block at this
+        // height from the same proposer with a different state root, it's evidence
+        // of equivocation.
+        {
+            let pending = self.pending_blocks.read().unwrap();
+            if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
+                if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
+                    let mut vs = self.validator_set.write().unwrap();
+                    if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
+                        let mut store = self.store.write().unwrap();
+                        crate::slashing::persist_slashing_evidence(
+                            store.as_mut(), &slash_result, header.height,
+                        );
+                    }
+                    return false;
+                }
+            }
         }
 
         // Store as pending, waiting for attestations.
@@ -602,13 +616,7 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
-            self.persist_block(&block);
-
-            // Persist chain height.
-            {
-                let mut store = self.store.write().unwrap();
-                save_chain_meta(store.as_mut(), height, header.epoch);
-            }
+            self.persist_block_and_meta(&block);
 
             // Only advance epoch counter — rewards already applied by proposer.
             self.try_epoch_transition(height);
@@ -760,12 +768,38 @@ impl ConsensusEngine {
         );
     }
 
-    /// Persist a finalized block to the state store for replay after restart.
-    fn persist_block(&self, block: &FinalizedBlock) {
+    /// Persist a finalized block and update chain metadata atomically.
+    fn persist_block_and_meta(&self, block: &FinalizedBlock) {
         let key = format!("block/{}", block.header.height);
         if let Ok(data) = serde_json::to_vec(&SerializableBlock::from(block)) {
             let mut store = self.store.write().unwrap();
-            let _ = store.put(key.as_bytes(), &data);
+            // Write block data and chain metadata together.
+            if let Err(e) = store.put(key.as_bytes(), &data) {
+                warn!(height = block.header.height, error = %e, "failed to persist block");
+                return;
+            }
+            save_chain_meta(store.as_mut(), block.header.height, block.header.epoch);
+        }
+
+        // Prune old blocks beyond retention window.
+        self.prune_old_blocks(block.header.height);
+    }
+
+    /// Remove blocks older than the retention window.
+    fn prune_old_blocks(&self, current_height: u64) {
+        const BLOCK_RETENTION: u64 = 10_000;
+        if current_height <= BLOCK_RETENTION {
+            return;
+        }
+        let prune_below = current_height - BLOCK_RETENTION;
+        // Prune in small batches to avoid holding the lock too long.
+        let mut store = self.store.write().unwrap();
+        for h in (prune_below.saturating_sub(10))..prune_below {
+            if h == 0 {
+                continue;
+            }
+            let key = format!("block/{}", h);
+            let _ = store.delete(key.as_bytes());
         }
     }
 
@@ -865,22 +899,10 @@ impl ConsensusEngine {
         };
 
         self.chain.write().unwrap().push(block.clone());
-        self.persist_block(&block);
-
-        // Update chain metadata.
-        {
-            let mut store = self.store.write().unwrap();
-            save_chain_meta(store.as_mut(), height, header.epoch);
-        }
+        self.persist_block_and_meta(&block);
 
         // Advance epoch counter (rewards already handled by executor).
-        {
-            let mut em = self.epoch_manager.write().unwrap();
-            if em.is_epoch_boundary(height) {
-                let mut vs = self.validator_set.write().unwrap();
-                em.process_epoch_transition(&mut vs);
-            }
-        }
+        self.try_epoch_transition(height);
     }
 
     /// Process epoch transition if at a boundary. Acquires locks in consistent

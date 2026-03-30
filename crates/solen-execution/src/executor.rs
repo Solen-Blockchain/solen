@@ -619,14 +619,15 @@ impl BlockExecutor {
     }
 
     /// Simulate an operation without modifying state. Returns the receipt
-    /// that would result from execution.
+    /// that would result from execution. Uses a copy-on-write overlay
+    /// instead of copying the entire database.
     pub fn simulate(
         &self,
         store: &dyn StateStore,
         op: &UserOperation,
     ) -> ExecutionReceipt {
-        let mut snapshot = store.snapshot();
-        self.execute_operation(snapshot.as_mut(), op)
+        let mut overlay = solen_storage::OverlayStore::new(store);
+        self.execute_operation(&mut overlay, op)
     }
 }
 

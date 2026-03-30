@@ -159,6 +159,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
     let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.len() % 2 != 0 {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            "hex string must have even length",
+            None::<()>,
+        ));
+    }
     (0..s.len())
         .step_by(2)
         .map(|i| {

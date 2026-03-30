@@ -15,6 +15,45 @@ use crate::state::{StateError, StateManager};
 const TRANSFER_GAS: u64 = 100;
 const CALL_BASE_GAS: u64 = 500;
 const DEPLOY_BASE_GAS: u64 = 1000;
+const SET_AUTH_GAS: u64 = 200;
+
+/// Verify a signature against an auth method.
+///
+/// For `Ed25519`: expects a 64-byte signature.
+/// For `Threshold`: expects concatenated (pubkey[32] + sig[64]) pairs.
+/// At least `threshold` valid signatures from the signers list are required.
+fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
+    match method {
+        AuthMethod::Ed25519 { public_key } => {
+            if signature.len() != 64 {
+                return false;
+            }
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(signature);
+            solen_crypto::verify(public_key, msg, &sig).is_ok()
+        }
+        AuthMethod::Threshold { signers, threshold } => {
+            // Each sub-signature is pubkey[32] + sig[64] = 96 bytes.
+            if signature.len() % 96 != 0 {
+                return false;
+            }
+            let mut valid_count = 0u16;
+            for chunk in signature.chunks_exact(96) {
+                let mut pubkey = [0u8; 32];
+                pubkey.copy_from_slice(&chunk[..32]);
+                let mut sig = [0u8; 64];
+                sig.copy_from_slice(&chunk[32..96]);
+
+                // Only count if this pubkey is in the signers list.
+                if signers.contains(&pubkey) && solen_crypto::verify(&pubkey, msg, &sig).is_ok() {
+                    valid_count += 1;
+                }
+            }
+            valid_count >= *threshold
+        }
+        _ => false,
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {
@@ -150,7 +189,7 @@ impl BlockExecutor {
             })
             .collect();
 
-        // Phase 2: parallel Ed25519 signature verification.
+        // Phase 2: parallel signature verification (Ed25519 + Threshold).
         let validations: Vec<bool> = operations
             .par_iter()
             .zip(pre.par_iter())
@@ -162,17 +201,7 @@ impl BlockExecutor {
                 if auth_methods.is_empty() {
                     return false; // no auth methods = reject (accounts must have auth)
                 }
-                auth_methods.iter().any(|method| match method {
-                    solen_types::account::AuthMethod::Ed25519 { public_key } => {
-                        if op.signature.len() != 64 {
-                            return false;
-                        }
-                        let mut sig = [0u8; 64];
-                        sig.copy_from_slice(&op.signature);
-                        solen_crypto::verify(public_key, msg, &sig).is_ok()
-                    }
-                    _ => false,
-                })
+                auth_methods.iter().any(|method| verify_auth(method, msg, &op.signature))
             })
             .collect();
 
@@ -280,12 +309,24 @@ impl BlockExecutor {
         if total_fee > 0 {
             let mut state = StateManager::new(store);
             if let Ok(Some(mut sender_acct)) = state.get_account(&op.sender) {
-                let actual_fee = total_fee.min(sender_acct.balance);
-                sender_acct.balance -= actual_fee;
+                if sender_acct.balance < total_fee {
+                    return ExecutionReceipt {
+                        sender: op.sender,
+                        nonce: op.nonce,
+                        success: false,
+                        gas_used,
+                        error: Some(format!(
+                            "insufficient balance for fee: need {} but have {}",
+                            total_fee, sender_acct.balance
+                        )),
+                        events,
+                    };
+                }
+                sender_acct.balance -= total_fee;
                 let _ = state.save_account(&sender_acct);
 
                 // Credit treasury (non-burned portion).
-                let treasury_share = self.fee_config.treasury_amount(actual_fee);
+                let treasury_share = self.fee_config.treasury_amount(total_fee);
                 if treasury_share > 0 {
                     if let Ok(Some(mut treasury)) =
                         state.get_account(&self.fee_config.treasury_account)
@@ -298,7 +339,7 @@ impl BlockExecutor {
                 events.push(Event {
                     emitter: op.sender,
                     topic: b"fee".to_vec(),
-                    data: actual_fee.to_le_bytes().to_vec(),
+                    data: total_fee.to_le_bytes().to_vec(),
                 });
             }
         }
@@ -326,18 +367,9 @@ impl BlockExecutor {
             .ok_or_else(|| ExecutionError::AccountNotFound(format!("{:?}", &op.sender[..4])))?;
 
         // Verify signature against one of the account's auth methods.
-        let sig_valid = account.auth_methods.iter().any(|method| match method {
-            AuthMethod::Ed25519 { public_key } => {
-                let msg = self.operation_signing_message(op);
-                if op.signature.len() != 64 {
-                    return false;
-                }
-                let mut sig = [0u8; 64];
-                sig.copy_from_slice(&op.signature);
-                solen_crypto::verify(public_key, &msg, &sig).is_ok()
-            }
-            // Other auth methods not yet implemented.
-            _ => false,
+        let msg = self.operation_signing_message(op);
+        let sig_valid = account.auth_methods.iter().any(|method| {
+            verify_auth(method, &msg, &op.signature)
         });
 
         if !sig_valid {
@@ -451,6 +483,33 @@ impl BlockExecutor {
                     Err(e) => Err(ExecutionError::VmError(e)),
                 }
             }
+            Action::SetAuth { auth_methods } => {
+                if auth_methods.is_empty() {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(
+                        "auth_methods cannot be empty".into(),
+                    )));
+                }
+                // Validate threshold auth methods.
+                for method in auth_methods {
+                    if let AuthMethod::Threshold { signers, threshold } = method {
+                        if *threshold == 0 || *threshold as usize > signers.len() {
+                            return Err(ExecutionError::State(StateError::AccountNotFound(
+                                format!("invalid threshold: {} of {} signers", threshold, signers.len()),
+                            )));
+                        }
+                    }
+                }
+                let mut account = state.require_account(sender)?;
+                account.auth_methods = auth_methods.clone();
+                state.save_account(&account)?;
+
+                events.push(Event {
+                    emitter: *sender,
+                    topic: b"set_auth".to_vec(),
+                    data: vec![auth_methods.len() as u8],
+                });
+                Ok(SET_AUTH_GAS)
+            }
             Action::Deploy { code, salt } => {
                 // Store the bytecode.
                 let code_hash = state.store_bytecode(code)?;
@@ -561,7 +620,7 @@ fn distribute_epoch_rewards_in_executor(
             continue; // skip validators with zero stake
         }
 
-        let validator_share = actual_reward * v_total / total_stake;
+        let validator_share = actual_reward.saturating_mul(v_total) / total_stake;
         if validator_share == 0 {
             continue;
         }
@@ -572,8 +631,8 @@ fn distribute_epoch_rewards_in_executor(
 
         // Split rewards: eligible delegators get their proportional share,
         // validator gets the rest (self-stake share + ineligible delegation share + commission).
-        let delegator_pool = if eligible_delegated > 0 && v_total > 0 {
-            validator_share * eligible_delegated / v_total
+        let delegator_pool = if eligible_delegated > 0 && v_total > 0 && validator_share > 0 {
+            validator_share.saturating_mul(eligible_delegated) / v_total
         } else {
             0
         };

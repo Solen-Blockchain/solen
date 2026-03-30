@@ -279,6 +279,8 @@ async fn main() -> anyhow::Result<()> {
         let engine_for_p2p = engine.clone();
         let net_for_attest = handle.clone();
         let syncing_for_p2p = syncing.clone();
+        let attestation_kp = Arc::new(validator_kp);
+        let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -290,15 +292,22 @@ async fn main() -> anyhow::Result<()> {
                         operations,
                         ..
                     } => {
+                        // Reject oversized blocks to prevent memory DoS.
+                        if operations.len() > 1000 {
+                            tracing::warn!(ops = operations.len(), "rejecting oversized block");
+                            continue;
+                        }
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {
-                            // Send our attestation back.
+                            // Send our signed attestation back.
                             let bh = solen_consensus::engine::block_hash(&header);
+                            let att_payload = attestation_payload(header.height, &bh);
+                            let att_sig = att_kp_for_p2p.sign(&att_payload);
                             let att_msg = NetworkMessage::Attestation {
                                 validator_id: engine_for_p2p.validator_id(),
                                 block_height: header.height,
                                 block_hash: bh,
-                                signature: vec![], // TODO: sign attestation
+                                signature: att_sig.to_vec(),
                             };
                             net_for_attest.broadcast(att_msg);
 
@@ -314,13 +323,33 @@ async fn main() -> anyhow::Result<()> {
                         validator_id,
                         block_height,
                         block_hash,
-                        ..
+                        signature,
                     } => {
-                        engine_for_p2p.accept_attestation(
-                            validator_id,
-                            block_height,
-                            block_hash,
-                        );
+                        // Verify attestation signature.
+                        let payload = attestation_payload(block_height, &block_hash);
+                        if signature.len() == 64 {
+                            let mut sig = [0u8; 64];
+                            sig.copy_from_slice(&signature);
+                            if solen_crypto::verify(&validator_id, &payload, &sig).is_ok() {
+                                engine_for_p2p.accept_attestation(
+                                    validator_id,
+                                    block_height,
+                                    block_hash,
+                                );
+                            } else {
+                                let v_hex = hex(&validator_id);
+                                tracing::warn!(
+                                    validator = &v_hex[..8],
+                                    height = block_height,
+                                    "invalid attestation signature — rejected"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                height = block_height,
+                                "attestation with invalid signature length — rejected"
+                            );
+                        }
                     }
                     NetworkMessage::StatusAnnounce { height, .. } => {
                         let our_height = engine_for_p2p.height();
@@ -367,6 +396,10 @@ async fn main() -> anyhow::Result<()> {
                     NetworkMessage::SyncBlocks { mut blocks } => {
                         if blocks.is_empty() {
                             continue;
+                        }
+                        // Cap sync batch size to prevent memory DoS.
+                        if blocks.len() > 100 {
+                            blocks.truncate(100);
                         }
 
                         // Sort by height so out-of-order arrivals are processed correctly.
@@ -591,6 +624,14 @@ fn create_persistent_store(data_dir: &str) -> anyhow::Result<Box<dyn StateStore>
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Build the deterministic payload for attestation signing/verification.
+fn attestation_payload(height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(40);
+    payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(block_hash);
+    payload
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

@@ -78,10 +78,15 @@ impl VestingSchedule {
             return self.total_amount; // fully vested
         }
 
-        // Linear vesting between cliff and end.
-        // vested = total * (elapsed - 0) / total_duration
-        // (cliff doesn't reduce the linear portion — it just delays the start)
-        self.total_amount * elapsed as u128 / total_duration as u128
+        // Linear vesting from cliff to end.
+        // At cliff: vested = 0. At end: vested = total_amount.
+        // vested = total * (elapsed - cliff) / (total_duration - cliff)
+        let vesting_period = total_duration - cliff;
+        if vesting_period == 0 {
+            return self.total_amount;
+        }
+        let elapsed_after_cliff = elapsed - cliff;
+        self.total_amount * elapsed_after_cliff as u128 / vesting_period as u128
     }
 
     /// How much can be claimed right now.
@@ -195,10 +200,17 @@ mod tests {
         assert_eq!(schedule.vested_at(0), 0);
         assert_eq!(schedule.vested_at(EPOCHS_PER_YEAR - 1), 0);
 
-        // At cliff: 25% vested (1/4 of total duration).
-        let at_cliff = schedule.vested_at(EPOCHS_PER_YEAR);
-        assert!(at_cliff > 0);
-        assert_eq!(at_cliff, 1_000_000 * EPOCHS_PER_YEAR as u128 / (EPOCHS_PER_YEAR * 4) as u128);
+        // At cliff: nothing vested yet (cliff is the start of linear vesting).
+        assert_eq!(schedule.vested_at(EPOCHS_PER_YEAR), 0);
+
+        // Just after cliff: small amount vested.
+        let after_cliff = schedule.vested_at(EPOCHS_PER_YEAR + 1);
+        assert!(after_cliff > 0);
+
+        // Halfway through vesting period (2.5 years into a 3-year linear vest).
+        let midpoint = EPOCHS_PER_YEAR + (EPOCHS_PER_YEAR * 3 / 2);
+        let mid_vested = schedule.vested_at(midpoint);
+        assert!(mid_vested > 400_000 && mid_vested < 600_000);
 
         // Fully vested at 4 years.
         assert_eq!(schedule.vested_at(EPOCHS_PER_YEAR * 4), 1_000_000);
@@ -214,8 +226,11 @@ mod tests {
         // Before cliff (6 months): nothing.
         assert_eq!(schedule.vested_at(EPOCHS_PER_MONTH * 6 - 1), 0);
 
-        // At cliff: some vested.
-        assert!(schedule.vested_at(EPOCHS_PER_MONTH * 6) > 0);
+        // At cliff: nothing vested yet.
+        assert_eq!(schedule.vested_at(EPOCHS_PER_MONTH * 6), 0);
+
+        // Just after cliff: some vested.
+        assert!(schedule.vested_at(EPOCHS_PER_MONTH * 6 + 1) > 0);
 
         // Fully vested at 2.5 years.
         assert_eq!(schedule.vested_at(EPOCHS_PER_MONTH * 30), 1_000_000);
@@ -229,8 +244,11 @@ mod tests {
         // Can't claim before cliff.
         assert!(vc.claim(&aid(1), 0).is_err());
 
-        // Claim at cliff.
-        let claimed = vc.claim(&aid(1), EPOCHS_PER_YEAR).unwrap();
+        // Can't claim at exact cliff (0 vested at cliff boundary).
+        assert!(vc.claim(&aid(1), EPOCHS_PER_YEAR).is_err());
+
+        // Claim after cliff.
+        let claimed = vc.claim(&aid(1), EPOCHS_PER_YEAR + EPOCHS_PER_MONTH).unwrap();
         assert!(claimed > 0);
 
         // Claim again later.

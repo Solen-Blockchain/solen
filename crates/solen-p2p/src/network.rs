@@ -159,14 +159,19 @@ impl NetworkService {
 
         for addr in &config.bootstrap_peers {
             info!(%addr, "dialing bootstrap peer");
+            // Extract peer ID from the multiaddr if present (e.g., /ip4/.../p2p/<peer_id>).
+            let peer_id = addr.iter().find_map(|p| match p {
+                libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                _ => None,
+            });
             match swarm.dial(addr.clone()) {
                 Ok(_) => {
                     info!(%addr, "dial initiated");
-                    // Add to Kademlia routing table for peer discovery.
-                    swarm.behaviour_mut().kademlia.add_address(
-                        &libp2p::PeerId::random(), // placeholder — real peer ID learned on connect
-                        addr.clone(),
-                    );
+                    // Add to Kademlia if we know the peer ID from the address.
+                    // Otherwise, Identify will populate Kademlia once connected.
+                    if let Some(pid) = peer_id {
+                        swarm.behaviour_mut().kademlia.add_address(&pid, addr.clone());
+                    }
                 }
                 Err(e) => warn!(%addr, error = %e, "failed to dial bootstrap peer"),
             }

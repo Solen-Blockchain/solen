@@ -523,6 +523,74 @@ fn sign_op(op: &mut UserOperation, kp: &Keypair) {
     op.signature = kp.sign(&msg).to_vec();
 }
 
+// ── Multi-sig ──────────────────────────────────────────────────
+
+pub async fn cmd_multisig(
+    rpc: &RpcClient,
+    from: &str,
+    threshold: u16,
+    signer_hexes: &[String],
+) -> Result<()> {
+    use solen_types::account::AuthMethod;
+
+    if signer_hexes.is_empty() {
+        anyhow::bail!("at least one signer is required");
+    }
+    if threshold == 0 || threshold as usize > signer_hexes.len() {
+        anyhow::bail!(
+            "threshold must be between 1 and {} (number of signers)",
+            signer_hexes.len()
+        );
+    }
+
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Parse signer public keys.
+    let mut signers = Vec::new();
+    for hex_str in signer_hexes {
+        let bytes = hex_decode(hex_str)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("signer key must be 32 bytes (64 hex chars), got {}", bytes.len());
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        signers.push(key);
+    }
+
+    let auth_methods = vec![AuthMethod::Threshold {
+        signers: signers.clone(),
+        threshold,
+    }];
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::SetAuth { auth_methods }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Account converted to {}-of-{} multi-sig.", threshold, signers.len());
+        println!("Signers:");
+        for (i, s) in signers.iter().enumerate() {
+            println!("  {}: {}", i + 1, hex_encode(s));
+        }
+        println!("\nAll future operations require {} signature(s).", threshold);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 fn format_timestamp(ms: u64) -> String {
     let secs = ms / 1000;
     let now = std::time::SystemTime::now()

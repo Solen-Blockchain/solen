@@ -307,6 +307,11 @@ impl StakingContract {
 
         delegation.amount -= amount;
 
+        // Remove zero-amount delegations to prevent state bloat.
+        if delegation.amount == 0 {
+            self.delegations.retain(|d| !(d.delegator == delegator && d.validator == validator && d.amount == 0));
+        }
+
         // Reduce validator's total.
         if let Some(val) = self.validators.iter_mut().find(|v| v.id == validator) {
             val.total_delegated = val.total_delegated.saturating_sub(amount);
@@ -476,11 +481,11 @@ mod tests {
     fn register_and_delegate() {
         let mut sc = StakingContract::new();
 
-        sc.register_validator(vid(1), 50_000).unwrap();
+        sc.register_validator(vid(1), 500_000).unwrap();
         sc.delegate(aid(10), vid(1), 20_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.total_stake(), 70_000);
+        assert_eq!(val.total_stake(), 520_000);
         assert_eq!(sc.delegator_total_stake(&aid(10)), 20_000);
     }
 
@@ -494,7 +499,7 @@ mod tests {
     #[test]
     fn undelegate_and_withdraw() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 50_000).unwrap();
+        sc.register_validator(vid(1), 500_000).unwrap();
         sc.delegate(aid(10), vid(1), 3000).unwrap();
 
         // Undelegate at epoch 5.
@@ -513,21 +518,21 @@ mod tests {
     #[test]
     fn reward_distribution() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 50_000).unwrap();
-        sc.delegate(aid(10), vid(1), 50_000).unwrap();
+        sc.register_validator(vid(1), 500_000).unwrap();
+        sc.delegate(aid(10), vid(1), 500_000).unwrap();
 
-        // Total stake = 100,000. Distribute 10,000 reward.
+        // Total stake = 1,000,000. Distribute 10,000 reward.
         sc.distribute_rewards(vid(1), 10_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / 100_000);
+        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / 1_000_000);
     }
 
     #[test]
     fn duplicate_registration_fails() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 50_000).unwrap();
-        let err = sc.register_validator(vid(1), 50_000).unwrap_err();
+        sc.register_validator(vid(1), 500_000).unwrap();
+        let err = sc.register_validator(vid(1), 500_000).unwrap_err();
         assert!(matches!(err, StakingError::AlreadyRegistered));
     }
 
@@ -547,7 +552,7 @@ mod tests {
         // Can deregister after lock period (if enough validators).
         // But we need MIN_VALIDATOR_COUNT active validators first.
         for i in 2..=25 {
-            sc.register_validator(vid(i), 50_000).unwrap();
+            sc.register_validator(vid(i), 500_000).unwrap();
         }
 
         let stake = sc.deregister_validator(&vid(1), GENESIS_LOCK_EPOCHS + 1).unwrap();
@@ -561,7 +566,7 @@ mod tests {
 
         // Register exactly MIN_VALIDATOR_COUNT validators.
         for i in 1..=(MIN_VALIDATOR_COUNT as u8) {
-            sc.register_validator(vid(i), 50_000).unwrap();
+            sc.register_validator(vid(i), 500_000).unwrap();
         }
 
         // Can't deregister — would drop below minimum.
@@ -569,9 +574,9 @@ mod tests {
         assert!(matches!(err, StakingError::BelowMinValidators { .. }));
 
         // Add one more, then we can remove one.
-        sc.register_validator(vid(99), 50_000).unwrap();
+        sc.register_validator(vid(99), 500_000).unwrap();
         let stake = sc.deregister_validator(&vid(1), 999_999).unwrap();
-        assert_eq!(stake, 50_000);
+        assert_eq!(stake, 500_000);
     }
 
     #[test]
@@ -580,7 +585,7 @@ mod tests {
 
         // Register enough validators.
         for i in 1..=25 {
-            sc.register_validator(vid(i), 50_000).unwrap();
+            sc.register_validator(vid(i), 500_000).unwrap();
         }
 
         // Non-genesis validator can deregister at any epoch.
@@ -588,6 +593,6 @@ mod tests {
         assert!(!val.is_genesis);
 
         let stake = sc.deregister_validator(&vid(5), 0).unwrap();
-        assert_eq!(stake, 50_000);
+        assert_eq!(stake, 500_000);
     }
 }

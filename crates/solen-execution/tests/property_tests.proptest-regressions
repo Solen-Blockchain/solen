@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4bac7324f5644f8bb2102ce203c8f4ccc4effaff48724b2887333c7288b3234b # shrinks to alice_bal = 1000, bob_bal = 0, transfer_amount = 1, fee_per_gas = 1

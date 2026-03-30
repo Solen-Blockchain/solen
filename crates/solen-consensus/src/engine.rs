@@ -265,13 +265,7 @@ impl ConsensusEngine {
                 save_chain_meta(store.as_mut(), height, epoch);
             }
 
-            {
-                let mut em = self.epoch_manager.write().unwrap();
-                if em.is_epoch_boundary(height) {
-                    let mut vs = self.validator_set.write().unwrap();
-                    em.process_epoch_transition(&mut vs);
-                }
-            }
+            self.try_epoch_transition(height);
 
             info!(height, ops = op_count, epoch, "block finalized (single validator)");
 
@@ -348,30 +342,37 @@ impl ConsensusEngine {
         header: &BlockHeader,
         operations: &[UserOperation],
     ) -> bool {
-        let our_height = self.height();
-        let expected_height = our_height + 1;
-
-        if header.height < expected_height {
-            // Old block, ignore.
-            return false;
-        }
-
-        // Verify parent hash matches our latest block (monotonicity check).
-        if header.height == expected_height {
+        // Hold chain read lock to get a consistent snapshot of height and parent hash.
+        let (our_height, expected_height, fork_detected) = {
             let chain = self.chain.read().unwrap();
-            if let Some(last_block) = chain.last() {
-                let expected_parent = block_hash(&last_block.header);
-                if header.parent_hash != expected_parent && header.parent_hash != [0u8; 32] {
-                    warn!(
-                        height = header.height,
-                        "parent hash mismatch — fork detected, initiating rollback"
-                    );
-                    drop(chain); // release read lock
-                    self.handle_fork(header.height);
-                    // After rollback, try accepting the block again via fast-forward.
-                    return false;
-                }
+            let our_height = chain.last().map(|b| b.header.height).unwrap_or(0);
+            let expected_height = our_height + 1;
+
+            if header.height < expected_height {
+                return false; // Old block, ignore.
             }
+
+            let fork = if header.height == expected_height {
+                if let Some(last_block) = chain.last() {
+                    let expected_parent = block_hash(&last_block.header);
+                    header.parent_hash != expected_parent && header.parent_hash != [0u8; 32]
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            (our_height, expected_height, fork)
+        };
+
+        if fork_detected {
+            warn!(
+                height = header.height,
+                "parent hash mismatch — fork detected, initiating rollback"
+            );
+            self.handle_fork(header.height);
+            return false;
         }
 
         if header.height > expected_height {
@@ -607,13 +608,7 @@ impl ConsensusEngine {
             }
 
             // Only advance epoch counter — rewards already applied by proposer.
-            {
-                let mut em = self.epoch_manager.write().unwrap();
-                if em.is_epoch_boundary(height) {
-                    let mut vs = self.validator_set.write().unwrap();
-                    em.process_epoch_transition(&mut vs);
-                }
-            }
+            self.try_epoch_transition(height);
 
             info!(
                 height,
@@ -771,13 +766,14 @@ impl ConsensusEngine {
         }
     }
 
-    /// Load all persisted blocks from the state store (for indexer replay).
-    pub fn load_persisted_blocks(&self) -> Vec<FinalizedBlock> {
+    /// Load persisted blocks from the state store (for indexer replay).
+    /// Loads at most `max_blocks` starting from `from_height`.
+    pub fn load_persisted_blocks_range(&self, from_height: u64, max_blocks: usize) -> Vec<FinalizedBlock> {
         let store = self.store.read().unwrap();
         let mut blocks = Vec::new();
-        let mut height = 1u64;
+        let mut height = from_height;
 
-        loop {
+        while blocks.len() < max_blocks {
             let key = format!("block/{}", height);
             match store.get(key.as_bytes()) {
                 Ok(Some(data)) => {
@@ -793,6 +789,12 @@ impl ConsensusEngine {
         }
 
         blocks
+    }
+
+    /// Load all persisted blocks (convenience wrapper, capped at current height).
+    pub fn load_persisted_blocks(&self) -> Vec<FinalizedBlock> {
+        let max = self.height() as usize;
+        self.load_persisted_blocks_range(1, max)
     }
 
     /// Get blocks for sync — loads from persistent storage.
@@ -830,7 +832,7 @@ impl ConsensusEngine {
         let height = header.height;
 
         // Validate epoch matches expected value.
-        let expected_epoch = height / 100;
+        let expected_epoch = height / crate::epoch::EPOCH_LENGTH;
         if header.epoch != expected_epoch {
             warn!(
                 height,
@@ -878,6 +880,16 @@ impl ConsensusEngine {
         }
     }
 
+    /// Process epoch transition if at a boundary. Acquires locks in consistent
+    /// order (epoch_manager first, then validator_set) to prevent deadlocks.
+    fn try_epoch_transition(&self, height: u64) {
+        let mut em = self.epoch_manager.write().unwrap();
+        if em.is_epoch_boundary(height) {
+            let mut vs = self.validator_set.write().unwrap();
+            em.process_epoch_transition(&mut vs);
+        }
+    }
+
     /// Check if a block is pending at the given height (proposed but not finalized).
     pub fn has_pending_block(&self, height: u64) -> bool {
         self.pending_blocks.read().unwrap().contains_key(&height)
@@ -901,6 +913,12 @@ impl ConsensusEngine {
             warn!(height, "quorum timeout — force-finalizing block");
             self.finalize_pending_block(height);
         }
+
+        // Clean up orphaned attestations for heights already finalized.
+        let current_height = self.height();
+        let mut atts = self.pending_attestations.write().unwrap();
+        atts.retain(|h, _| *h > current_height);
+
         count
     }
 

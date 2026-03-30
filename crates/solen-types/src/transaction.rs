@@ -20,6 +20,8 @@ pub enum Action {
     Transfer { to: AccountId, amount: u128 },
     Call { target: AccountId, method: String, args: Vec<u8> },
     Deploy { code: Vec<u8>, salt: [u8; 32] },
+    /// Replace the account's auth methods. Must be signed by a current auth method.
+    SetAuth { auth_methods: Vec<crate::account::AuthMethod> },
 }
 
 /// An intent expressing desired outcome rather than exact execution steps.

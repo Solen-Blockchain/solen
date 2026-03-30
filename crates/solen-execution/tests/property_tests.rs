@@ -18,9 +18,7 @@ fn make_id(n: u8) -> AccountId {
 }
 
 fn treasury_id() -> AccountId {
-    let mut id = [0u8; 32];
-    id[..8].copy_from_slice(b"treasury");
-    id
+    solen_execution::fees::TREASURY_ADDRESS
 }
 
 fn setup_with_balances(

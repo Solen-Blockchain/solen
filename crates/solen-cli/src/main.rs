@@ -113,6 +113,18 @@ enum Commands {
         args: Option<String>,
     },
 
+    /// Convert an account to multi-sig (threshold signing)
+    Multisig {
+        /// Account key name (current owner)
+        from: String,
+        /// Threshold (number of required signatures)
+        #[arg(long, short)]
+        threshold: u16,
+        /// Signer public keys (hex), comma-separated
+        #[arg(long, short, value_delimiter = ',')]
+        signers: Vec<String>,
+    },
+
     /// Key management
     Key {
         #[command(subcommand)]
@@ -171,6 +183,9 @@ async fn main() -> anyhow::Result<()> {
             args,
         } => {
             commands::cmd_call(&rpc, &from, &target, &method, args.as_deref()).await?
+        }
+        Commands::Multisig { from, threshold, signers } => {
+            commands::cmd_multisig(&rpc, &from, threshold, &signers).await?
         }
         Commands::Key { action } => match action {
             KeyAction::Generate { name } => commands::cmd_key_generate(&name)?,

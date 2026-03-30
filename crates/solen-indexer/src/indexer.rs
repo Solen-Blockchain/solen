@@ -91,17 +91,32 @@ pub async fn run_indexer(
     index_store: Arc<RwLock<IndexStore>>,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) {
-    // Replay persisted blocks from previous sessions.
-    let persisted = engine.load_persisted_blocks();
-    if !persisted.is_empty() {
-        let count = persisted.len();
-        {
-            let mut store = index_store.write().unwrap();
-            for block in &persisted {
-                index_block(&mut store, block);
+    // Replay persisted blocks from previous sessions in batches to limit memory.
+    {
+        let batch_size = 1000;
+        let mut from = 1u64;
+        let mut total_replayed = 0usize;
+        loop {
+            let batch = engine.load_persisted_blocks_range(from, batch_size);
+            if batch.is_empty() {
+                break;
+            }
+            let count = batch.len();
+            {
+                let mut store = index_store.write().unwrap();
+                for block in &batch {
+                    index_block(&mut store, block);
+                }
+            }
+            total_replayed += count;
+            from += count as u64;
+            if count < batch_size {
+                break;
             }
         }
-        tracing::info!(blocks = count, "replayed persisted blocks into indexer");
+        if total_replayed > 0 {
+            tracing::info!(blocks = total_replayed, "replayed persisted blocks into indexer");
+        }
     }
 
     let mut last_indexed = engine.height();

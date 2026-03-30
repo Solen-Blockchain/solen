@@ -250,7 +250,11 @@ fn do_mint(args: &[u8]) -> i32 {
     let supply = get_total_supply();
     set_total_supply(supply + amount);
 
-    events::emit(b"mint", &amount.to_le_bytes());
+    // Event data: recipient[32] + amount[16] (matches indexer format).
+    let mut event_data = [0u8; 48];
+    event_data[..32].copy_from_slice(&to);
+    event_data[32..].copy_from_slice(&amount.to_le_bytes());
+    events::emit(b"mint", &event_data);
     sdk::return_value(&(balance + amount).to_le_bytes())
 }
 
@@ -275,7 +279,11 @@ fn do_transfer(args: &[u8]) -> i32 {
     let to_balance = get_balance(&to);
     set_balance(&to, to_balance + amount);
 
-    events::emit(b"transfer", &amount.to_le_bytes());
+    // Event data: recipient[32] + amount[16] (matches indexer format).
+    let mut event_data = [0u8; 48];
+    event_data[..32].copy_from_slice(&to);
+    event_data[32..].copy_from_slice(&amount.to_le_bytes());
+    events::emit(b"transfer", &event_data);
     sdk::return_value(b"ok")
 }
 
@@ -333,7 +341,11 @@ fn do_transfer_from(args: &[u8]) -> i32 {
     // Reduce allowance.
     set_allowance(&from, &caller, allowed - amount);
 
-    events::emit(b"transfer", &amount.to_le_bytes());
+    // Event data: recipient[32] + amount[16] (matches indexer format).
+    let mut event_data = [0u8; 48];
+    event_data[..32].copy_from_slice(&to);
+    event_data[32..].copy_from_slice(&amount.to_le_bytes());
+    events::emit(b"transfer", &event_data);
     sdk::return_value(b"ok")
 }
 

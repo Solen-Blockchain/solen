@@ -73,11 +73,15 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                 && !event.emitter.starts_with("ffffffffffffffffffffffffffffffff")
             {
                 // First 64 hex chars = 32 bytes = recipient account ID.
-                let recipient = &event.data[..64];
-                store.track_token_holder(recipient, &event.emitter);
+                let recipient = event.data[..64].to_string();
+                store.track_token_holder(&recipient, &event.emitter);
                 // Also track the sender for transfers.
                 let sender_hex = hex(&receipt.sender);
                 store.track_token_holder(&sender_hex, &event.emitter);
+                // Add recipient as related account so the tx shows on their page.
+                if !related_accounts.contains(&recipient) {
+                    related_accounts.push(recipient);
+                }
             }
 
             // Track contract deployments.

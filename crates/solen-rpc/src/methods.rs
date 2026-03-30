@@ -65,6 +65,8 @@ pub struct ChainStatus {
     pub pending_ops: usize,
     /// Total tokens allocated at genesis (base units).
     pub total_allocation: String,
+    /// Total tokens currently staked (base units).
+    pub total_staked: String,
     /// Tokens currently in circulation (not locked in system pools).
     pub total_circulation: String,
 }
@@ -317,6 +319,7 @@ impl SolenApiServer for SolenRpc {
             latest_state_root: hex_encode(&store.state_root()),
             pending_ops: self.engine.mempool().len(),
             total_allocation: total_allocation.to_string(),
+            total_staked: total_staked.to_string(),
             total_circulation: total_circulation.to_string(),
         })
     }

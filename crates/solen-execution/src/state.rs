@@ -276,8 +276,10 @@ impl<'a> StateManager<'a> {
         contract_id: &AccountId,
         storage: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
     ) -> Result<(), StateError> {
-        // Save each key-value pair.
-        let keys: Vec<Vec<u8>> = storage.keys().cloned().collect();
+        // Save each key-value pair. Keys MUST be sorted for deterministic
+        // manifest serialization — HashMap iteration order is random.
+        let mut keys: Vec<Vec<u8>> = storage.keys().cloned().collect();
+        keys.sort();
         for (key, value) in storage {
             let store_key = contract_storage_key(contract_id, key);
             self.store.put(&store_key, value)?;

@@ -95,8 +95,15 @@ impl StateStore for MemoryStore {
             return [0u8; 32];
         }
 
-        // Build Merkle tree from pre-hashed leaves (no per-leaf rehashing).
-        let leaves: Vec<Hash> = self.leaf_hashes.values().copied().collect();
+        // Build Merkle tree from pre-hashed leaves, excluding non-execution keys.
+        let leaves: Vec<Hash> = self.leaf_hashes
+            .iter()
+            .filter(|(k, _)| !is_non_state_key(k))
+            .map(|(_, v)| *v)
+            .collect();
+        if leaves.is_empty() {
+            return [0u8; 32];
+        }
         merkle_root(&leaves)
     }
 
@@ -110,8 +117,12 @@ impl StateStore for MemoryStore {
             return;
         }
 
-        let leaves: Vec<Hash> = self.leaf_hashes.values().copied().collect();
-        let root = merkle_root(&leaves);
+        let leaves: Vec<Hash> = self.leaf_hashes
+            .iter()
+            .filter(|(k, _)| !is_non_state_key(k))
+            .map(|(_, v)| *v)
+            .collect();
+        let root = if leaves.is_empty() { [0u8; 32] } else { merkle_root(&leaves) };
         self.tree_cache = Some(MerkleTree { root });
     }
 
@@ -148,6 +159,14 @@ impl StateStore for MemoryStore {
 
         Ok(count)
     }
+}
+
+/// Keys that are NOT part of execution state and must be excluded
+/// from the state root. These vary across validators based on timing
+/// (when blocks are persisted, when chain meta is updated) and would
+/// cause false state divergence.
+fn is_non_state_key(key: &[u8]) -> bool {
+    key.starts_with(b"block/") || key.starts_with(b"__chain_meta__") || key.starts_with(b"slash/")
 }
 
 fn hash_leaf(key: &[u8], value: &[u8]) -> Hash {

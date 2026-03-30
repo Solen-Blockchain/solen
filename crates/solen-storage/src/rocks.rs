@@ -57,6 +57,12 @@ impl StateStore for RocksStore {
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
             let (k, v) = item.unwrap();
+            // Exclude non-execution keys from the state root.
+            // Block storage and chain metadata differ across validators
+            // based on timing, which would cause false state divergence.
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"slash/") {
+                continue;
+            }
             let mut hasher = blake3::Hasher::new();
             hasher.update(&k);
             hasher.update(&v);

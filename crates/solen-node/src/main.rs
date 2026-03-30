@@ -261,6 +261,9 @@ async fn main() -> anyhow::Result<()> {
     let is_multi = engine.active_validator_count() > 1;
     let syncing = Arc::new(std::sync::atomic::AtomicBool::new(is_multi));
 
+    // Track the highest known network height (from StatusAnnounce messages).
+    let network_height = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     // --- P2P networking ---
     let net_handle = if !cli.no_p2p {
         let bootstrap_peers: Vec<_> = cli
@@ -282,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
         let engine_for_p2p = engine.clone();
         let net_for_attest = handle.clone();
         let syncing_for_p2p = syncing.clone();
+        let net_height_for_p2p = network_height.clone();
         let attestation_kp = Arc::new(validator_kp);
         let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
@@ -298,6 +302,11 @@ async fn main() -> anyhow::Result<()> {
                         // Reject oversized blocks to prevent memory DoS.
                         if operations.len() > 1000 {
                             tracing::warn!(ops = operations.len(), "rejecting oversized block");
+                            continue;
+                        }
+                        // While syncing, ignore live blocks — let sync handle catch-up.
+                        // This prevents fast-forward from corrupting state.
+                        if syncing_for_p2p.load(std::sync::atomic::Ordering::Relaxed) {
                             continue;
                         }
                         // Validate and accept the block.
@@ -355,6 +364,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     NetworkMessage::StatusAnnounce { height, .. } => {
+                        // Track the highest known network height.
+                        net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
+
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
                             // More than 1 block behind — enter sync mode.
@@ -429,24 +441,27 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         if synced > 0 {
+                            let our_height = engine_for_p2p.height();
+                            let known_net_height = net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
                             tracing::info!(
                                 synced,
-                                new_height = engine_for_p2p.height(),
+                                new_height = our_height,
+                                network_height = known_net_height,
                                 "synced blocks from peer"
                             );
 
-                            // If still behind, immediately request more blocks.
-                            let our_height = engine_for_p2p.height();
-                            if our_height < highest_peer_height {
-                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
-                                    from_height: our_height + 1,
-                                    to_height: highest_peer_height,
-                                });
-                            } else {
+                            // Check if we've caught up to the known network height.
+                            if our_height + 1 >= known_net_height {
                                 // Caught up — resume block production.
                                 if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
                                     tracing::info!(height = our_height, "sync complete, resuming block production");
                                 }
+                            } else {
+                                // Still behind — request more blocks.
+                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                    from_height: our_height + 1,
+                                    to_height: known_net_height,
+                                });
                             }
                         }
                     }
@@ -458,6 +473,7 @@ async fn main() -> anyhow::Result<()> {
         let status_engine = engine.clone();
         let status_handle = handle.clone();
         let syncing_for_status = syncing.clone();
+        let net_height_for_status = network_height.clone();
         tokio::spawn(async move {
             // Broadcast immediately after a short delay for mesh warmup.
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -473,12 +489,15 @@ async fn main() -> anyhow::Result<()> {
                     state_root,
                 });
 
-                // If still in sync mode after 30s with no sync activity,
-                // assume we're already at the tip and resume production.
+                // If still in sync mode after 45s and we're at (or near) the known
+                // network height, assume we're caught up and resume production.
                 ticks_since_start += 1;
-                if ticks_since_start == 3 && syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
-                    tracing::info!(height, "no sync needed — resuming block production");
-                    syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                if ticks_since_start >= 3 && syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
+                    let known = net_height_for_status.load(std::sync::atomic::Ordering::Relaxed);
+                    if known == 0 || height + 1 >= known {
+                        tracing::info!(height, network_height = known, "no sync needed — resuming block production");
+                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
 
                 interval.tick().await;

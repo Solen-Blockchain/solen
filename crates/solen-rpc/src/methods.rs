@@ -284,19 +284,33 @@ impl SolenApiServer for SolenRpc {
             _ => 0,
         };
 
-        // Circulation = total supply minus locked/restricted accounts.
+        // Circulation = total supply minus all system/fund account balances and staked tokens.
         use solen_types::system::*;
-        let locked_addresses = [
+        let non_circulating_addresses = [
             TREASURY_ADDRESS,
             STAKING_POOL_ADDRESS,
+            ECOSYSTEM_FUND_ADDRESS,
+            COMMUNITY_ADDRESS,
+            LIQUIDITY_ADDRESS,
             TEAM_POOL_ADDRESS,
             INVESTOR_POOL_ADDRESS,
+            STAKING_ADDRESS,
+            GOVERNANCE_ADDRESS,
+            BRIDGE_ADDRESS,
+            INTENT_ADDRESS,
+            VESTING_ADDRESS,
         ];
-        let locked: u128 = locked_addresses
+        let non_circulating: u128 = non_circulating_addresses
             .iter()
             .map(|addr| state.get_balance(addr).unwrap_or(0))
             .sum();
-        let total_circulation = total_allocation.saturating_sub(locked);
+
+        // Staked tokens are also not circulating.
+        let staking =
+            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let total_staked: u128 = staking.validators.iter().map(|v| v.total_stake()).sum();
+
+        let total_circulation = total_allocation.saturating_sub(non_circulating).saturating_sub(total_staked);
 
         Ok(ChainStatus {
             height: self.engine.height(),

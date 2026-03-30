@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long, default_value = "300")]
     cooldown: u64,
 
+    /// Chain ID for transaction signing.
+    #[arg(long, default_value = "1337")]
+    chain_id: u64,
+
     /// Allowed origin for CORS (use * for any).
     #[arg(long, default_value = "*")]
     cors_origin: String,
@@ -63,6 +67,7 @@ struct AppState {
     faucet_id: [u8; 32],
     drip_amount: u128,
     cooldown: Duration,
+    chain_id: u64,
     /// Tracks last drip time per recipient hex.
     rate_limit: Arc<Mutex<HashMap<String, Instant>>>,
     http_client: reqwest::Client,
@@ -169,7 +174,7 @@ async fn handle_drip(
         max_fee: 100_000,
         signature: vec![],
     };
-    sign_op(&mut op, &state.keypair);
+    sign_op(&mut op, &state.keypair, state.chain_id);
 
     // Submit.
     match submit_op(&state.http_client, &state.rpc_url, &op).await {
@@ -274,8 +279,9 @@ async fn submit_op(
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn sign_op(op: &mut UserOperation, kp: &Keypair) {
-    let mut msg = Vec::new();
+fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&op.sender);
     msg.extend_from_slice(&op.nonce.to_le_bytes());
     msg.extend_from_slice(&op.max_fee.to_le_bytes());
@@ -347,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
         faucet_id,
         drip_amount: cli.drip_amount,
         cooldown: Duration::from_secs(cli.cooldown),
+        chain_id: cli.chain_id,
         rate_limit: Arc::new(Mutex::new(HashMap::new())),
         http_client: reqwest::Client::new(),
     };

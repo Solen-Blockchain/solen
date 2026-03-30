@@ -32,9 +32,15 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
             .events
             .iter()
             .map(|e| {
-                // For transfer events, extract the recipient from the data field.
-                // Data format: [recipient_id (32 bytes)][amount (16 bytes)]
-                if e.topic == b"transfer" && e.data.len() >= 32 {
+                // Extract recipient addresses from event data.
+                // These event types all have address[32 bytes] + amount[16 bytes].
+                if (e.topic == b"transfer"
+                    || e.topic == b"epoch_reward"
+                    || e.topic == b"delegator_reward"
+                    || e.topic == b"delegate"
+                    || e.topic == b"undelegate")
+                    && e.data.len() >= 32
+                {
                     let recipient = hex(&e.data[..32]);
                     if !related_accounts.contains(&recipient) {
                         related_accounts.push(recipient);

@@ -40,8 +40,12 @@ pub struct StatusResponse {
 pub struct ValidatorResponse {
     pub id: String,
     pub stake: String,
+    pub self_stake: String,
+    pub delegated: String,
     pub status: String,
     pub missed_blocks: u64,
+    pub commission_pct: String,
+    pub is_genesis: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,18 +170,37 @@ async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetRespo
     let vs = engine.validator_set();
     let vs = vs.read().unwrap();
 
+    // Load staking contract for commission and delegation data.
+    let staking = {
+        let store = engine.store();
+        let store = store.read().unwrap();
+        solen_system_contracts::staking::StakingContract::load(store.as_ref())
+    };
+
     let validators: Vec<ValidatorResponse> = vs
         .all()
         .iter()
-        .map(|v| ValidatorResponse {
-            id: hex_encode(&v.id),
-            stake: v.stake.to_string(),
-            status: match v.status {
-                solen_consensus::validator::ValidatorStatus::Active => "Active".to_string(),
-                solen_consensus::validator::ValidatorStatus::Jailed => "Jailed".to_string(),
-                solen_consensus::validator::ValidatorStatus::Exiting => "Exiting".to_string(),
-            },
-            missed_blocks: v.missed_blocks,
+        .map(|v| {
+            let staking_info = staking.get_validator(&v.id);
+            let commission_bps = staking_info.map(|s| s.commission_rate_bps).unwrap_or(1000);
+            let self_stake = staking_info.map(|s| s.self_stake).unwrap_or(v.stake);
+            let delegated = staking_info.map(|s| s.total_delegated).unwrap_or(0);
+            let is_genesis = staking_info.map(|s| s.is_genesis).unwrap_or(false);
+
+            ValidatorResponse {
+                id: hex_encode(&v.id),
+                stake: v.stake.to_string(),
+                self_stake: self_stake.to_string(),
+                delegated: delegated.to_string(),
+                status: match v.status {
+                    solen_consensus::validator::ValidatorStatus::Active => "Active".to_string(),
+                    solen_consensus::validator::ValidatorStatus::Jailed => "Jailed".to_string(),
+                    solen_consensus::validator::ValidatorStatus::Exiting => "Exiting".to_string(),
+                },
+                missed_blocks: v.missed_blocks,
+                commission_pct: format!("{:.1}%", commission_bps as f64 / 100.0),
+                is_genesis,
+            }
         })
         .collect();
 

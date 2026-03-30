@@ -74,6 +74,7 @@ pub struct ValidatorInfo {
     pub total_stake: String,
     pub is_active: bool,
     pub is_genesis: bool,
+    pub commission_bps: u64,
 }
 
 /// Staking info for an account.
@@ -276,6 +277,7 @@ impl SolenApiServer for SolenRpc {
                 total_stake: v.total_stake().to_string(),
                 is_active: v.is_active,
                 is_genesis: v.is_genesis,
+                commission_bps: v.commission_rate_bps,
             })
             .collect();
 

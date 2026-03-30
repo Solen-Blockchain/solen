@@ -206,11 +206,6 @@ impl ConsensusEngine {
         let ops = self.mempool.drain(self.config.max_ops_per_block);
         let op_count = ops.len();
 
-        let mut result = {
-            let mut store = self.store.write().unwrap();
-            self.executor.execute_block(store.as_mut(), &ops)
-        }; // store lock released here
-
         let (parent_hash, height) = {
             let chain = self.chain.read().unwrap();
             let parent = chain
@@ -221,20 +216,18 @@ impl ConsensusEngine {
             (parent, h)
         };
 
-        // Include any pending reward receipts from the last epoch transition.
-        {
-            let mut pending = self.pending_reward_receipts.write().unwrap();
-            if !pending.is_empty() {
-                result.receipts.extend(pending.drain(..));
-            }
-        }
+        // Execute block with height so the executor handles epoch rewards deterministically.
+        let result = {
+            let mut store = self.store.write().unwrap();
+            self.executor.execute_block_with_height(store.as_mut(), &ops, height)
+        };
 
         let epoch = {
             let em = self.epoch_manager.read().unwrap();
             em.epoch_for_height(height)
         };
 
-        let mut header = BlockHeader {
+        let header = BlockHeader {
             height,
             epoch,
             parent_hash,
@@ -250,17 +243,7 @@ impl ConsensusEngine {
         let is_single = self.validator_set.read().unwrap().active_count() <= 1;
 
         if is_single {
-            // Distribute epoch rewards as part of block execution (proposer only).
-            let is_epoch = {
-                let em = self.epoch_manager.read().unwrap();
-                em.is_epoch_boundary(height)
-            };
-            if is_epoch {
-                self.distribute_epoch_rewards();
-                // Update state root after rewards.
-                result.state_root = self.store.read().unwrap().state_root();
-                header.state_root = result.state_root;
-            }
+            // Epoch rewards are handled by the executor via execute_block_with_height.
 
             let attestations = vec![Attestation {
                 validator_id: self.config.validator_id,
@@ -282,10 +265,12 @@ impl ConsensusEngine {
                 save_chain_meta(store.as_mut(), height, epoch);
             }
 
-            if is_epoch {
+            {
                 let mut em = self.epoch_manager.write().unwrap();
-                let mut vs = self.validator_set.write().unwrap();
-                em.process_epoch_transition(&mut vs);
+                if em.is_epoch_boundary(height) {
+                    let mut vs = self.validator_set.write().unwrap();
+                    em.process_epoch_transition(&mut vs);
+                }
             }
 
             info!(height, ops = op_count, epoch, "block finalized (single validator)");
@@ -296,19 +281,7 @@ impl ConsensusEngine {
                 operations: ops,
             }
         } else {
-            // Multi-validator: distribute epoch rewards before proposing.
-            {
-                let em = self.epoch_manager.read().unwrap();
-                if em.is_epoch_boundary(height) {
-                    drop(em);
-                    self.distribute_epoch_rewards();
-                    // Recompute state root after rewards.
-                    let store = self.store.read().unwrap();
-                    result.state_root = store.state_root();
-                    // Update header with new state root.
-                    header.state_root = result.state_root;
-                }
-            }
+            // Epoch rewards are handled by the executor via execute_block_with_height.
 
             // Store as pending, self-attest,
             // wait for peer attestations to reach quorum.
@@ -413,23 +386,14 @@ impl ConsensusEngine {
             self.fast_forward_to(header.height - 1, header.epoch);
         }
 
-        // Execute the operations against our current state.
+        // Execute the operations (including epoch rewards if applicable).
+        // Using execute_block_with_height ensures deterministic reward distribution.
         let result = {
             let mut store = self.store.write().unwrap();
-            self.executor.execute_block(store.as_mut(), operations)
-        }; // store lock released
+            self.executor.execute_block_with_height(store.as_mut(), operations, header.height)
+        };
 
-        // If this is an epoch boundary, distribute rewards (same as proposer did).
-        {
-            let em = self.epoch_manager.read().unwrap();
-            if em.is_epoch_boundary(header.height) {
-                drop(em);
-                self.distribute_epoch_rewards();
-            }
-        }
-
-        // Read state root after execution + potential rewards.
-        let current_root = self.store.read().unwrap().state_root();
+        let current_root = result.state_root;
 
         // For the next block after our height, verify state root.
         let state_matches = current_root == header.state_root;
@@ -659,10 +623,9 @@ impl ConsensusEngine {
         }
     }
 
-    /// Distribute epoch rewards from the staking pool to validators.
-    /// Called by the proposer as part of block production, and by
-    /// accept_block so all nodes reach the same state.
-    fn distribute_epoch_rewards(&self) {
+    /// Legacy — rewards now handled by executor. Kept as unused for reference.
+    #[allow(dead_code)]
+    fn _distribute_epoch_rewards_legacy(&self) {
         // Distribute staking rewards from the staking pool account.
         // ~317 SOLEN per epoch (50M/year ÷ 157,680 epochs), with 8 decimals.
         let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN in base units
@@ -720,38 +683,56 @@ impl ConsensusEngine {
             }
         }
 
-        // Distribute to validators proportionally and generate receipts.
+        // Distribute to validators and delegators proportionally.
         let mut reward_events = Vec::new();
 
         for validator in &active {
-            let share = actual_reward * validator.total_stake() / total_stake;
-            if share == 0 {
+            let validator_share = actual_reward * validator.total_stake() / total_stake;
+            if validator_share == 0 {
                 continue;
             }
 
-            let key = {
-                let mut k = b"acc/".to_vec();
-                k.extend_from_slice(&validator.id);
-                k
+            // Split between validator (self-stake + commission) and delegators.
+            let delegator_pool = if validator.total_delegated > 0 {
+                validator_share * validator.total_delegated / validator.total_stake()
+            } else {
+                0
             };
+            let commission = delegator_pool * validator.commission_rate_bps as u128 / 10_000;
+            let delegator_net = delegator_pool.saturating_sub(commission);
 
-            if let Ok(Some(data)) = store.get(&key) {
-                if let Ok(mut account) =
-                    <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
-                {
-                    account.balance = account.balance.saturating_add(share);
-                    if let Ok(encoded) = borsh::to_vec(&account) {
-                        let _ = store.put(&key, &encoded);
+            // Validator gets: self-stake share + commission from delegators.
+            let validator_reward = validator_share.saturating_sub(delegator_pool) + commission;
+
+            // Credit validator account.
+            credit_account(store.as_mut(), &validator.id, validator_reward);
+
+            let mut event_data = Vec::with_capacity(48);
+            event_data.extend_from_slice(&validator.id);
+            event_data.extend_from_slice(&validator_reward.to_le_bytes());
+            reward_events.push(solen_execution::receipt::Event {
+                emitter: solen_types::system::STAKING_POOL_ADDRESS,
+                topic: b"epoch_reward".to_vec(),
+                data: event_data,
+            });
+
+            // Distribute remaining rewards to delegators proportionally.
+            if delegator_net > 0 && validator.total_delegated > 0 {
+                let delegations = staking.delegations_for_validator(&validator.id);
+                for delegation in delegations {
+                    let del_share = delegator_net * delegation.amount / validator.total_delegated;
+                    if del_share == 0 {
+                        continue;
                     }
 
-                    // Build event data: validator_id[32] + amount[16]
-                    let mut event_data = Vec::with_capacity(48);
-                    event_data.extend_from_slice(&validator.id);
-                    event_data.extend_from_slice(&share.to_le_bytes());
+                    credit_account(store.as_mut(), &delegation.delegator, del_share);
 
+                    let mut event_data = Vec::with_capacity(48);
+                    event_data.extend_from_slice(&delegation.delegator);
+                    event_data.extend_from_slice(&del_share.to_le_bytes());
                     reward_events.push(solen_execution::receipt::Event {
                         emitter: solen_types::system::STAKING_POOL_ADDRESS,
-                        topic: b"epoch_reward".to_vec(),
+                        topic: b"delegator_reward".to_vec(),
                         data: event_data,
                     });
                 }
@@ -848,17 +829,16 @@ impl ConsensusEngine {
     ) {
         let height = header.height;
 
-        // Execute operations against our state.
-        {
+        // Execute operations (including epoch rewards if applicable).
+        let exec_result = {
             let mut store = self.store.write().unwrap();
-            let _result = self.executor.execute_block(store.as_mut(), operations);
-        }
+            self.executor.execute_block_with_height(store.as_mut(), operations, height)
+        };
 
-        // Create finalized block and persist.
         let result = BlockResult {
-            state_root: self.store.read().unwrap().state_root(),
-            receipts: vec![], // we don't have receipts from sync, just state
-            gas_used: 0,
+            state_root: exec_result.state_root,
+            receipts: exec_result.receipts,
+            gas_used: exec_result.gas_used,
         };
 
         let block = FinalizedBlock {
@@ -876,13 +856,10 @@ impl ConsensusEngine {
             save_chain_meta(store.as_mut(), height, header.epoch);
         }
 
-        // Epoch transition if needed.
+        // Advance epoch counter (rewards already handled by executor).
         {
-            let em = self.epoch_manager.read().unwrap();
+            let mut em = self.epoch_manager.write().unwrap();
             if em.is_epoch_boundary(height) {
-                drop(em);
-                self.distribute_epoch_rewards();
-                let mut em = self.epoch_manager.write().unwrap();
                 let mut vs = self.validator_set.write().unwrap();
                 em.process_epoch_transition(&mut vs);
             }
@@ -983,6 +960,26 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+/// Credit an account balance by the given amount.
+fn credit_account(store: &mut dyn StateStore, account_id: &[u8; 32], amount: u128) {
+    let key = {
+        let mut k = b"acc/".to_vec();
+        k.extend_from_slice(account_id);
+        k
+    };
+
+    if let Ok(Some(data)) = store.get(&key) {
+        if let Ok(mut account) =
+            <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
+        {
+            account.balance = account.balance.saturating_add(amount);
+            if let Ok(encoded) = borsh::to_vec(&account) {
+                let _ = store.put(&key, &encoded);
+            }
+        }
+    }
 }
 
 /// Key for persisted chain metadata.

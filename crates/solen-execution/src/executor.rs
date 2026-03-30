@@ -63,13 +63,34 @@ impl BlockExecutor {
         store: &mut dyn StateStore,
         operations: &[UserOperation],
     ) -> BlockResult {
-        // For large batches, pre-verify signatures in parallel (the most
-        // expensive per-op cost) then execute state changes sequentially.
-        if operations.len() >= 200 {
-            return self.execute_block_parallel(store, operations);
+        self.execute_block_with_height(store, operations, 0)
+    }
+
+    /// Execute a block at a specific height. If the height is an epoch
+    /// boundary, automatically distributes staking rewards as part of
+    /// the block execution (deterministic — all nodes get same result).
+    pub fn execute_block_with_height(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+        height: u64,
+    ) -> BlockResult {
+        let mut result = if operations.len() >= 200 {
+            self.execute_block_parallel(store, operations)
+        } else {
+            self.execute_block_sequential(store, operations)
+        };
+
+        // Distribute epoch rewards deterministically as part of block execution.
+        if height > 0 && height % 100 == 0 {
+            let reward_receipts = distribute_epoch_rewards_in_executor(store);
+            result.receipts.extend(reward_receipts);
+            // Recompute state root after rewards.
+            result.state_root = store.state_root();
+            store.commit_root();
         }
 
-        self.execute_block_sequential(store, operations)
+        result
     }
 
     /// Sequential execution (original path).
@@ -472,6 +493,144 @@ impl BlockExecutor {
     ) -> ExecutionReceipt {
         let mut snapshot = store.snapshot();
         self.execute_operation(snapshot.as_mut(), op)
+    }
+}
+
+/// Distribute epoch rewards deterministically as part of block execution.
+/// This runs inside the executor so ALL nodes produce the same state root.
+fn distribute_epoch_rewards_in_executor(
+    store: &mut dyn StateStore,
+) -> Vec<ExecutionReceipt> {
+    use borsh::BorshDeserialize;
+    use solen_system_contracts::staking::StakingContract;
+    use solen_types::system::STAKING_POOL_ADDRESS;
+
+    let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN (8 decimals)
+
+    let staking = StakingContract::load(store);
+    let active = staking.active_validators();
+    let total_stake = staking.total_active_stake();
+
+    if total_stake == 0 || active.is_empty() {
+        return vec![];
+    }
+
+    // Check staking pool balance.
+    let pool_key = {
+        let mut k = b"acc/".to_vec();
+        k.extend_from_slice(&STAKING_POOL_ADDRESS);
+        k
+    };
+
+    let pool_balance = match store.get(&pool_key) {
+        Ok(Some(data)) => {
+            solen_types::account::Account::try_from_slice(&data)
+                .map(|a| a.balance)
+                .unwrap_or(0)
+        }
+        _ => 0,
+    };
+
+    if pool_balance == 0 {
+        return vec![];
+    }
+
+    let actual_reward = reward_per_epoch.min(pool_balance);
+
+    // Deduct from pool.
+    if let Ok(Some(data)) = store.get(&pool_key) {
+        if let Ok(mut pool_acct) = solen_types::account::Account::try_from_slice(&data) {
+            pool_acct.balance = pool_acct.balance.saturating_sub(actual_reward);
+            if let Ok(encoded) = borsh::to_vec(&pool_acct) {
+                let _ = store.put(&pool_key, &encoded);
+            }
+        }
+    }
+
+    // Distribute to validators and delegators.
+    let mut events = Vec::new();
+
+    for validator in &active {
+        let validator_share = actual_reward * validator.total_stake() / total_stake;
+        if validator_share == 0 {
+            continue;
+        }
+
+        // Split between validator and delegators.
+        let delegator_pool = if validator.total_delegated > 0 {
+            validator_share * validator.total_delegated / validator.total_stake()
+        } else {
+            0
+        };
+        let commission = delegator_pool * validator.commission_rate_bps as u128 / 10_000;
+        let delegator_net = delegator_pool.saturating_sub(commission);
+        let validator_reward = validator_share.saturating_sub(delegator_pool) + commission;
+
+        // Credit validator.
+        credit_account_raw(store, &validator.id, validator_reward);
+
+        let mut event_data = Vec::with_capacity(48);
+        event_data.extend_from_slice(&validator.id);
+        event_data.extend_from_slice(&validator_reward.to_le_bytes());
+        events.push(Event {
+            emitter: STAKING_POOL_ADDRESS,
+            topic: b"epoch_reward".to_vec(),
+            data: event_data,
+        });
+
+        // Credit delegators.
+        if delegator_net > 0 && validator.total_delegated > 0 {
+            let delegations = staking.delegations_for_validator(&validator.id);
+            for delegation in delegations {
+                let del_share = delegator_net * delegation.amount / validator.total_delegated;
+                if del_share == 0 {
+                    continue;
+                }
+                credit_account_raw(store, &delegation.delegator, del_share);
+
+                let mut event_data = Vec::with_capacity(48);
+                event_data.extend_from_slice(&delegation.delegator);
+                event_data.extend_from_slice(&del_share.to_le_bytes());
+                events.push(Event {
+                    emitter: STAKING_POOL_ADDRESS,
+                    topic: b"delegator_reward".to_vec(),
+                    data: event_data,
+                });
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return vec![];
+    }
+
+    vec![ExecutionReceipt {
+        sender: STAKING_POOL_ADDRESS,
+        nonce: 0,
+        success: true,
+        gas_used: 0,
+        error: None,
+        events,
+    }]
+}
+
+/// Credit an account balance directly in the store.
+fn credit_account_raw(store: &mut dyn StateStore, id: &[u8; 32], amount: u128) {
+    use borsh::BorshDeserialize;
+
+    let key = {
+        let mut k = b"acc/".to_vec();
+        k.extend_from_slice(id);
+        k
+    };
+
+    if let Ok(Some(data)) = store.get(&key) {
+        if let Ok(mut account) = solen_types::account::Account::try_from_slice(&data) {
+            account.balance = account.balance.saturating_add(amount);
+            if let Ok(encoded) = borsh::to_vec(&account) {
+                let _ = store.put(&key, &encoded);
+            }
+        }
     }
 }
 

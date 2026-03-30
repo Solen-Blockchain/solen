@@ -59,6 +59,9 @@ pub struct Undelegation {
     pub unlock_epoch: u64,
 }
 
+/// Default validator commission rate (10%).
+pub const DEFAULT_COMMISSION_BPS: u64 = 1000;
+
 /// A registered validator with staking info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakingValidator {
@@ -71,6 +74,14 @@ pub struct StakingValidator {
     pub is_genesis: bool,
     /// Epoch after which a genesis validator can unstake (0 = no lock).
     pub genesis_lock_until: u64,
+    /// Commission rate in basis points (e.g., 1000 = 10%).
+    /// Validator keeps this % of delegator rewards.
+    #[serde(default = "default_commission")]
+    pub commission_rate_bps: u64,
+}
+
+fn default_commission() -> u64 {
+    DEFAULT_COMMISSION_BPS
 }
 
 impl StakingValidator {
@@ -115,6 +126,7 @@ impl StakingContract {
             is_active: true,
             is_genesis: false,
             genesis_lock_until: 0,
+            commission_rate_bps: DEFAULT_COMMISSION_BPS,
         });
         Ok(())
     }
@@ -136,6 +148,7 @@ impl StakingContract {
             is_active: true,
             is_genesis: true,
             genesis_lock_until: GENESIS_LOCK_EPOCHS,
+            commission_rate_bps: DEFAULT_COMMISSION_BPS,
         });
         Ok(())
     }
@@ -305,6 +318,29 @@ impl StakingContract {
             .filter(|d| d.delegator == *delegator)
             .map(|d| d.amount)
             .sum()
+    }
+
+    /// Set a validator's commission rate.
+    pub fn set_commission(
+        &mut self,
+        validator_id: &ValidatorId,
+        commission_bps: u64,
+    ) -> Result<(), StakingError> {
+        let val = self
+            .validators
+            .iter_mut()
+            .find(|v| v.id == *validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+        val.commission_rate_bps = commission_bps.min(10_000); // cap at 100%
+        Ok(())
+    }
+
+    /// Get all delegations for a specific validator.
+    pub fn delegations_for_validator(&self, validator_id: &ValidatorId) -> Vec<&Delegation> {
+        self.delegations
+            .iter()
+            .filter(|d| d.validator == *validator_id)
+            .collect()
     }
 
     /// Number of active validators.

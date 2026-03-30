@@ -325,6 +325,14 @@ async fn main() -> anyhow::Result<()> {
                         }
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {
+                            // Block accepted with matching state root.
+                            // If we were syncing, we're now verified in sync.
+                            if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                tracing::info!(
+                                    height = header.height,
+                                    "state verified — resuming block production"
+                                );
+                            }
                             // Send our signed attestation back.
                             let bh = solen_consensus::engine::block_hash(&header);
                             let att_payload = attestation_payload(header.height, &bh);
@@ -477,10 +485,14 @@ async fn main() -> anyhow::Result<()> {
 
                             // Check if we've caught up to the known network height.
                             if our_height + 1 >= known_net_height {
-                                // Caught up — resume block production.
-                                if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                                    tracing::info!(height = our_height, "sync complete, resuming block production");
-                                }
+                                // Don't resume production yet — wait for a live block
+                                // to verify our state root matches the network.
+                                // The syncing flag stays true; it'll be cleared when
+                                // we successfully accept a live block (state root matches).
+                                tracing::info!(
+                                    height = our_height,
+                                    "sync caught up, waiting to verify state with live block"
+                                );
                             } else {
                                 // Still behind — request more blocks.
                                 net_for_attest.broadcast(NetworkMessage::SyncRequest {
@@ -521,7 +533,9 @@ async fn main() -> anyhow::Result<()> {
 
                     // At genesis (height 0), wait longer (60s / ~4 ticks) for peers
                     // to join before starting solo production.
-                    let min_ticks = if height == 0 && known == 0 { 5 } else { 3 };
+                    // Wait longer at genesis for peers. After sync, wait for live
+                    // block verification (~60s) before falling back to solo production.
+                    let min_ticks = if height == 0 && known == 0 { 5 } else { 4 };
 
                     if ticks_since_start >= min_ticks {
                         if known == 0 || height + 1 >= known {

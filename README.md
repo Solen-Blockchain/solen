@@ -19,25 +19,25 @@ Solen narrows the responsibilities of the base layer and treats execution domain
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Solen Node                               │
-│                                                                 │
+┌───────────────────────────────────────────────────────────────┐
+│                        Solen Node                             │
+│                                                               │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
 │  │Consensus │  │Execution │  │   WASM   │  │  System       │  │
 │  │  Engine  │◄─┤  Engine  │◄─┤    VM    │  │  Contracts    │  │
 │  │  (BFT)   │  │          │  │(wasmtime)│  │               │  │
 │  └────┬─────┘  └────┬─────┘  └──────────┘  │ ■ Staking     │  │
-│       │              │                       │ ■ Bridge      │  │
+│       │             │                      │ ■ Bridge      │  │
 │  ┌────┴─────┐  ┌────┴─────┐                │ ■ Governance  │  │
 │  │   P2P    │  │ Storage  │                │ ■ Treasury    │  │
 │  │(libp2p)  │  │(RocksDB) │                └───────────────┘  │
-│  └──────────┘  └──────────┘                                    │
-│                                                                 │
+│  └──────────┘  └──────────┘                                   │
+│                                                               │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                     │
 │  │ JSON-RPC │  │ Indexer  │  │ Explorer │                     │
 │  │  :9944   │  │          │  │ API :9955│                     │
 │  └──────────┘  └──────────┘  └──────────┘                     │
-└─────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────┘
 ```
 
 **Settlement layer** — BFT proof-of-stake consensus with deterministic finality, round-robin proposers, 2/3+ stake-weighted quorum, epoch-based rewards, and slashing for double-sign and downtime.
@@ -246,7 +246,7 @@ Contracts are deployed via `Action::Deploy` and called via `Action::Call` within
 
 ### Staking
 
-Validators register with a minimum stake (1,000 tokens). Delegators stake to validators and share epoch rewards proportionally. Undelegation has a 7-epoch cooldown.
+Validators register with a minimum stake (500,000 tokens). Delegators stake to validators and share epoch rewards proportionally. Undelegation has a 7-epoch cooldown.
 
 ### Bridge
 

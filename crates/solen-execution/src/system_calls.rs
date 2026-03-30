@@ -116,7 +116,9 @@ fn execute_staking_call(
             // Reload staking after state manager dropped.
             staking = StakingContract::load(store);
 
-            match staking.delegate(*sender, validator, amount) {
+            // Read current epoch from chain metadata.
+            let current_epoch = read_current_epoch(store);
+            match staking.delegate_at_epoch(*sender, validator, amount, current_epoch) {
                 Ok(()) => {
                     // Data: validator[32] + amount[16 LE]
                     let mut data = Vec::with_capacity(48);
@@ -391,5 +393,18 @@ fn err(msg: &str) -> SystemCallResult {
         gas_used: SYSTEM_CALL_GAS,
         events: vec![],
         error: Some(msg.to_string()),
+    }
+}
+
+/// Read the current epoch from chain metadata.
+fn read_current_epoch(store: &dyn StateStore) -> u64 {
+    match store.get(b"__chain_meta__") {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut h = [0u8; 8];
+            h.copy_from_slice(&data[..8]);
+            let height = u64::from_le_bytes(h);
+            height / 100 // epoch length = 100 blocks
+        }
+        _ => 0,
     }
 }

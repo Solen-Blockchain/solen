@@ -83,7 +83,7 @@ impl BlockExecutor {
 
         // Distribute epoch rewards deterministically as part of block execution.
         if height > 0 && height % 100 == 0 {
-            let reward_receipts = distribute_epoch_rewards_in_executor(store);
+            let reward_receipts = distribute_epoch_rewards_in_executor(store, height);
             result.receipts.extend(reward_receipts);
             // Recompute state root after rewards.
             result.state_root = store.state_root();
@@ -498,18 +498,23 @@ impl BlockExecutor {
 
 /// Distribute epoch rewards deterministically as part of block execution.
 /// This runs inside the executor so ALL nodes produce the same state root.
+/// Only validators and delegators who were staked for the full epoch are eligible.
 fn distribute_epoch_rewards_in_executor(
     store: &mut dyn StateStore,
+    height: u64,
 ) -> Vec<ExecutionReceipt> {
     use borsh::BorshDeserialize;
     use solen_system_contracts::staking::StakingContract;
     use solen_types::system::STAKING_POOL_ADDRESS;
 
+    let current_epoch = height / 100; // epoch length = 100 blocks
     let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN (8 decimals)
 
     let staking = StakingContract::load(store);
-    let active = staking.active_validators();
-    let total_stake = staking.total_active_stake();
+
+    // Only include validators eligible for this epoch's rewards.
+    let active = staking.eligible_validators(current_epoch);
+    let total_stake: u128 = active.iter().map(|v| v.total_stake()).sum();
 
     if total_stake == 0 || active.is_empty() {
         return vec![];
@@ -556,9 +561,13 @@ fn distribute_epoch_rewards_in_executor(
             continue;
         }
 
-        // Split between validator and delegators.
-        let delegator_pool = if validator.total_delegated > 0 {
-            validator_share * validator.total_delegated / validator.total_stake()
+        // Only count eligible delegations for reward splitting.
+        let eligible_delegations = staking.eligible_delegations_for_validator(&validator.id, current_epoch);
+        let eligible_delegated: u128 = eligible_delegations.iter().map(|d| d.amount).sum();
+
+        // Split between validator and eligible delegators.
+        let delegator_pool = if eligible_delegated > 0 {
+            validator_share * eligible_delegated / validator.total_stake()
         } else {
             0
         };
@@ -578,11 +587,10 @@ fn distribute_epoch_rewards_in_executor(
             data: event_data,
         });
 
-        // Credit delegators.
-        if delegator_net > 0 && validator.total_delegated > 0 {
-            let delegations = staking.delegations_for_validator(&validator.id);
-            for delegation in delegations {
-                let del_share = delegator_net * delegation.amount / validator.total_delegated;
+        // Credit eligible delegators only.
+        if delegator_net > 0 && eligible_delegated > 0 {
+            for delegation in &eligible_delegations {
+                let del_share = delegator_net * delegation.amount / eligible_delegated;
                 if del_share == 0 {
                     continue;
                 }

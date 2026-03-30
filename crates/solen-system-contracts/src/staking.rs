@@ -48,6 +48,10 @@ pub struct Delegation {
     pub validator: ValidatorId,
     pub amount: u128,
     pub reward_debt: u128,
+    /// Epoch from which this delegation is eligible for rewards.
+    /// Set to current_epoch + 1 when delegating (must stake for full epoch).
+    #[serde(default)]
+    pub eligible_from_epoch: u64,
 }
 
 /// A pending undelegation.
@@ -78,6 +82,10 @@ pub struct StakingValidator {
     /// Validator keeps this % of delegator rewards.
     #[serde(default = "default_commission")]
     pub commission_rate_bps: u64,
+    /// Epoch from which this validator is eligible for rewards.
+    /// Genesis validators: 0 (always eligible). Others: epoch they joined + 1.
+    #[serde(default)]
+    pub eligible_from_epoch: u64,
 }
 
 fn default_commission() -> u64 {
@@ -127,11 +135,43 @@ impl StakingContract {
             is_genesis: false,
             genesis_lock_until: 0,
             commission_rate_bps: DEFAULT_COMMISSION_BPS,
+            eligible_from_epoch: u64::MAX, // not eligible until epoch is set
+        });
+        Ok(())
+    }
+
+    /// Register a new validator with epoch tracking for reward eligibility.
+    pub fn register_validator_at_epoch(
+        &mut self,
+        id: ValidatorId,
+        self_stake: u128,
+        current_epoch: u64,
+    ) -> Result<(), StakingError> {
+        if self_stake < MIN_VALIDATOR_STAKE {
+            return Err(StakingError::InsufficientStake {
+                need: MIN_VALIDATOR_STAKE,
+                have: self_stake,
+            });
+        }
+        if self.validators.iter().any(|v| v.id == id) {
+            return Err(StakingError::AlreadyRegistered);
+        }
+        self.validators.push(StakingValidator {
+            id,
+            self_stake,
+            total_delegated: 0,
+            accumulated_reward_per_token: 0,
+            is_active: true,
+            is_genesis: false,
+            genesis_lock_until: 0,
+            commission_rate_bps: DEFAULT_COMMISSION_BPS,
+            eligible_from_epoch: current_epoch + 1, // eligible starting next epoch
         });
         Ok(())
     }
 
     /// Register a genesis validator. Their stake is locked for GENESIS_LOCK_EPOCHS.
+    /// Genesis validators are eligible for rewards from epoch 0.
     pub fn register_genesis_validator(
         &mut self,
         id: ValidatorId,
@@ -149,6 +189,7 @@ impl StakingContract {
             is_genesis: true,
             genesis_lock_until: GENESIS_LOCK_EPOCHS,
             commission_rate_bps: DEFAULT_COMMISSION_BPS,
+            eligible_from_epoch: 0, // genesis validators always eligible
         });
         Ok(())
     }
@@ -201,6 +242,17 @@ impl StakingContract {
         validator: ValidatorId,
         amount: u128,
     ) -> Result<(), StakingError> {
+        self.delegate_at_epoch(delegator, validator, amount, 0)
+    }
+
+    /// Delegate with epoch tracking for reward eligibility.
+    pub fn delegate_at_epoch(
+        &mut self,
+        delegator: AccountId,
+        validator: ValidatorId,
+        amount: u128,
+        current_epoch: u64,
+    ) -> Result<(), StakingError> {
         let val = self
             .validators
             .iter_mut()
@@ -218,12 +270,14 @@ impl StakingContract {
         {
             d.amount += amount;
             d.reward_debt += reward_debt;
+            // Don't reset eligible_from_epoch on additional delegation
         } else {
             self.delegations.push(Delegation {
                 delegator,
                 validator,
                 amount,
                 reward_debt,
+                eligible_from_epoch: current_epoch + 1, // eligible starting next epoch
             });
         }
 
@@ -340,6 +394,26 @@ impl StakingContract {
         self.delegations
             .iter()
             .filter(|d| d.validator == *validator_id)
+            .collect()
+    }
+
+    /// Get delegations eligible for rewards at the given epoch.
+    pub fn eligible_delegations_for_validator(
+        &self,
+        validator_id: &ValidatorId,
+        epoch: u64,
+    ) -> Vec<&Delegation> {
+        self.delegations
+            .iter()
+            .filter(|d| d.validator == *validator_id && epoch >= d.eligible_from_epoch)
+            .collect()
+    }
+
+    /// Get validators eligible for rewards at the given epoch.
+    pub fn eligible_validators(&self, epoch: u64) -> Vec<&StakingValidator> {
+        self.validators
+            .iter()
+            .filter(|v| v.is_active && epoch >= v.eligible_from_epoch)
             .collect()
     }
 

@@ -411,7 +411,8 @@ async fn main() -> anyhow::Result<()> {
                                 .iter()
                                 .map(|b| solen_p2p::messages::SyncBlock {
                                     header: b.header.clone(),
-                                    operations: vec![], // operations aren't stored in persisted blocks
+                                    operations: vec![],
+                                    receipts: b.result.receipts.clone(),
                                 })
                                 .collect();
 
@@ -454,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
                             engine_for_p2p.replay_synced_block(
                                 &sync_block.header,
                                 &sync_block.operations,
+                                sync_block.receipts.clone(),
                             );
                             synced += 1;
                         }

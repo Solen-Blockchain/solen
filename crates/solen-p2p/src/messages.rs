@@ -46,11 +46,14 @@ pub enum NetworkMessage {
     },
 }
 
-/// A block sent during sync (header + operations).
+/// A block sent during sync (header + receipts for indexing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBlock {
     pub header: BlockHeader,
     pub operations: Vec<UserOperation>,
+    /// Receipts from block execution, included so syncing nodes can index transactions.
+    #[serde(default)]
+    pub receipts: Vec<solen_execution::receipt::ExecutionReceipt>,
 }
 
 impl NetworkMessage {

@@ -911,10 +911,15 @@ impl ConsensusEngine {
 
     /// Replay a synced block: execute operations and finalize.
     /// Used during initial sync from peers.
+    ///
+    /// If `synced_receipts` are provided (from the peer's persisted block),
+    /// they are used for indexing instead of the re-execution receipts.
+    /// This preserves transaction history during sync.
     pub fn replay_synced_block(
         &self,
         header: &BlockHeader,
         operations: &[UserOperation],
+        synced_receipts: Vec<solen_execution::receipt::ExecutionReceipt>,
     ) {
         let height = header.height;
 
@@ -936,9 +941,17 @@ impl ConsensusEngine {
             self.executor.execute_block_with_height(store.as_mut(), operations, height)
         };
 
+        // Use synced receipts if available (they include user tx events).
+        // Fall back to execution receipts (which only have epoch rewards).
+        let receipts = if !synced_receipts.is_empty() {
+            synced_receipts
+        } else {
+            exec_result.receipts
+        };
+
         let result = BlockResult {
             state_root: exec_result.state_root,
-            receipts: exec_result.receipts,
+            receipts,
             gas_used: exec_result.gas_used,
         };
 

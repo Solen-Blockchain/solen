@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 solen-types = { workspace = true }
 solen-crypto = { workspace = true }
+solen-execution = { workspace = true }
 libp2p = { workspace = true, features = [
     "gossipsub",
     "identify",

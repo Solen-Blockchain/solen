@@ -97,6 +97,9 @@ pub struct ConsensusEngine {
     pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
     /// Reward events from epoch transitions, included in the next block's receipts.
     pending_reward_receipts: Arc<RwLock<Vec<solen_execution::receipt::ExecutionReceipt>>>,
+    /// Count of consecutive fork mismatches at the same height.
+    fork_mismatch_count: Arc<std::sync::atomic::AtomicU32>,
+    fork_mismatch_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ConsensusEngine {
@@ -165,6 +168,8 @@ impl ConsensusEngine {
             pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
+            fork_mismatch_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            fork_mismatch_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -374,24 +379,37 @@ impl ConsensusEngine {
         };
 
         if fork_detected {
-            // Log our block hash vs expected for debugging state divergence.
+            // The peer's chain is the network consensus — adopt it.
+            // Pop our conflicting block and re-execute the peer's version.
             let fmt = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
             let our_hash = {
-                let chain = self.chain.read().unwrap();
-                chain.last().map(|b| fmt(&block_hash(&b.header))).unwrap_or_default()
+                let mut chain = self.chain.write().unwrap();
+                let hash = chain.last().map(|b| fmt(&block_hash(&b.header))).unwrap_or_default();
+                chain.pop(); // Remove our conflicting block.
+                hash
             };
             let their_parent = fmt(&header.parent_hash);
             warn!(
                 height = header.height,
                 our_block_hash = &our_hash[..16],
                 their_parent_hash = &their_parent[..16],
-                "parent hash mismatch — rolling back to resync"
+                "parent hash mismatch — adopting peer's chain"
             );
-            self.handle_fork(header.height);
-            return false;
+            // Clear any pending state for this height.
+            self.pending_blocks.write().unwrap().remove(&(header.height - 1));
+            self.pending_blocks.write().unwrap().remove(&header.height);
+            self.pending_attestations.write().unwrap().remove(&header.height);
+            // Fall through to re-execute and accept the peer's block below.
+            // Recompute expected height after popping.
+            let new_height = self.height();
+            if header.height != new_height + 1 {
+                // Still can't accept — too far apart. Let sync handle it.
+                self.handle_fork(header.height);
+                return false;
+            }
         }
 
-        if header.height > expected_height {
+        if header.height > expected_height && !fork_detected {
             // We're behind — fast-forward to catch up.
             // Skip to just before this block's height so we can accept it.
             info!(
@@ -456,47 +474,80 @@ impl ConsensusEngine {
         true
     }
 
-    /// Handle a fork: roll back one block and resync.
-    /// This is less destructive than wiping all state — we only remove
-    /// the conflicting block and let sync replace it with the correct one.
+    /// Handle a fork: track repeated mismatches and escalate response.
+    ///
+    /// - First 3 mismatches at the same height: just reject and wait for sync.
+    /// - After 3+: full state reset and resync from genesis.
+    ///
+    /// This avoids nuking state on transient disagreements but recovers
+    /// from genuine state divergence.
     fn handle_fork(&self, fork_height: u64) {
-        let our_height = self.height();
-        warn!(
-            fork_height,
-            our_height,
-            "parent hash mismatch detected — rolling back last block to resync"
-        );
+        use std::sync::atomic::Ordering::Relaxed;
 
-        // Remove the last block from our chain so we can accept the correct one.
-        {
-            let mut chain = self.chain.write().unwrap();
-            if let Some(last) = chain.last() {
-                if last.header.height >= fork_height - 1 {
-                    // Delete the conflicting block from storage.
-                    let remove_height = last.header.height;
-                    chain.pop();
-
-                    let mut store = self.store.write().unwrap();
-                    let key = format!("block/{}", remove_height);
-                    let _ = store.delete(key.as_bytes());
-
-                    // Revert chain metadata to the previous block.
-                    let prev_height = chain.last().map(|b| b.header.height).unwrap_or(0);
-                    let prev_epoch = chain.last().map(|b| b.header.epoch).unwrap_or(0);
-                    save_chain_meta(store.as_mut(), prev_height, prev_epoch);
-
-                    info!(
-                        removed = remove_height,
-                        new_height = prev_height,
-                        "rolled back to resync correct block"
-                    );
-                }
-            }
+        let last_height = self.fork_mismatch_height.load(Relaxed);
+        if last_height == fork_height {
+            self.fork_mismatch_count.fetch_add(1, Relaxed);
+        } else {
+            self.fork_mismatch_height.store(fork_height, Relaxed);
+            self.fork_mismatch_count.store(1, Relaxed);
         }
 
-        // Clear pending state for the conflicting height.
-        self.pending_blocks.write().unwrap().remove(&fork_height);
-        self.pending_attestations.write().unwrap().remove(&fork_height);
+        let count = self.fork_mismatch_count.load(Relaxed);
+
+        if count <= 3 {
+            // Mild response: clear pending state, wait for sync to resolve it.
+            warn!(
+                fork_height,
+                mismatch_count = count,
+                "parent hash mismatch — rejecting block ({}/3 before resync)",
+                count
+            );
+            self.pending_blocks.write().unwrap().remove(&fork_height);
+            self.pending_attestations.write().unwrap().remove(&fork_height);
+        } else {
+            // Escalate: we're stuck on the wrong fork. Full state reset.
+            warn!(
+                fork_height,
+                mismatch_count = count,
+                "persistent fork — resetting state to resync from peers"
+            );
+
+            // Clear in-memory chain.
+            self.chain.write().unwrap().clear();
+
+            // Wipe account state and system contracts.
+            {
+                let mut store = self.store.write().unwrap();
+                let mut total_deleted = 0usize;
+                for prefix in &[b"acc/" as &[u8], b"cs/", b"code/"] {
+                    if let Ok(n) = store.delete_prefix(prefix) {
+                        total_deleted += n;
+                    }
+                }
+                for key in &[
+                    b"__staking_state__" as &[u8],
+                    b"__governance_state__",
+                    b"__bridge_state__",
+                    b"__treasury_state__",
+                    b"__vesting_state__",
+                ] {
+                    let _ = store.delete(*key);
+                }
+                save_chain_meta(store.as_mut(), 0, 0);
+                info!(deleted = total_deleted, "wiped state for full resync");
+            }
+
+            // Reset epoch and pending state.
+            self.epoch_manager.write().unwrap().current_epoch = 0;
+            self.pending_blocks.write().unwrap().clear();
+            self.pending_attestations.write().unwrap().clear();
+            self.pending_reward_receipts.write().unwrap().clear();
+
+            // Reset counter.
+            self.fork_mismatch_count.store(0, Relaxed);
+
+            info!("full resync initiated — will rebuild state from peers via StatusAnnounce");
+        }
     }
 
     /// Fast-forward the chain height to catch up with the network.

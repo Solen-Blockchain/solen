@@ -556,7 +556,12 @@ fn distribute_epoch_rewards_in_executor(
     let mut events = Vec::new();
 
     for validator in &active {
-        let validator_share = actual_reward * validator.total_stake() / total_stake;
+        let v_total = validator.total_stake();
+        if v_total == 0 {
+            continue; // skip validators with zero stake
+        }
+
+        let validator_share = actual_reward * v_total / total_stake;
         if validator_share == 0 {
             continue;
         }
@@ -565,9 +570,10 @@ fn distribute_epoch_rewards_in_executor(
         let eligible_delegations = staking.eligible_delegations_for_validator(&validator.id, current_epoch);
         let eligible_delegated: u128 = eligible_delegations.iter().map(|d| d.amount).sum();
 
-        // Split between validator and eligible delegators.
-        let delegator_pool = if eligible_delegated > 0 {
-            validator_share * eligible_delegated / validator.total_stake()
+        // Split rewards: eligible delegators get their proportional share,
+        // validator gets the rest (self-stake share + ineligible delegation share + commission).
+        let delegator_pool = if eligible_delegated > 0 && v_total > 0 {
+            validator_share * eligible_delegated / v_total
         } else {
             0
         };

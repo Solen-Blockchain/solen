@@ -223,7 +223,7 @@ fn execute_governance_call(
                 None => return err("invalid args: need new_fee[16]"),
             };
             let desc = String::from_utf8_lossy(&args[16..]).to_string();
-            let epoch = read_u64(args, 0).unwrap_or(0); // TODO: get real epoch
+            let epoch = read_current_epoch(store);
             let id = gov.create_proposal(
                 *sender,
                 ProposalAction::SetBaseFee { new_fee },
@@ -245,7 +245,7 @@ fn execute_governance_call(
             };
             let support = args.get(8).map(|&b| b != 0).unwrap_or(false);
             let weight = read_u128(args, 9).unwrap_or(1);
-            let epoch = 0; // TODO: get real epoch
+            let epoch = read_current_epoch(store);
 
             match gov.vote(proposal_id, *sender, support, weight, epoch) {
                 Ok(()) => {

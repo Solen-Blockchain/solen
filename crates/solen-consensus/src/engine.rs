@@ -829,6 +829,18 @@ impl ConsensusEngine {
     ) {
         let height = header.height;
 
+        // Validate epoch matches expected value.
+        let expected_epoch = height / 100;
+        if header.epoch != expected_epoch {
+            warn!(
+                height,
+                expected = expected_epoch,
+                got = header.epoch,
+                "invalid epoch in synced block — skipping"
+            );
+            return;
+        }
+
         // Execute operations (including epoch rewards if applicable).
         let exec_result = {
             let mut store = self.store.write().unwrap();

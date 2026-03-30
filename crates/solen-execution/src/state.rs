@@ -161,6 +161,12 @@ impl<'a> StateManager<'a> {
         let mut receiver = match self.get_account(to)? {
             Some(acc) => acc,
             None => {
+                // Don't auto-create system contract accounts.
+                if solen_types::system::is_system_contract(to) {
+                    return Err(StateError::AccountNotFound(
+                        "cannot transfer to system contract".into(),
+                    ));
+                }
                 // Auto-create recipient account on first transfer.
                 // Since account ID = public key, use it as the auth method.
                 let auth = vec![AuthMethod::Ed25519 { public_key: *to }];

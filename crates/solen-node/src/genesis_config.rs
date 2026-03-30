@@ -192,7 +192,7 @@ impl GenesisConfig {
         // Staking rewards pool — 500M SOLEN for validator rewards over 10 years.
         genesis_accounts.push(GenesisAccount {
             id: solen_types::system::STAKING_POOL_ADDRESS,
-            balance: 500_000_000_00_000_000, // 500M with 8 decimals
+            balance: 50_000_000_000_000_000, // 500M SOLEN × 10^8 decimals
             auth_methods: vec![],
         });
 

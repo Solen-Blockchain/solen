@@ -89,10 +89,10 @@ ExecStart=/opt/solen/bin/solen-node \\
     --genesis /opt/solen/config/genesis.json \\
     --data-dir /opt/solen/data/testnet \\
     --validator-seed $SEED \\
-    --bootstrap /ip4/37.60.228.6/tcp/40333 \\
-    --bootstrap /ip4/37.60.226.223/tcp/40333 \\
-    --bootstrap /ip4/37.60.228.70/tcp/40333 \\
-    --bootstrap /ip4/37.60.226.180/tcp/40333
+    --bootstrap /dns4/testnet-seed1.solenchain.com/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed2.solenchain.com/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed3.solenchain.com/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed4.solenchain.com/tcp/40333
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

@@ -187,17 +187,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // --- Validator key ---
-    let validator_kp = if let Some(hex) = &cli.validator_seed {
+    let (validator_kp, validator_seed) = if let Some(hex) = &cli.validator_seed {
         let bytes = hex_decode(hex)?;
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&bytes);
-        Keypair::from_seed(&seed)
+        (Keypair::from_seed(&seed), seed)
     } else if let Some(v) = genesis.validators.first() {
         if let Some(seed_hex) = &v.seed_hex {
             let seed = hex_decode(seed_hex)?;
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&seed);
-            Keypair::from_seed(&arr)
+            (Keypair::from_seed(&arr), arr)
         } else {
             anyhow::bail!(
                 "no --validator-seed provided and genesis validator '{}' has no seed_hex. \
@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     } else {
-        Keypair::from_seed(&[1u8; 32])
+        (Keypair::from_seed(&[1u8; 32]), [1u8; 32])
     };
     let validator_id = validator_kp.public_key();
 
@@ -256,8 +256,10 @@ async fn main() -> anyhow::Result<()> {
     let mempool = Mempool::new(10_000);
     let engine = Arc::new(ConsensusEngine::with_validators(config, store, mempool, validator_set));
 
-    // Syncing flag: set when we detect we're behind, cleared when caught up.
-    let syncing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Syncing flag: start in sync mode for multi-validator networks to prevent
+    // producing blocks before we've caught up with the network.
+    let is_multi = engine.active_validator_count() > 1;
+    let syncing = Arc::new(std::sync::atomic::AtomicBool::new(is_multi));
 
     // --- P2P networking ---
     let net_handle = if !cli.no_p2p {
@@ -270,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
         let net_config = NetworkConfig {
             listen_port: p2p_port,
             bootstrap_peers,
+            identity_seed: Some(validator_seed),
             ..Default::default()
         };
 
@@ -454,16 +457,31 @@ async fn main() -> anyhow::Result<()> {
         // Periodically broadcast our height so new nodes can request sync.
         let status_engine = engine.clone();
         let status_handle = handle.clone();
+        let syncing_for_status = syncing.clone();
         tokio::spawn(async move {
+            // Broadcast immediately after a short delay for mesh warmup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+            let mut ticks_since_start = 0u32;
+
             loop {
-                interval.tick().await;
                 let height = status_engine.height();
                 let state_root = status_engine.store().read().unwrap().state_root();
                 status_handle.broadcast(NetworkMessage::StatusAnnounce {
                     height,
                     state_root,
                 });
+
+                // If still in sync mode after 30s with no sync activity,
+                // assume we're already at the tip and resume production.
+                ticks_since_start += 1;
+                if ticks_since_start == 3 && syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!(height, "no sync needed — resuming block production");
+                    syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                interval.tick().await;
             }
         });
 

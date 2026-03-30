@@ -34,6 +34,9 @@ pub struct NetworkConfig {
     pub max_inbound: u32,
     /// Maximum outbound connections.
     pub max_outbound: u32,
+    /// Optional 32-byte seed to derive a stable libp2p keypair.
+    /// If set, the node keeps the same peer ID across restarts.
+    pub identity_seed: Option<[u8; 32]>,
 }
 
 impl Default for NetworkConfig {
@@ -43,6 +46,7 @@ impl Default for NetworkConfig {
             bootstrap_peers: Vec::new(),
             max_inbound: 50,
             max_outbound: 20,
+            identity_seed: None,
         }
     }
 }
@@ -76,7 +80,23 @@ impl NetworkService {
         ),
         NetworkError,
     > {
-        let local_key = Keypair::generate_ed25519();
+        let local_key = if let Some(seed) = config.identity_seed {
+            // Derive a stable keypair from seed so peer ID persists across restarts.
+            // Domain-separate from the validator signing key.
+            let domain = solen_crypto::blake3_hash(b"solen-p2p-identity");
+            let mut hasher_input = Vec::with_capacity(64);
+            hasher_input.extend_from_slice(&seed);
+            hasher_input.extend_from_slice(&domain);
+            let p2p_seed = solen_crypto::blake3_hash(&hasher_input);
+            let mut seed_bytes = p2p_seed.to_vec();
+            // libp2p ed25519 expects a 32-byte seed for SecretKey::try_from_bytes.
+            let sk = libp2p::identity::ed25519::SecretKey::try_from_bytes(&mut seed_bytes)
+                .expect("valid 32-byte seed");
+            let kp = libp2p::identity::ed25519::Keypair::from(sk);
+            Keypair::from(kp)
+        } else {
+            Keypair::generate_ed25519()
+        };
         let local_peer_id = local_key.public().to_peer_id();
 
         info!(%local_peer_id, "starting P2P network");
@@ -186,7 +206,7 @@ impl NetworkService {
 
         let task = tokio::spawn(async move {
             // Periodically run Kademlia bootstrap and redial if needed.
-            let mut maintenance_interval = tokio::time::interval(Duration::from_secs(30));
+            let mut maintenance_interval = tokio::time::interval(Duration::from_secs(10));
             maintenance_interval.tick().await; // skip first immediate tick
 
             loop {

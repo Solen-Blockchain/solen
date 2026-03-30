@@ -25,6 +25,10 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:29944", global = true)]
     rpc: String,
 
+    /// Chain ID for transaction signing (devnet=1337, testnet=9000)
+    #[arg(long, default_value = "1337", global = true)]
+    chain_id: u64,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -162,19 +166,19 @@ async fn main() -> anyhow::Result<()> {
         Commands::Block { height } => commands::cmd_block(&rpc, height).await?,
         Commands::Validators => commands::cmd_validators(&rpc).await?,
         Commands::ClaimVesting { from } => {
-            commands::cmd_claim_vesting(&rpc, &from).await?
+            commands::cmd_claim_vesting(&rpc, &from, cli.chain_id).await?
         }
         Commands::Stake { from, validator, amount } => {
-            commands::cmd_stake(&rpc, &from, &validator, amount).await?
+            commands::cmd_stake(&rpc, &from, &validator, amount, cli.chain_id).await?
         }
         Commands::Unstake { from, validator, amount } => {
-            commands::cmd_unstake(&rpc, &from, &validator, amount).await?
+            commands::cmd_unstake(&rpc, &from, &validator, amount, cli.chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
-            commands::cmd_transfer(&rpc, &from, &to, amount).await?
+            commands::cmd_transfer(&rpc, &from, &to, amount, cli.chain_id).await?
         }
         Commands::Deploy { from, wasm_file } => {
-            commands::cmd_deploy(&rpc, &from, &wasm_file).await?
+            commands::cmd_deploy(&rpc, &from, &wasm_file, cli.chain_id).await?
         }
         Commands::Call {
             from,
@@ -182,10 +186,10 @@ async fn main() -> anyhow::Result<()> {
             method,
             args,
         } => {
-            commands::cmd_call(&rpc, &from, &target, &method, args.as_deref()).await?
+            commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), cli.chain_id).await?
         }
         Commands::Multisig { from, threshold, signers } => {
-            commands::cmd_multisig(&rpc, &from, threshold, &signers).await?
+            commands::cmd_multisig(&rpc, &from, threshold, &signers, cli.chain_id).await?
         }
         Commands::Key { action } => match action {
             KeyAction::Generate { name } => commands::cmd_key_generate(&name)?,

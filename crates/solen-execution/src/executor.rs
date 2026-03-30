@@ -82,6 +82,7 @@ pub enum ExecutionError {
 pub struct BlockExecutor {
     fee_config: FeeConfig,
     vm_runtime: solen_vm::runtime::VmRuntime,
+    chain_id: u64,
 }
 
 impl BlockExecutor {
@@ -89,6 +90,7 @@ impl BlockExecutor {
         Self {
             fee_config: FeeConfig::default(),
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
+            chain_id: 0,
         }
     }
 
@@ -96,7 +98,13 @@ impl BlockExecutor {
         Self {
             fee_config,
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
+            chain_id: 0,
         }
+    }
+
+    pub fn with_chain_id(mut self, chain_id: u64) -> Self {
+        self.chain_id = chain_id;
+        self
     }
 
     /// Execute a batch of user operations, returning the block result.
@@ -299,7 +307,16 @@ impl BlockExecutor {
         }
         drop(state);
 
-        // Execute each action.
+        // Execute each action. For multi-action operations, save the sender's
+        // account state before execution so we can roll back on failure.
+        let pre_state = if op.actions.len() > 1 {
+            let state = StateManager::new(store);
+            state.get_account(&op.sender).ok().flatten()
+        } else {
+            None
+        };
+
+        let mut action_failed = None;
         for action in &op.actions {
             // Check for system contract calls (need raw store access).
             if let Action::Call { target, method, args } = action {
@@ -310,15 +327,8 @@ impl BlockExecutor {
                     gas_used += result.gas_used;
                     events.extend(result.events);
                     if let Some(err) = result.error {
-                        warn!(sender = ?op.sender[..4], error = %err, "system call failed");
-                        return ExecutionReceipt {
-                            sender: op.sender,
-                            nonce: op.nonce,
-                            success: false,
-                            gas_used,
-                            error: Some(err),
-                            events,
-                        };
+                        action_failed = Some(err);
+                        break;
                     }
                     continue;
                 }
@@ -328,17 +338,27 @@ impl BlockExecutor {
             match self.execute_action(&mut state, &op.sender, action, &mut events) {
                 Ok(gas) => gas_used += gas,
                 Err(e) => {
-                    warn!(sender = ?op.sender[..4], error = %e, "action execution failed");
-                    return ExecutionReceipt {
-                        sender: op.sender,
-                        nonce: op.nonce,
-                        success: false,
-                        gas_used,
-                        error: Some(e.to_string()),
-                        events,
-                    };
+                    action_failed = Some(e.to_string());
+                    break;
                 }
             }
+        }
+
+        // If any action failed, roll back the sender's balance to pre-execution state.
+        if let Some(err) = action_failed {
+            if let Some(original) = pre_state {
+                let mut state = StateManager::new(store);
+                let _ = state.save_account(&original);
+            }
+            warn!(sender = ?op.sender[..4], error = %err, "action execution failed");
+            return ExecutionReceipt {
+                sender: op.sender,
+                nonce: op.nonce,
+                success: false,
+                gas_used,
+                error: Some(err),
+                events: vec![], // discard events from failed operation
+            };
         }
 
         // Deduct fees from sender, credit treasury.
@@ -420,8 +440,10 @@ impl BlockExecutor {
     }
 
     /// Compute the message that must be signed for an operation.
+    /// Format: chain_id[8] + sender[32] + nonce[8] + max_fee[16] + blake3(actions)[32]
     pub fn operation_signing_message(&self, op: &UserOperation) -> Vec<u8> {
-        let mut msg = Vec::new();
+        let mut msg = Vec::with_capacity(96);
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
         msg.extend_from_slice(&op.sender);
         msg.extend_from_slice(&op.nonce.to_le_bytes());
         msg.extend_from_slice(&op.max_fee.to_le_bytes());
@@ -548,6 +570,13 @@ impl BlockExecutor {
                 Ok(SET_AUTH_GAS)
             }
             Action::Deploy { code, salt } => {
+                // Validate code size.
+                if code.len() > MAX_CODE_SIZE {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(
+                        format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE),
+                    )));
+                }
+
                 // Store the bytecode.
                 let code_hash = state.store_bytecode(code)?;
 
@@ -557,6 +586,15 @@ impl BlockExecutor {
                 preimage.extend_from_slice(salt);
                 preimage.extend_from_slice(&code_hash);
                 let new_id: AccountId = blake3_hash(&preimage);
+
+                // Check for address collision.
+                if let Ok(Some(existing)) = state.get_account(&new_id) {
+                    if existing.code_hash != [0u8; 32] {
+                        return Err(ExecutionError::State(StateError::AccountNotFound(
+                            "contract address already exists".into(),
+                        )));
+                    }
+                }
 
                 let mut account = solen_types::account::Account {
                     id: new_id,

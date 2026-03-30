@@ -53,8 +53,10 @@ pub fn build_deploy(
 }
 
 /// Compute the signing message for a user operation.
-pub fn signing_message(op: &UserOperation) -> Vec<u8> {
-    let mut msg = Vec::new();
+/// Format: chain_id[8] + sender[32] + nonce[8] + max_fee[16] + blake3(actions)[32]
+pub fn signing_message(op: &UserOperation, chain_id: u64) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&op.sender);
     msg.extend_from_slice(&op.nonce.to_le_bytes());
     msg.extend_from_slice(&op.max_fee.to_le_bytes());
@@ -64,8 +66,8 @@ pub fn signing_message(op: &UserOperation) -> Vec<u8> {
 }
 
 /// Sign a user operation in place.
-pub fn sign_operation(op: &mut UserOperation, keypair: &Keypair) {
-    let msg = signing_message(op);
+pub fn sign_operation(op: &mut UserOperation, keypair: &Keypair, chain_id: u64) {
+    let msg = signing_message(op, chain_id);
     let sig = keypair.sign(&msg);
     op.signature = sig.to_vec();
 }
@@ -84,12 +86,12 @@ mod tests {
     fn build_and_sign_transfer() {
         let kp = Keypair::generate();
         let mut op = build_transfer(aid(1), 0, aid(2), 500);
-        sign_operation(&mut op, &kp);
+        sign_operation(&mut op, &kp, 1337);
 
         assert_eq!(op.signature.len(), 64);
 
         // Verify the signature.
-        let msg = signing_message(&op);
+        let msg = signing_message(&op, 1337);
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&op.signature);
         assert!(solen_crypto::verify(&kp.public_key(), &msg, &sig).is_ok());

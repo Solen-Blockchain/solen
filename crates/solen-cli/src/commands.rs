@@ -70,7 +70,7 @@ pub async fn cmd_validators(rpc: &RpcClient) -> Result<()> {
 
 // ── Claim Vesting ───────────────────────────────────────────────
 
-pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str) -> Result<()> {
+pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
@@ -95,7 +95,7 @@ pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str) -> Result<()> {
         max_fee: 100_000,
         signature: vec![],
     };
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
@@ -116,6 +116,7 @@ pub async fn cmd_stake(
     from: &str,
     validator: &str,
     amount: u128,
+    chain_id: u64,
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
@@ -146,7 +147,7 @@ pub async fn cmd_stake(
         max_fee: 100_000,
         signature: vec![],
     };
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
@@ -165,6 +166,7 @@ pub async fn cmd_unstake(
     from: &str,
     validator: &str,
     amount: u128,
+    chain_id: u64,
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
@@ -195,7 +197,7 @@ pub async fn cmd_unstake(
         max_fee: 100_000,
         signature: vec![],
     };
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
@@ -262,6 +264,7 @@ pub async fn cmd_transfer(
     from: &str,
     to: &str,
     amount: u128,
+    chain_id: u64,
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
@@ -285,7 +288,7 @@ pub async fn cmd_transfer(
         signature: vec![],
     };
 
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     // Simulate first.
     let op_json = serde_json::to_value(&op)?;
@@ -312,7 +315,7 @@ pub async fn cmd_transfer(
 
 // ── Deploy ──────────────────────────────────────────────────────
 
-pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str) -> Result<()> {
+pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str, chain_id: u64) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
@@ -347,7 +350,7 @@ pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str) -> Result<
         signature: vec![],
     };
 
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let sim = rpc.simulate_operation(op_json.clone()).await?;
@@ -378,6 +381,7 @@ pub async fn cmd_call(
     target: &str,
     method: &str,
     args_hex: Option<&str>,
+    chain_id: u64,
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
@@ -406,7 +410,7 @@ pub async fn cmd_call(
         signature: vec![],
     };
 
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let sim = rpc.simulate_operation(op_json.clone()).await?;
@@ -513,8 +517,9 @@ fn resolve_account_id(input: &str) -> Result<String> {
     Ok(hex_encode(&id))
 }
 
-fn sign_op(op: &mut UserOperation, kp: &Keypair) {
-    let mut msg = Vec::new();
+fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&op.sender);
     msg.extend_from_slice(&op.nonce.to_le_bytes());
     msg.extend_from_slice(&op.max_fee.to_le_bytes());
@@ -530,6 +535,7 @@ pub async fn cmd_multisig(
     from: &str,
     threshold: u16,
     signer_hexes: &[String],
+    chain_id: u64,
 ) -> Result<()> {
     use solen_types::account::AuthMethod;
 
@@ -573,7 +579,7 @@ pub async fn cmd_multisig(
         max_fee: 100_000,
         signature: vec![],
     };
-    sign_op(&mut op, &kp);
+    sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;

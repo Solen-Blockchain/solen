@@ -41,6 +41,7 @@ pub struct EngineConfig {
     pub block_time_ms: u64,
     pub max_ops_per_block: usize,
     pub validator_id: ValidatorId,
+    pub chain_id: u64,
 }
 
 impl Default for EngineConfig {
@@ -49,6 +50,7 @@ impl Default for EngineConfig {
             block_time_ms: 2000,
             max_ops_per_block: 100,
             validator_id: [0u8; 32],
+            chain_id: 0,
         }
     }
 }
@@ -151,11 +153,12 @@ impl ConsensusEngine {
         let mut epoch_manager = EpochManager::new();
         epoch_manager.current_epoch = restored_epoch;
 
+        let chain_id = config.chain_id;
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
             mempool,
-            executor: BlockExecutor::new(),
+            executor: BlockExecutor::new().with_chain_id(chain_id),
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),
             epoch_manager: Arc::new(RwLock::new(epoch_manager)),

@@ -206,7 +206,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     } else {
-        (Keypair::from_seed(&[1u8; 32]), [1u8; 32])
+        anyhow::bail!(
+            "no validators in genesis config and no --validator-seed provided. \
+             Cannot start without a validator identity."
+        );
     };
     let validator_id = validator_kp.public_key();
 
@@ -251,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         block_time_ms: block_time,
         max_ops_per_block: 100,
         validator_id,
+        chain_id: genesis.chain_id,
     };
 
     let mempool = Mempool::new(10_000);

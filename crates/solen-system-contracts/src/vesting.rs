@@ -86,7 +86,7 @@ impl VestingSchedule {
             return self.total_amount;
         }
         let elapsed_after_cliff = elapsed - cliff;
-        self.total_amount * elapsed_after_cliff as u128 / vesting_period as u128
+        self.total_amount.saturating_mul(elapsed_after_cliff as u128) / vesting_period as u128
     }
 
     /// How much can be claimed right now.

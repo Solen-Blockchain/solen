@@ -16,6 +16,15 @@ const TRANSFER_GAS: u64 = 100;
 const CALL_BASE_GAS: u64 = 500;
 const DEPLOY_BASE_GAS: u64 = 1000;
 const SET_AUTH_GAS: u64 = 200;
+const MAX_ACTIONS_PER_OP: usize = 16;
+const MAX_CODE_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+
+/// Save account, logging on failure instead of silently discarding errors.
+fn save_or_warn(state: &mut StateManager<'_>, account: &solen_types::account::Account) {
+    if let Err(e) = state.save_account(account) {
+        warn!(account = ?account.id[..4], error = %e, "failed to persist account state");
+    }
+}
 
 /// Verify a signature against an auth method.
 ///
@@ -247,6 +256,34 @@ impl BlockExecutor {
         let mut events = Vec::new();
         let mut gas_used = 0u64;
 
+        // Validate action count.
+        if op.actions.len() > MAX_ACTIONS_PER_OP {
+            return ExecutionReceipt {
+                sender: op.sender,
+                nonce: op.nonce,
+                success: false,
+                gas_used: 0,
+                error: Some(format!("too many actions: {} (max {})", op.actions.len(), MAX_ACTIONS_PER_OP)),
+                events: vec![],
+            };
+        }
+
+        // Validate deploy code sizes.
+        for action in &op.actions {
+            if let Action::Deploy { code, .. } = action {
+                if code.len() > MAX_CODE_SIZE {
+                    return ExecutionReceipt {
+                        sender: op.sender,
+                        nonce: op.nonce,
+                        success: false,
+                        gas_used: 0,
+                        error: Some(format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE)),
+                        events: vec![],
+                    };
+                }
+            }
+        }
+
         // Validate signature against the account's auth methods.
         let mut state = StateManager::new(store);
         if let Err(e) = self.validate_and_prepare(&mut state, op) {
@@ -323,7 +360,7 @@ impl BlockExecutor {
                     };
                 }
                 sender_acct.balance -= total_fee;
-                let _ = state.save_account(&sender_acct);
+                save_or_warn(&mut state, &sender_acct);
 
                 // Credit treasury (non-burned portion).
                 let treasury_share = self.fee_config.treasury_amount(total_fee);
@@ -332,7 +369,7 @@ impl BlockExecutor {
                         state.get_account(&self.fee_config.treasury_account)
                     {
                         treasury.balance = treasury.balance.saturating_add(treasury_share);
-                        let _ = state.save_account(&treasury);
+                        save_or_warn(&mut state, &treasury);
                     }
                 }
 
@@ -606,7 +643,9 @@ fn distribute_epoch_rewards_in_executor(
         if let Ok(mut pool_acct) = solen_types::account::Account::try_from_slice(&data) {
             pool_acct.balance = pool_acct.balance.saturating_sub(actual_reward);
             if let Ok(encoded) = borsh::to_vec(&pool_acct) {
-                let _ = store.put(&pool_key, &encoded);
+                if let Err(e) = store.put(&pool_key, &encoded) {
+                    warn!(error = %e, "failed to persist staking pool deduction");
+                }
             }
         }
     }
@@ -636,7 +675,7 @@ fn distribute_epoch_rewards_in_executor(
         } else {
             0
         };
-        let commission = delegator_pool * validator.commission_rate_bps as u128 / 10_000;
+        let commission = delegator_pool.saturating_mul(validator.commission_rate_bps as u128) / 10_000;
         let delegator_net = delegator_pool.saturating_sub(commission);
         let validator_reward = validator_share.saturating_sub(delegator_pool) + commission;
 
@@ -655,7 +694,7 @@ fn distribute_epoch_rewards_in_executor(
         // Credit eligible delegators only.
         if delegator_net > 0 && eligible_delegated > 0 {
             for delegation in &eligible_delegations {
-                let del_share = delegator_net * delegation.amount / eligible_delegated;
+                let del_share = delegator_net.saturating_mul(delegation.amount) / eligible_delegated;
                 if del_share == 0 {
                     continue;
                 }
@@ -701,7 +740,9 @@ fn credit_account_raw(store: &mut dyn StateStore, id: &[u8; 32], amount: u128) {
         if let Ok(mut account) = solen_types::account::Account::try_from_slice(&data) {
             account.balance = account.balance.saturating_add(amount);
             if let Ok(encoded) = borsh::to_vec(&account) {
-                let _ = store.put(&key, &encoded);
+                if let Err(e) = store.put(&key, &encoded) {
+                    warn!(account = ?id[..4], error = %e, "failed to persist reward credit");
+                }
             }
         }
     }

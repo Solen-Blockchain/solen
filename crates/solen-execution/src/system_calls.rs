@@ -109,7 +109,9 @@ fn execute_staking_call(
                         return err("insufficient balance for delegation");
                     }
                     acct.balance -= amount;
-                    let _ = state.save_account(&acct);
+                    if let Err(e) = state.save_account(&acct) {
+                        return err(&format!("state save failed: {e}"));
+                    }
                 }
                 Err(e) => return err(&e.to_string()),
             }
@@ -172,7 +174,9 @@ fn execute_staking_call(
                 let mut state = StateManager::new(store);
                 if let Ok(mut acct) = state.require_account(sender) {
                     acct.balance = acct.balance.saturating_add(withdrawn);
-                    let _ = state.save_account(&acct);
+                    if let Err(e) = state.save_account(&acct) {
+                        return err(&format!("state save failed: {e}"));
+                    }
                 }
                 drop(state);
 
@@ -411,7 +415,9 @@ fn execute_vesting_call(
                     let mut state = StateManager::new(store);
                     if let Ok(mut acct) = state.require_account(sender) {
                         acct.balance = acct.balance.saturating_add(amount);
-                        let _ = state.save_account(&acct);
+                        if let Err(e) = state.save_account(&acct) {
+                        return err(&format!("state save failed: {e}"));
+                    }
                     }
                     drop(state);
 

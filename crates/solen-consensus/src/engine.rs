@@ -42,6 +42,8 @@ pub struct EngineConfig {
     pub max_ops_per_block: usize,
     pub validator_id: ValidatorId,
     pub chain_id: u64,
+    /// Archive mode: never prune blocks.
+    pub archive: bool,
 }
 
 impl Default for EngineConfig {
@@ -51,6 +53,7 @@ impl Default for EngineConfig {
             max_ops_per_block: 100,
             validator_id: [0u8; 32],
             chain_id: 0,
+            archive: false,
         }
     }
 }
@@ -843,7 +846,10 @@ impl ConsensusEngine {
 
     /// Remove blocks older than the retention window.
     fn prune_old_blocks(&self, current_height: u64) {
-        const BLOCK_RETENTION: u64 = 10_000;
+        if self.config.archive {
+            return; // Archive mode: keep everything.
+        }
+        const BLOCK_RETENTION: u64 = 10_000_000;
         if current_height <= BLOCK_RETENTION {
             return;
         }

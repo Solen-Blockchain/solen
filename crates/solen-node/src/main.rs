@@ -256,6 +256,9 @@ async fn main() -> anyhow::Result<()> {
     let mempool = Mempool::new(10_000);
     let engine = Arc::new(ConsensusEngine::with_validators(config, store, mempool, validator_set));
 
+    // Syncing flag: set when we detect we're behind, cleared when caught up.
+    let syncing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // --- P2P networking ---
     let net_handle = if !cli.no_p2p {
         let bootstrap_peers: Vec<_> = cli
@@ -275,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
         // Spawn a task to handle incoming P2P messages.
         let engine_for_p2p = engine.clone();
         let net_for_attest = handle.clone();
+        let syncing_for_p2p = syncing.clone();
         tokio::spawn(async move {
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -320,8 +324,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     NetworkMessage::StatusAnnounce { height, .. } => {
                         let our_height = engine_for_p2p.height();
-                        if height > our_height {
-                            // Peer is ahead — request blocks to sync.
+                        if height > our_height + 1 {
+                            // More than 1 block behind — enter sync mode.
+                            syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
                             tracing::info!(
                                 our_height,
                                 peer_height = height,
@@ -359,19 +364,26 @@ async fn main() -> anyhow::Result<()> {
                             });
                         }
                     }
-                    NetworkMessage::SyncBlocks { blocks } => {
+                    NetworkMessage::SyncBlocks { mut blocks } => {
                         if blocks.is_empty() {
                             continue;
                         }
-                        let our_height = engine_for_p2p.height();
+
+                        // Sort by height so out-of-order arrivals are processed correctly.
+                        blocks.sort_by_key(|b| b.header.height);
+
                         let mut synced = 0u64;
+                        let mut highest_peer_height = 0u64;
 
                         for sync_block in &blocks {
-                            if sync_block.header.height <= our_height {
+                            if sync_block.header.height > highest_peer_height {
+                                highest_peer_height = sync_block.header.height;
+                            }
+                            if sync_block.header.height <= engine_for_p2p.height() {
                                 continue; // already have this block
                             }
                             if sync_block.header.height != engine_for_p2p.height() + 1 {
-                                continue; // out of order
+                                continue; // gap — can't apply yet
                             }
                             engine_for_p2p.replay_synced_block(
                                 &sync_block.header,
@@ -386,6 +398,20 @@ async fn main() -> anyhow::Result<()> {
                                 new_height = engine_for_p2p.height(),
                                 "synced blocks from peer"
                             );
+
+                            // If still behind, immediately request more blocks.
+                            let our_height = engine_for_p2p.height();
+                            if our_height < highest_peer_height {
+                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                    from_height: our_height + 1,
+                                    to_height: highest_peer_height,
+                                });
+                            } else {
+                                // Caught up — resume block production.
+                                if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                    tracing::info!(height = our_height, "sync complete, resuming block production");
+                                }
+                            }
                         }
                     }
                 }
@@ -451,6 +477,7 @@ async fn main() -> anyhow::Result<()> {
 
     let engine_clone = engine.clone();
     let net_for_blocks = net_handle.clone();
+    let syncing_for_consensus = syncing.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -496,6 +523,11 @@ async fn main() -> anyhow::Result<()> {
 
             // Enforce minimum interval since last finalized block.
             if last_finalized_at.elapsed() < min_interval {
+                continue;
+            }
+
+            // Don't produce blocks while syncing from peers.
+            if syncing_for_consensus.load(std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
 

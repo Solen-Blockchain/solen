@@ -308,10 +308,15 @@ async fn main() -> anyhow::Result<()> {
                             tracing::warn!(ops = operations.len(), "rejecting oversized block");
                             continue;
                         }
-                        // While syncing, ignore live blocks — let sync handle catch-up.
-                        // This prevents fast-forward from corrupting state.
+                        // While syncing AND significantly behind, ignore live blocks.
+                        // This prevents fast-forward from corrupting state during catch-up.
+                        // But if we're near the network tip, accept blocks normally so
+                        // we can attest and participate in consensus.
                         if syncing_for_p2p.load(std::sync::atomic::Ordering::Relaxed) {
-                            continue;
+                            let our_height = engine_for_p2p.height();
+                            if header.height > our_height + 2 {
+                                continue; // Too far ahead — wait for sync.
+                            }
                         }
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {

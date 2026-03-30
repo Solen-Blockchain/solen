@@ -68,6 +68,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
+        .route("/api/accounts/:account/tokens", get(get_account_tokens))
+        .route("/api/contracts", get(get_contracts))
         .with_state(state)
 }
 
@@ -215,6 +217,21 @@ async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetRespo
 }
 
 /// Start the explorer API server.
+async fn get_account_tokens(
+    State(state): State<ApiState>,
+    Path(account): Path<String>,
+) -> Json<Vec<String>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_account_tokens(&account))
+}
+
+async fn get_contracts(
+    State(state): State<ApiState>,
+) -> Json<Vec<String>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_contracts())
+}
+
 pub async fn start_explorer_api(
     addr: std::net::SocketAddr,
     store: Arc<RwLock<IndexStore>>,

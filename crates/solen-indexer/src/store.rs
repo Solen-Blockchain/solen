@@ -1,6 +1,6 @@
 //! In-memory indexed storage for blocks, transactions, and events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,10 @@ pub struct IndexStore {
     pub events: Vec<IndexedEvent>,
     /// Account -> list of tx indices.
     pub account_txs: HashMap<String, Vec<usize>>,
+    /// Account -> set of token contract IDs that have sent tokens to this account.
+    pub account_tokens: HashMap<String, HashSet<String>>,
+    /// Set of known contract addresses (accounts with code deployed).
+    pub contracts: HashSet<String>,
     pub latest_height: u64,
 }
 
@@ -123,5 +127,31 @@ impl IndexStore {
 
     pub fn get_recent_events(&self, limit: usize) -> Vec<&IndexedEvent> {
         self.events.iter().rev().take(limit).collect()
+    }
+
+    /// Record that an account holds tokens from a contract.
+    pub fn track_token_holder(&mut self, account: &str, contract: &str) {
+        self.account_tokens
+            .entry(account.to_string())
+            .or_default()
+            .insert(contract.to_string());
+    }
+
+    /// Record a deployed contract.
+    pub fn track_contract(&mut self, contract_id: &str) {
+        self.contracts.insert(contract_id.to_string());
+    }
+
+    /// Get token contracts associated with an account.
+    pub fn get_account_tokens(&self, account: &str) -> Vec<String> {
+        self.account_tokens
+            .get(account)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get all known contracts.
+    pub fn get_contracts(&self) -> Vec<String> {
+        self.contracts.iter().cloned().collect()
     }
 }

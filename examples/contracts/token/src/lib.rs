@@ -152,6 +152,7 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
         b"name" => do_name(),
         b"symbol" => do_symbol(),
         b"decimals" => do_decimals(),
+        b"owner" => do_owner(),
         _ => sdk::return_value(b"unknown method"),
     }
 }
@@ -170,7 +171,8 @@ fn do_abi() -> i32 {
 {"name":"total_supply","args":"","mutates":false},
 {"name":"name","args":"","mutates":false},
 {"name":"symbol","args":"","mutates":false},
-{"name":"decimals","args":"","mutates":false}
+{"name":"decimals","args":"","mutates":false},
+{"name":"owner","args":"","mutates":false}
 ]"#)
 }
 
@@ -217,6 +219,11 @@ fn do_decimals() -> i32 {
         Some(d) => sdk::return_value(d),
         None => sdk::return_value(&[8]),
     }
+}
+
+fn do_owner() -> i32 {
+    let owner = get_owner();
+    sdk::return_value(&owner)
 }
 
 fn do_mint(args: &[u8]) -> i32 {

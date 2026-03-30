@@ -3,6 +3,7 @@ resolver = "2"
 exclude = [
     "examples/contracts/counter",
     "examples/contracts/token",
+    "examples/contracts/nft",
 ]
 members = [
     "crates/solen-types",

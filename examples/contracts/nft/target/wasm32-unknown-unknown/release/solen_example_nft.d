@@ -1,0 +1,1 @@
+/home/michael/solen/examples/contracts/nft/target/wasm32-unknown-unknown/release/solen_example_nft.wasm: /home/michael/solen/crates/solen-contract-sdk/src/lib.rs /home/michael/solen/examples/contracts/nft/src/lib.rs

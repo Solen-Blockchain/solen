@@ -65,6 +65,26 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
         for event in &events {
             store.add_event(event.clone());
+
+            // Track token holders: mint/transfer events from contracts
+            // have recipient[32 bytes] in event data.
+            if (event.topic == "mint" || event.topic == "transfer")
+                && event.data.len() >= 64
+                && !event.emitter.starts_with("ffffffffffffffffffffffffffffffff")
+            {
+                // First 64 hex chars = 32 bytes = recipient account ID.
+                let recipient = &event.data[..64];
+                store.track_token_holder(recipient, &event.emitter);
+                // Also track the sender for transfers.
+                let sender_hex = hex(&receipt.sender);
+                store.track_token_holder(&sender_hex, &event.emitter);
+            }
+
+            // Track contract deployments.
+            if event.topic == "deploy" && event.data.len() >= 64 {
+                let contract_id = &event.data[..64];
+                store.track_contract(contract_id);
+            }
         }
 
         let tx = IndexedTx {

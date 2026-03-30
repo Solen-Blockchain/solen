@@ -36,6 +36,8 @@ pub fn execute_system_call(
         execute_bridge_call(store, sender, method, args)
     } else if *target == TREASURY_ADDRESS {
         execute_treasury_call(store, sender, method)
+    } else if *target == solen_types::system::VESTING_ADDRESS {
+        execute_vesting_call(store, sender, method)
     } else if *target == INTENT_ADDRESS {
         execute_intent_call(store, sender, method, args)
     } else {
@@ -386,6 +388,82 @@ fn execute_intent_call(
 ) -> SystemCallResult {
     // Intent pool runs in-memory, not in state. Expose via RPC instead.
     err(&format!("intent operations use RPC, not system calls: {method}"))
+}
+
+// ── Vesting ─────────────────────────────────────────────────────
+
+fn execute_vesting_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+) -> SystemCallResult {
+    use solen_system_contracts::vesting::VestingContract;
+
+    let mut vesting = VestingContract::load(store);
+    let mut events = Vec::new();
+
+    let result = match method {
+        "claim" => {
+            let current_epoch = read_current_epoch(store);
+            match vesting.claim(sender, current_epoch) {
+                Ok(amount) => {
+                    // Credit sender's account with claimed tokens.
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(amount);
+                        let _ = state.save_account(&acct);
+                    }
+                    drop(state);
+
+                    // Reload vesting after state manager dropped.
+                    vesting = VestingContract::load(store);
+
+                    let mut data = Vec::with_capacity(48);
+                    data.extend_from_slice(sender);
+                    data.extend_from_slice(&amount.to_le_bytes());
+                    events.push(Event {
+                        emitter: solen_types::system::VESTING_ADDRESS,
+                        topic: b"vesting_claim".to_vec(),
+                        data,
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "status" => {
+            match vesting.get_schedule(sender) {
+                Some(schedule) => {
+                    let current_epoch = read_current_epoch(store);
+                    let vested = schedule.vested_at(current_epoch);
+                    let claimable = schedule.claimable_at(current_epoch);
+                    let data = format!(
+                        "total={},vested={},claimed={},claimable={},type={:?}",
+                        schedule.total_amount,
+                        vested,
+                        schedule.claimed,
+                        claimable,
+                        schedule.vesting_type,
+                    );
+                    events.push(Event {
+                        emitter: solen_types::system::VESTING_ADDRESS,
+                        topic: b"vesting_status".to_vec(),
+                        data: data.into_bytes(),
+                    });
+                    Ok(())
+                }
+                None => Err("no vesting schedule for this account".into()),
+            }
+        }
+        _ => Err(format!("unknown vesting method: {method}")),
+    };
+
+    vesting.save(store);
+
+    match result {
+        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
+        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+    }
 }
 
 fn err(msg: &str) -> SystemCallResult {

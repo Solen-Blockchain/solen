@@ -55,6 +55,12 @@ enum Commands {
     /// List all validators and their stake
     Validators,
 
+    /// Claim vested tokens
+    ClaimVesting {
+        /// Your key name
+        from: String,
+    },
+
     /// Delegate tokens to a validator
     Stake {
         /// Your key name
@@ -143,6 +149,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Account { account } => commands::cmd_account(&rpc, &account).await?,
         Commands::Block { height } => commands::cmd_block(&rpc, height).await?,
         Commands::Validators => commands::cmd_validators(&rpc).await?,
+        Commands::ClaimVesting { from } => {
+            commands::cmd_claim_vesting(&rpc, &from).await?
+        }
         Commands::Stake { from, validator, amount } => {
             commands::cmd_stake(&rpc, &from, &validator, amount).await?
         }

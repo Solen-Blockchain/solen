@@ -68,6 +68,47 @@ pub async fn cmd_validators(rpc: &RpcClient) -> Result<()> {
     Ok(())
 }
 
+// ── Claim Vesting ───────────────────────────────────────────────
+
+pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Vesting system contract address.
+    let vesting_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x06;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: vesting_addr,
+            method: "claim".to_string(),
+            args: vec![],
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Vesting claim submitted successfully.");
+        println!("  Vested tokens will be credited to your account.");
+    } else {
+        println!("Rejected: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 // ── Stake ───────────────────────────────────────────────────────
 
 pub async fn cmd_stake(

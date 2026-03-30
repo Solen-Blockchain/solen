@@ -20,9 +20,28 @@ pub const TREASURY_ADDRESS: AccountId = addr(0x04);
 /// Intent pool system contract.
 pub const INTENT_ADDRESS: AccountId = addr(0x05);
 
+/// Vesting system contract — holds team/investor tokens with time locks.
+pub const VESTING_ADDRESS: AccountId = addr(0x06);
+
 /// Staking rewards pool — holds the 500M SOLEN allocated for validator rewards.
-/// Rewards are deducted from this account each epoch. When it's empty, rewards stop.
 pub const STAKING_POOL_ADDRESS: AccountId = addr(0x10);
+
+// ── Fund account addresses (non-contract, just regular accounts) ──
+
+/// Ecosystem fund account.
+pub const ECOSYSTEM_FUND_ADDRESS: AccountId = addr(0x20);
+
+/// Community & airdrops account.
+pub const COMMUNITY_ADDRESS: AccountId = addr(0x21);
+
+/// Liquidity & market making account.
+pub const LIQUIDITY_ADDRESS: AccountId = addr(0x22);
+
+/// Team & founders vesting pool (tokens held by vesting contract).
+pub const TEAM_POOL_ADDRESS: AccountId = addr(0x23);
+
+/// Early investors vesting pool (tokens held by vesting contract).
+pub const INVESTOR_POOL_ADDRESS: AccountId = addr(0x24);
 
 /// Generate a system address: 0xFF repeated prefix + identifier byte.
 const fn addr(id: u8) -> AccountId {
@@ -38,10 +57,11 @@ pub fn is_system_contract(id: &AccountId) -> bool {
 }
 
 /// All system contract addresses.
-pub const ALL_SYSTEM_ADDRESSES: [AccountId; 5] = [
+pub const ALL_SYSTEM_ADDRESSES: [AccountId; 6] = [
     STAKING_ADDRESS,
     GOVERNANCE_ADDRESS,
     BRIDGE_ADDRESS,
     TREASURY_ADDRESS,
     INTENT_ADDRESS,
+    VESTING_ADDRESS,
 ];

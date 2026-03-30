@@ -20,7 +20,8 @@ The native token of the Solen network. Used for staking, fees, governance, and s
 | **Team & Founders** | 300,000,000 | 15% | 1-year cliff, 3-year linear vest (4 years total) |
 | **Ecosystem Fund** | 300,000,000 | 15% | For dApp incentives, developer grants, partnerships |
 | **Community & Airdrops** | 200,000,000 | 10% | Distributed at and after launch |
-| **Early Investors** | 200,000,000 | 10% | 6-month cliff, 2-year linear vest |
+| **Early Investors** | 100,000,000 | 5% | 6-month cliff, 2-year linear vest |
+| **Genesis Validators** | 100,000,000 | 5% | 1-year validator lock |
 | **Liquidity & Market Making** | 100,000,000 | 5% | Available at launch |
 | **Total** | **2,000,000,000** | **100%** | |
 
@@ -28,25 +29,33 @@ The native token of the Solen network. Used for staking, fees, governance, and s
 
 ```
 Year 0 (launch)
-├── Circulating: Community (200M) + Liquidity (100M) = 300M (15%)
+├── Circulating: Community (200M) + Liquidity (100M) + Genesis Validators (100M) = 400M (20%)
+├── Genesis validator tokens locked for 1 year (staked, earning rewards)
 ├── Staking rewards begin accruing
 └── Team, investors locked
 
-Year 1
+Year 0.5
 ├── Investor cliff ends → linear unlock begins
+└── Estimated circulating: ~450M
+
+Year 1
+├── Genesis validator lock expires (can unstake)
 ├── Team cliff ends → linear unlock begins
 ├── Staking rewards: ~50M released
-└── Estimated circulating: ~400-500M
+└── Estimated circulating: ~550-650M
 
 Year 2
 ├── Investors ~50% unlocked
 ├── Team ~25% unlocked
 ├── Staking rewards: ~100M cumulative
-└── Estimated circulating: ~600-800M
+└── Estimated circulating: ~700-900M
+
+Year 2.5
+├── Investors fully vested
+└── Estimated circulating: ~800-1.0B
 
 Year 4
 ├── Team fully vested
-├── Investors fully vested
 └── Estimated circulating: ~1.0-1.2B
 
 Year 10
@@ -61,7 +70,7 @@ Validators run nodes, propose blocks, and participate in consensus.
 
 | Parameter | Value |
 |-----------|-------|
-| Minimum self-stake | 50,000 SOLEN |
+| Minimum self-stake | 500,000 SOLEN |
 | Minimum active validators | 20 |
 | Genesis validator lock | 1 year (~157,680 epochs) |
 | Slashing (double sign) | 10% of stake |

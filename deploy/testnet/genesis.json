@@ -8,22 +8,22 @@
     {
       "name": "validator-1",
       "seed_hex": "0101010101010101010101010101010101010101010101010101010101010101",
-      "stake": 5000000000000
+      "stake": 50000000000000000
     },
     {
       "name": "validator-2",
       "seed_hex": "0202020202020202020202020202020202020202020202020202020202020202",
-      "stake": 5000000000000
+      "stake": 50000000000000000
     },
     {
       "name": "validator-3",
       "seed_hex": "0303030303030303030303030303030303030303030303030303030303030303",
-      "stake": 5000000000000
+      "stake": 50000000000000000
     },
     {
       "name": "validator-4",
       "seed_hex": "0404040404040404040404040404040404040404040404040404040404040404",
-      "stake": 5000000000000
+      "stake": 50000000000000000
     }
   ],
   "accounts": [],
@@ -32,5 +32,29 @@
     "seed_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
     "drip_amount": 100000000,
     "cooldown_secs": 300
-  }
+  },
+  "team_vesting": [
+    {
+      "name": "team-member-1",
+      "public_key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "amount": 15000000000000000
+    },
+    {
+      "name": "team-member-2",
+      "public_key_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "amount": 15000000000000000
+    }
+  ],
+  "investor_vesting": [
+    {
+      "name": "investor-1",
+      "public_key_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "amount": 5000000000000000
+    },
+    {
+      "name": "investor-2",
+      "public_key_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "amount": 5000000000000000
+    }
+  ]
 }

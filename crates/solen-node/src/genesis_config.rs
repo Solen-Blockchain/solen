@@ -28,6 +28,12 @@ pub struct GenesisConfig {
     pub accounts: Vec<AccountAllocation>,
     /// Faucet configuration (optional).
     pub faucet: Option<FaucetConfig>,
+    /// Team vesting recipients.
+    #[serde(default)]
+    pub team_vesting: Vec<VestingRecipient>,
+    /// Investor vesting recipients.
+    #[serde(default)]
+    pub investor_vesting: Vec<VestingRecipient>,
 }
 
 /// A validator in the genesis set.
@@ -72,6 +78,14 @@ pub struct FaucetConfig {
     pub drip_amount: u128,
     /// Cooldown between drips per recipient (seconds).
     pub cooldown_secs: u64,
+}
+
+/// A vesting recipient in the genesis config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VestingRecipient {
+    pub name: String,
+    pub public_key_hex: String,
+    pub amount: u128,
 }
 
 impl GenesisConfig {
@@ -182,19 +196,75 @@ impl GenesisConfig {
             );
         }
 
-        // Treasury account — uses a well-known constant address (no keypair).
+        // ── Fund accounts (tokenomics allocations) ──
+
+        use solen_types::system::*;
+        let d = 100_000_000u128; // 10^8 decimals
+
+        // Treasury: 400M SOLEN
         genesis_accounts.push(GenesisAccount {
             id: TREASURY_ADDRESS,
-            balance: 0,
+            balance: 400_000_000 * d,
             auth_methods: vec![],
         });
 
-        // Staking rewards pool — 500M SOLEN for validator rewards over 10 years.
+        // Staking rewards pool: 500M SOLEN
         genesis_accounts.push(GenesisAccount {
-            id: solen_types::system::STAKING_POOL_ADDRESS,
-            balance: 50_000_000_000_000_000, // 500M SOLEN × 10^8 decimals
+            id: STAKING_POOL_ADDRESS,
+            balance: 500_000_000 * d,
             auth_methods: vec![],
         });
+
+        // Ecosystem fund: 300M SOLEN (available immediately)
+        genesis_accounts.push(GenesisAccount {
+            id: ECOSYSTEM_FUND_ADDRESS,
+            balance: 300_000_000 * d,
+            auth_methods: vec![],
+        });
+
+        // Community & airdrops: 200M SOLEN (available immediately)
+        genesis_accounts.push(GenesisAccount {
+            id: COMMUNITY_ADDRESS,
+            balance: 200_000_000 * d,
+            auth_methods: vec![],
+        });
+
+        // Liquidity & market making: 100M SOLEN (available immediately)
+        genesis_accounts.push(GenesisAccount {
+            id: LIQUIDITY_ADDRESS,
+            balance: 100_000_000 * d,
+            auth_methods: vec![],
+        });
+
+        // Team pool: 300M SOLEN (held by vesting contract)
+        genesis_accounts.push(GenesisAccount {
+            id: TEAM_POOL_ADDRESS,
+            balance: 300_000_000 * d,
+            auth_methods: vec![],
+        });
+
+        // Investor pool: 100M SOLEN (held by vesting contract)
+        genesis_accounts.push(GenesisAccount {
+            id: INVESTOR_POOL_ADDRESS,
+            balance: 100_000_000 * d,
+            auth_methods: vec![],
+        });
+
+        info!(
+            treasury = 400_000_000u64,
+            staking_pool = 500_000_000u64,
+            ecosystem = 300_000_000u64,
+            community = 200_000_000u64,
+            liquidity = 100_000_000u64,
+            team_vesting = 300_000_000u64,
+            investor_vesting = 100_000_000u64,
+            "fund accounts initialized"
+        );
+
+        // Compute and store total supply before applying genesis.
+        let total_supply: u128 = genesis_accounts.iter().map(|a| a.balance).sum();
+        let _ = store.put(b"__total_supply__", &total_supply.to_le_bytes());
+        info!(total_supply, "total supply stored");
 
         apply_genesis(store, genesis_accounts)?;
 
@@ -206,12 +276,38 @@ impl GenesisConfig {
         }
         staking.save(store);
 
+        // Initialize vesting contract with team and investor schedules.
+        let mut vesting = solen_system_contracts::vesting::VestingContract::new();
+        for r in &self.team_vesting {
+            let pk = hex_decode_32(&r.public_key_hex)?;
+            vesting.add_schedule(
+                pk,
+                r.amount,
+                solen_system_contracts::vesting::VestingType::Team,
+                0, // starts at genesis
+            );
+            info!(name = %r.name, amount = r.amount, "team vesting schedule");
+        }
+        for r in &self.investor_vesting {
+            let pk = hex_decode_32(&r.public_key_hex)?;
+            vesting.add_schedule(
+                pk,
+                r.amount,
+                solen_system_contracts::vesting::VestingType::Investor,
+                0,
+            );
+            info!(name = %r.name, amount = r.amount, "investor vesting schedule");
+        }
+        vesting.save(store);
+
         info!(
             chain_name = %self.chain_name,
             chain_id = self.chain_id,
             validators = self.validators.len(),
             accounts = self.accounts.len(),
-            "genesis applied (staking initialized)"
+            team_vesting = self.team_vesting.len(),
+            investor_vesting = self.investor_vesting.len(),
+            "genesis applied"
         );
 
         Ok(())
@@ -252,6 +348,8 @@ impl GenesisConfig {
                 drip_amount: 10_000,
                 cooldown_secs: 60,
             }),
+            team_vesting: vec![],
+            investor_vesting: vec![],
         }
     }
 
@@ -295,18 +393,33 @@ impl GenesisConfig {
                 drip_amount: 100_000_000, // 1 SOLEN (8 decimals)
                 cooldown_secs: 300,
             }),
+            team_vesting: vec![
+                VestingRecipient {
+                    name: "team-member-1".into(),
+                    public_key_hex: "aa".repeat(32),
+                    amount: 15_000_000_000_000_000, // 150M SOLEN
+                },
+                VestingRecipient {
+                    name: "team-member-2".into(),
+                    public_key_hex: "bb".repeat(32),
+                    amount: 15_000_000_000_000_000, // 150M SOLEN
+                },
+            ],
+            investor_vesting: vec![
+                VestingRecipient {
+                    name: "investor-1".into(),
+                    public_key_hex: "cc".repeat(32),
+                    amount: 5_000_000_000_000_000, // 50M SOLEN
+                },
+                VestingRecipient {
+                    name: "investor-2".into(),
+                    public_key_hex: "dd".repeat(32),
+                    amount: 5_000_000_000_000_000, // 50M SOLEN
+                },
+            ],
         }
     }
 }
-
-/// Well-known treasury address (not derived from any keypair).
-/// This is a constant so all nodes agree on it.
-pub const TREASURY_ADDRESS: [u8; 32] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x74, 0x72, 0x65, 0x61, 0x73, 0x75, 0x72, 0x79, // "treasury"
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-];
 
 /// Resolve a validator's public key from its config.
 pub fn resolve_validator_pubkey(v: &ValidatorConfig) -> Result<[u8; 32]> {

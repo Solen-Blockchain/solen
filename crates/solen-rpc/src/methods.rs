@@ -63,6 +63,10 @@ pub struct ChainStatus {
     pub height: u64,
     pub latest_state_root: String,
     pub pending_ops: usize,
+    /// Total tokens allocated at genesis (base units).
+    pub total_allocation: String,
+    /// Tokens currently in circulation (not locked in system pools).
+    pub total_circulation: String,
 }
 
 /// Validator info returned by the RPC.
@@ -90,6 +94,17 @@ pub struct StakingInfo {
 pub struct DelegationInfo {
     pub validator: String,
     pub amount: String,
+}
+
+/// Vesting schedule info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VestingInfo {
+    pub has_schedule: bool,
+    pub total_amount: String,
+    pub vested: String,
+    pub claimed: String,
+    pub claimable: String,
+    pub vesting_type: String,
 }
 
 #[rpc(server)]
@@ -120,6 +135,9 @@ pub trait SolenApi {
 
     #[method(name = "solen_getStakingInfo")]
     fn get_staking_info(&self, account_id: String) -> RpcResult<StakingInfo>;
+
+    #[method(name = "solen_getVestingInfo")]
+    fn get_vesting_info(&self, account_id: String) -> RpcResult<VestingInfo>;
 }
 
 /// Implementation of the Solen RPC API.
@@ -254,10 +272,38 @@ impl SolenApiServer for SolenRpc {
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
 
+        let state = ReadonlyStateManager::new(store.as_ref());
+
+        // Read total supply stored at genesis.
+        let total_allocation = match store.get(b"__total_supply__") {
+            Ok(Some(data)) if data.len() >= 16 => {
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&data[..16]);
+                u128::from_le_bytes(buf)
+            }
+            _ => 0,
+        };
+
+        // Circulation = total supply minus locked/restricted accounts.
+        use solen_types::system::*;
+        let locked_addresses = [
+            TREASURY_ADDRESS,
+            STAKING_POOL_ADDRESS,
+            TEAM_POOL_ADDRESS,
+            INVESTOR_POOL_ADDRESS,
+        ];
+        let locked: u128 = locked_addresses
+            .iter()
+            .map(|addr| state.get_balance(addr).unwrap_or(0))
+            .sum();
+        let total_circulation = total_allocation.saturating_sub(locked);
+
         Ok(ChainStatus {
             height: self.engine.height(),
             latest_state_root: hex_encode(&store.state_root()),
             pending_ops: self.engine.mempool().len(),
+            total_allocation: total_allocation.to_string(),
+            total_circulation: total_circulation.to_string(),
         })
     }
 
@@ -317,6 +363,45 @@ impl SolenApiServer for SolenRpc {
             delegations,
             pending_undelegations: pending,
         })
+    }
+
+    fn get_vesting_info(&self, account_id: String) -> RpcResult<VestingInfo> {
+        let id = parse_account_id(&account_id)?;
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let vesting =
+            solen_system_contracts::vesting::VestingContract::load(store.as_ref());
+
+        match vesting.get_schedule(&id) {
+            Some(schedule) => {
+                // Read current epoch from chain meta.
+                let current_epoch = match store.get(b"__chain_meta__") {
+                    Ok(Some(data)) if data.len() >= 16 => {
+                        let mut h = [0u8; 8];
+                        h.copy_from_slice(&data[..8]);
+                        u64::from_le_bytes(h) / 100
+                    }
+                    _ => 0,
+                };
+
+                Ok(VestingInfo {
+                    has_schedule: true,
+                    total_amount: schedule.total_amount.to_string(),
+                    vested: schedule.vested_at(current_epoch).to_string(),
+                    claimed: schedule.claimed.to_string(),
+                    claimable: schedule.claimable_at(current_epoch).to_string(),
+                    vesting_type: format!("{:?}", schedule.vesting_type),
+                })
+            }
+            None => Ok(VestingInfo {
+                has_schedule: false,
+                total_amount: "0".into(),
+                vested: "0".into(),
+                claimed: "0".into(),
+                claimable: "0".into(),
+                vesting_type: "".into(),
+            }),
+        }
     }
 }
 

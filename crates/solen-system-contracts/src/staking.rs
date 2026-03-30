@@ -12,7 +12,7 @@ use thiserror::Error;
 pub const UNBONDING_PERIOD: u64 = 7;
 
 /// Minimum stake to register as a validator.
-pub const MIN_VALIDATOR_STAKE: u128 = 50_000;
+pub const MIN_VALIDATOR_STAKE: u128 = 500_000;
 
 /// Minimum number of active validators. The network will reject
 /// deregistrations that would drop below this count.

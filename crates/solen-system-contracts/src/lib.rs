@@ -9,3 +9,4 @@ pub mod governance;
 pub mod proof_registry;
 pub mod staking;
 pub mod treasury;
+pub mod vesting;

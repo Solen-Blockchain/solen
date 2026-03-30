@@ -11,6 +11,7 @@ solen-execution = { workspace = true }
 solen-consensus = { workspace = true }
 solen-system-contracts = { workspace = true }
 solen-storage = { workspace = true }
+solen-vm = { workspace = true }
 tokio = { workspace = true }
 jsonrpsee = { workspace = true }
 tracing = { workspace = true }

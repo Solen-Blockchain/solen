@@ -97,6 +97,15 @@ pub struct DelegationInfo {
     pub amount: String,
 }
 
+/// Read-only contract call result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallViewResult {
+    pub success: bool,
+    pub return_data: String,
+    pub gas_used: u64,
+    pub error: Option<String>,
+}
+
 /// Vesting schedule info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VestingInfo {
@@ -136,6 +145,15 @@ pub trait SolenApi {
 
     #[method(name = "solen_getStakingInfo")]
     fn get_staking_info(&self, account_id: String) -> RpcResult<StakingInfo>;
+
+    /// Read-only contract call — no signature needed, no state changes.
+    #[method(name = "solen_callView")]
+    fn call_view(
+        &self,
+        contract_id: String,
+        method: String,
+        args: Option<String>,
+    ) -> RpcResult<CallViewResult>;
 
     #[method(name = "solen_getVestingInfo")]
     fn get_vesting_info(&self, account_id: String) -> RpcResult<VestingInfo>;
@@ -273,6 +291,96 @@ impl SolenApiServer for SolenRpc {
                 })
                 .collect(),
         })
+    }
+
+    fn call_view(
+        &self,
+        contract_id: String,
+        method: String,
+        args: Option<String>,
+    ) -> RpcResult<CallViewResult> {
+        let target = parse_account_id(&contract_id)?;
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+
+        // Build input: method\0args
+        let args_bytes = match &args {
+            Some(hex) => hex_decode(hex)?,
+            None => vec![],
+        };
+        let mut input = method.as_bytes().to_vec();
+        input.push(0);
+        input.extend_from_slice(&args_bytes);
+
+        // Load contract account.
+        let state = ReadonlyStateManager::new(store.as_ref());
+        let account = state.get_account(&target).map_err(|e| internal_error(e))?
+            .ok_or_else(|| ErrorObjectOwned::owned(-32001, "account not found", None::<()>))?;
+
+        let zero_hash = [0u8; 32];
+        if account.code_hash == zero_hash {
+            return Err(ErrorObjectOwned::owned(-32001, "account has no contract code", None::<()>));
+        }
+
+        // Load bytecode.
+        let code_key = {
+            let mut k = b"code/".to_vec();
+            k.extend_from_slice(&account.code_hash);
+            k
+        };
+        let bytecode = store.get(&code_key)
+            .map_err(|e| internal_error(e))?
+            .ok_or_else(|| internal_error("bytecode not found"))?;
+
+        // Load contract storage.
+        let manifest_key = {
+            let mut k = b"cs/".to_vec();
+            k.extend_from_slice(&target);
+            k.push(b'/');
+            k.extend_from_slice(b"__keys__");
+            k
+        };
+        let mut contract_storage = std::collections::HashMap::new();
+        if let Ok(Some(manifest_data)) = store.get(&manifest_key) {
+            if let Ok(keys) = serde_json::from_slice::<Vec<Vec<u8>>>(&manifest_data) {
+                for key in keys {
+                    let mut store_key = b"cs/".to_vec();
+                    store_key.extend_from_slice(&target);
+                    store_key.push(b'/');
+                    store_key.extend_from_slice(&key);
+                    if let Ok(Some(val)) = store.get(&store_key) {
+                        contract_storage.insert(key, val);
+                    }
+                }
+            }
+        }
+
+        // Execute in VM with read-only context (caller = zero address for view calls).
+        let ctx = solen_vm::host::HostContext {
+            caller: [0u8; 32],
+            block_height: self.engine.height(),
+            storage: contract_storage,
+            events: Vec::new(),
+            return_data: Vec::new(),
+        };
+
+        let vm = solen_vm::runtime::VmRuntime::new()
+            .map_err(|e| internal_error(e))?;
+
+        match vm.execute(&account.code_hash, &bytecode, &input, ctx, None) {
+            Ok(result) => Ok(CallViewResult {
+                success: true,
+                return_data: hex_encode(&result.return_data),
+                gas_used: result.gas_used,
+                error: None,
+            }),
+            Err(e) => Ok(CallViewResult {
+                success: false,
+                return_data: String::new(),
+                gas_used: 0,
+                error: Some(e.to_string()),
+            }),
+        }
     }
 
     fn chain_status(&self) -> RpcResult<ChainStatus> {

@@ -374,9 +374,18 @@ impl ConsensusEngine {
         };
 
         if fork_detected {
+            // Log our block hash vs expected for debugging state divergence.
+            let fmt = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
+            let our_hash = {
+                let chain = self.chain.read().unwrap();
+                chain.last().map(|b| fmt(&block_hash(&b.header))).unwrap_or_default()
+            };
+            let their_parent = fmt(&header.parent_hash);
             warn!(
                 height = header.height,
-                "parent hash mismatch — rejecting block (will sync correct chain)"
+                our_block_hash = &our_hash[..16],
+                their_parent_hash = &their_parent[..16],
+                "parent hash mismatch — rolling back to resync"
             );
             self.handle_fork(header.height);
             return false;
@@ -447,20 +456,45 @@ impl ConsensusEngine {
         true
     }
 
-    /// Handle a fork: log the mismatch but do NOT wipe state.
-    /// The conflicting block is rejected, and the node will sync the correct
-    /// chain via StatusAnnounce. This preserves user state instead of
-    /// destroying it on every parent hash mismatch.
+    /// Handle a fork: roll back one block and resync.
+    /// This is less destructive than wiping all state — we only remove
+    /// the conflicting block and let sync replace it with the correct one.
     fn handle_fork(&self, fork_height: u64) {
         let our_height = self.height();
         warn!(
             fork_height,
             our_height,
-            "parent hash mismatch detected — rejecting block and waiting for sync"
+            "parent hash mismatch detected — rolling back last block to resync"
         );
 
-        // Clear pending blocks/attestations for the conflicting height
-        // to allow the correct block to be accepted later.
+        // Remove the last block from our chain so we can accept the correct one.
+        {
+            let mut chain = self.chain.write().unwrap();
+            if let Some(last) = chain.last() {
+                if last.header.height >= fork_height - 1 {
+                    // Delete the conflicting block from storage.
+                    let remove_height = last.header.height;
+                    chain.pop();
+
+                    let mut store = self.store.write().unwrap();
+                    let key = format!("block/{}", remove_height);
+                    let _ = store.delete(key.as_bytes());
+
+                    // Revert chain metadata to the previous block.
+                    let prev_height = chain.last().map(|b| b.header.height).unwrap_or(0);
+                    let prev_epoch = chain.last().map(|b| b.header.epoch).unwrap_or(0);
+                    save_chain_meta(store.as_mut(), prev_height, prev_epoch);
+
+                    info!(
+                        removed = remove_height,
+                        new_height = prev_height,
+                        "rolled back to resync correct block"
+                    );
+                }
+            }
+        }
+
+        // Clear pending state for the conflicting height.
         self.pending_blocks.write().unwrap().remove(&fork_height);
         self.pending_attestations.write().unwrap().remove(&fork_height);
     }

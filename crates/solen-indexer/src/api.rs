@@ -22,6 +22,8 @@ pub struct ApiState {
 pub struct PaginationParams {
     #[serde(default = "default_limit")]
     limit: usize,
+    #[serde(default)]
+    offset: usize,
 }
 
 fn default_limit() -> usize {
@@ -89,7 +91,7 @@ async fn get_blocks(
 ) -> Json<Vec<IndexedBlock>> {
     let store = state.store.read().unwrap();
     let blocks: Vec<IndexedBlock> = store
-        .get_recent_blocks(params.limit)
+        .get_recent_blocks_paged(params.limit, params.offset)
         .into_iter()
         .cloned()
         .collect();
@@ -125,7 +127,7 @@ async fn get_recent_txs(
     Query(params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedTx>> {
     let store = state.store.read().unwrap();
-    Json(store.get_recent_txs(params.limit).into_iter().cloned().collect())
+    Json(store.get_recent_txs_paged(params.limit, params.offset).into_iter().cloned().collect())
 }
 
 async fn get_account_txs(
@@ -135,7 +137,7 @@ async fn get_account_txs(
 ) -> Json<Vec<IndexedTx>> {
     let store = state.store.read().unwrap();
     let txs: Vec<IndexedTx> = store
-        .get_account_txs(&account, params.limit)
+        .get_account_txs_paged(&account, params.limit, params.offset)
         .into_iter()
         .cloned()
         .collect();
@@ -148,7 +150,7 @@ async fn get_events(
 ) -> Json<Vec<IndexedEvent>> {
     let store = state.store.read().unwrap();
     let events: Vec<IndexedEvent> = store
-        .get_recent_events(params.limit)
+        .get_recent_events_paged(params.limit, params.offset)
         .into_iter()
         .cloned()
         .collect();

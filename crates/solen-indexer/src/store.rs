@@ -94,6 +94,10 @@ impl IndexStore {
         self.blocks.iter().rev().take(limit).collect()
     }
 
+    pub fn get_recent_blocks_paged(&self, limit: usize, offset: usize) -> Vec<&IndexedBlock> {
+        self.blocks.iter().rev().skip(offset).take(limit).collect()
+    }
+
     pub fn get_tx(&self, block_height: u64, index: usize) -> Option<&IndexedTx> {
         self.transactions
             .iter()
@@ -109,6 +113,29 @@ impl IndexStore {
 
     pub fn get_recent_txs(&self, limit: usize) -> Vec<&IndexedTx> {
         self.transactions.iter().rev().take(limit).collect()
+    }
+
+    pub fn get_recent_txs_paged(&self, limit: usize, offset: usize) -> Vec<&IndexedTx> {
+        self.transactions.iter().rev().skip(offset).take(limit).collect()
+    }
+
+    pub fn get_account_txs_paged(&self, account: &str, limit: usize, offset: usize) -> Vec<&IndexedTx> {
+        self.account_txs
+            .get(account)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .rev()
+                    .skip(offset)
+                    .take(limit)
+                    .filter_map(|&i| self.transactions.get(i))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_account_tx_count(&self, account: &str) -> usize {
+        self.account_txs.get(account).map(|v| v.len()).unwrap_or(0)
     }
 
     pub fn get_account_txs(&self, account: &str, limit: usize) -> Vec<&IndexedTx> {
@@ -127,6 +154,10 @@ impl IndexStore {
 
     pub fn get_recent_events(&self, limit: usize) -> Vec<&IndexedEvent> {
         self.events.iter().rev().take(limit).collect()
+    }
+
+    pub fn get_recent_events_paged(&self, limit: usize, offset: usize) -> Vec<&IndexedEvent> {
+        self.events.iter().rev().skip(offset).take(limit).collect()
     }
 
     /// Record that an account holds tokens from a contract.

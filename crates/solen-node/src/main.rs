@@ -411,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
                                 .iter()
                                 .map(|b| solen_p2p::messages::SyncBlock {
                                     header: b.header.clone(),
-                                    operations: vec![],
+                                    operations: b.operations.clone(),
                                     receipts: b.result.receipts.clone(),
                                 })
                                 .collect();

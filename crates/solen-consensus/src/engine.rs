@@ -61,6 +61,8 @@ pub struct FinalizedBlock {
     pub header: BlockHeader,
     pub result: BlockResult,
     pub attestations: Vec<Attestation>,
+    /// Original operations, stored for sync replay.
+    pub operations: Vec<UserOperation>,
 }
 
 /// A validator's attestation of a block.
@@ -148,6 +150,7 @@ impl ConsensusEngine {
                     gas_used: 0,
                 },
                 attestations: vec![],
+                operations: vec![],
             };
             chain.push(placeholder);
             info!(height = restored_height, epoch = restored_epoch, "restored chain height from state");
@@ -272,6 +275,7 @@ impl ConsensusEngine {
                 header: header.clone(),
                 result,
                 attestations,
+                operations: ops.clone(),
             };
 
             self.chain.write().unwrap().push(block.clone());
@@ -571,6 +575,7 @@ impl ConsensusEngine {
                 gas_used: 0,
             },
             attestations: vec![],
+            operations: vec![],
         };
 
         self.chain.write().unwrap().push(placeholder);
@@ -658,11 +663,12 @@ impl ConsensusEngine {
             .remove(&height)
             .unwrap_or_default();
 
-        if let Some((header, result, _ops, _proposed_at)) = block_data {
+        if let Some((header, result, ops, _proposed_at)) = block_data {
             let block = FinalizedBlock {
                 header: header.clone(),
                 result,
                 attestations,
+                operations: ops,
             };
 
             self.chain.write().unwrap().push(block.clone());
@@ -959,6 +965,7 @@ impl ConsensusEngine {
             header: header.clone(),
             result,
             attestations: vec![],
+            operations: operations.to_vec(),
         };
 
         self.chain.write().unwrap().push(block.clone());
@@ -1132,6 +1139,8 @@ struct SerializableBlock {
     state_root: [u8; 32],
     receipts: Vec<solen_execution::receipt::ExecutionReceipt>,
     gas_used: u64,
+    #[serde(default)]
+    operations: Vec<UserOperation>,
 }
 
 impl From<&FinalizedBlock> for SerializableBlock {
@@ -1141,6 +1150,7 @@ impl From<&FinalizedBlock> for SerializableBlock {
             state_root: b.result.state_root,
             receipts: b.result.receipts.clone(),
             gas_used: b.result.gas_used,
+            operations: b.operations.clone(),
         }
     }
 }
@@ -1155,6 +1165,7 @@ impl From<SerializableBlock> for FinalizedBlock {
                 gas_used: sb.gas_used,
             },
             attestations: vec![],
+            operations: sb.operations,
         }
     }
 }

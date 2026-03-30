@@ -7,7 +7,6 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
-use solen_execution::executor::BlockExecutor;
 use solen_execution::state::ReadonlyStateManager;
 use solen_types::transaction::UserOperation;
 
@@ -259,8 +258,7 @@ impl SolenApiServer for SolenRpc {
     fn simulate_operation(&self, op: UserOperation) -> RpcResult<SimulationResult> {
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
-        let executor = BlockExecutor::new();
-        let receipt = executor.simulate(store.as_ref(), &op);
+        let receipt = self.engine.simulate(&op, store.as_ref());
 
         Ok(SimulationResult {
             success: receipt.success,

@@ -188,6 +188,15 @@ impl ConsensusEngine {
         self.validator_set.clone()
     }
 
+    /// Simulate an operation using the engine's executor (with correct chain_id).
+    pub fn simulate(
+        &self,
+        op: &UserOperation,
+        store: &dyn solen_storage::StateStore,
+    ) -> solen_execution::receipt::ExecutionReceipt {
+        self.executor.simulate(store, op)
+    }
+
     pub fn height(&self) -> BlockHeight {
         let chain = self.chain.read().unwrap();
         chain.last().map(|b| b.header.height).unwrap_or(0)

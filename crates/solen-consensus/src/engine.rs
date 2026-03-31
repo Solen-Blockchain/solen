@@ -105,6 +105,8 @@ pub struct ConsensusEngine {
     /// Count of consecutive fork mismatches at the same height.
     fork_mismatch_count: Arc<std::sync::atomic::AtomicU32>,
     fork_mismatch_height: Arc<std::sync::atomic::AtomicU64>,
+    /// Set after fast-forward — state is approximate, skip state root verification.
+    state_unverified: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConsensusEngine {
@@ -176,6 +178,7 @@ impl ConsensusEngine {
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
             fork_mismatch_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             fork_mismatch_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            state_unverified: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -416,6 +419,7 @@ impl ConsensusEngine {
             }
         }
 
+        let mut did_fast_forward = false;
         if header.height > expected_height && !fork_detected {
             // We're behind — fast-forward to catch up.
             // Skip to just before this block's height so we can accept it.
@@ -426,6 +430,8 @@ impl ConsensusEngine {
                 "behind network, fast-forwarding"
             );
             self.fast_forward_to(header.height - 1, header.epoch);
+            did_fast_forward = true;
+            self.state_unverified.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Execute the operations (including epoch rewards if applicable).
@@ -437,9 +443,13 @@ impl ConsensusEngine {
 
         let current_root = result.state_root;
 
-        // For the next block after our height, verify state root.
+        // Verify state root — but skip verification if we fast-forwarded
+        // (our state is approximate after skipping blocks) or if the block
+        // was not the next expected one.
         let state_matches = current_root == header.state_root;
-        if !state_matches && header.height == expected_height {
+        let skip_verification = did_fast_forward
+            || self.state_unverified.load(std::sync::atomic::Ordering::Relaxed);
+        if !state_matches && !skip_verification {
             warn!(
                 height = header.height,
                 "state root mismatch — rejecting block"

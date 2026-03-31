@@ -19,7 +19,7 @@ use solen_types::transaction::UserOperation;
 use solen_types::{BlockHeight, Hash, ValidatorId};
 use thiserror::Error;
 use tokio::time::{interval, Duration};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::epoch::EpochManager;
 use crate::mempool::Mempool;
@@ -419,19 +419,16 @@ impl ConsensusEngine {
             }
         }
 
-        let mut did_fast_forward = false;
         if header.height > expected_height && !fork_detected {
-            // We're behind — fast-forward to catch up.
-            // Skip to just before this block's height so we can accept it.
-            info!(
+            // We're behind — don't fast-forward (it skips blocks and corrupts state).
+            // Just ignore this block and let the sync protocol fill the gap.
+            debug!(
                 our_height,
                 block_height = header.height,
                 gap = header.height - expected_height,
-                "behind network, fast-forwarding"
+                "block ahead of our height — waiting for sync"
             );
-            self.fast_forward_to(header.height - 1, header.epoch);
-            did_fast_forward = true;
-            self.state_unverified.store(true, std::sync::atomic::Ordering::Relaxed);
+            return false;
         }
 
         // Execute the operations (including epoch rewards if applicable).
@@ -443,13 +440,9 @@ impl ConsensusEngine {
 
         let current_root = result.state_root;
 
-        // Verify state root — but skip verification if we fast-forwarded
-        // (our state is approximate after skipping blocks) or if the block
-        // was not the next expected one.
+        // Verify state root matches.
         let state_matches = current_root == header.state_root;
-        let skip_verification = did_fast_forward
-            || self.state_unverified.load(std::sync::atomic::Ordering::Relaxed);
-        if !state_matches && !skip_verification {
+        if !state_matches {
             warn!(
                 height = header.height,
                 "state root mismatch — rejecting block"
@@ -468,9 +461,8 @@ impl ConsensusEngine {
 
             let pending = self.pending_blocks.read().unwrap();
             if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
-                // Check for double-sign (same proposer, different block) — but only
-                // when fully synced to avoid false positives during catch-up.
-                if !self.state_unverified.load(std::sync::atomic::Ordering::Relaxed) {
+                // Check for double-sign (same proposer, different block).
+                {
                     if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
                         let mut vs = self.validator_set.write().unwrap();
                         if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {

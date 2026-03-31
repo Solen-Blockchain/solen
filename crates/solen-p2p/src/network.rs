@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::behaviour::{SolenBehaviour, SolenBehaviourEvent};
-use crate::messages::{NetworkMessage, TOPIC_ATTESTATIONS, TOPIC_BLOCKS, TOPIC_SYNC, TOPIC_TRANSACTIONS};
+use crate::messages::NetworkMessage;
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -37,6 +37,8 @@ pub struct NetworkConfig {
     /// Optional 32-byte seed to derive a stable libp2p keypair.
     /// If set, the node keeps the same peer ID across restarts.
     pub identity_seed: Option<[u8; 32]>,
+    /// Chain ID — used to create network-specific gossip topics.
+    pub chain_id: u64,
 }
 
 impl Default for NetworkConfig {
@@ -47,6 +49,7 @@ impl Default for NetworkConfig {
             max_inbound: 50,
             max_outbound: 20,
             identity_seed: None,
+            chain_id: 0,
         }
     }
 }
@@ -159,10 +162,12 @@ impl NetworkService {
             "P2P connection limits configured"
         );
 
-        // Subscribe to topics.
-        let topics = [TOPIC_BLOCKS, TOPIC_TRANSACTIONS, TOPIC_ATTESTATIONS, TOPIC_SYNC];
-        for topic_name in &topics {
-            let topic = IdentTopic::new(*topic_name);
+        // Subscribe to network-specific topics (chain_id prevents cross-network interference).
+        use crate::messages::{topic_blocks, topic_transactions, topic_attestations, topic_sync};
+        let cid = config.chain_id;
+        let topic_names = [topic_blocks(cid), topic_transactions(cid), topic_attestations(cid), topic_sync(cid)];
+        for topic_name in &topic_names {
+            let topic = IdentTopic::new(topic_name);
             swarm
                 .behaviour_mut()
                 .gossipsub
@@ -232,7 +237,7 @@ impl NetworkService {
                     }
                     // Handle outbound messages.
                     Some(msg) = outbound_rx.recv() => {
-                        let topic = IdentTopic::new(msg.topic());
+                        let topic = IdentTopic::new(msg.topic_for_chain(cid));
                         if let Some(data) = msg.encode() {
                             if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, data) {
                                 debug!(error = %e, "failed to publish message");

@@ -5,11 +5,12 @@ use solen_types::block::BlockHeader;
 use solen_types::transaction::UserOperation;
 use solen_types::{Hash, ValidatorId};
 
-/// Gossip topic names.
-pub const TOPIC_BLOCKS: &str = "solen/blocks/1";
-pub const TOPIC_TRANSACTIONS: &str = "solen/transactions/1";
-pub const TOPIC_ATTESTATIONS: &str = "solen/attestations/1";
-pub const TOPIC_SYNC: &str = "solen/sync/1";
+/// Build network-specific gossip topic names.
+/// This ensures testnet, devnet, and mainnet nodes don't interfere.
+pub fn topic_blocks(chain_id: u64) -> String { format!("solen/{}/blocks/1", chain_id) }
+pub fn topic_transactions(chain_id: u64) -> String { format!("solen/{}/transactions/1", chain_id) }
+pub fn topic_attestations(chain_id: u64) -> String { format!("solen/{}/attestations/1", chain_id) }
+pub fn topic_sync(chain_id: u64) -> String { format!("solen/{}/sync/1", chain_id) }
 
 /// Messages that can be sent over the gossip network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,15 +58,15 @@ pub struct SyncBlock {
 }
 
 impl NetworkMessage {
-    /// Returns the gossip topic for this message type.
-    pub fn topic(&self) -> &'static str {
+    /// Returns the network-specific gossip topic for this message type.
+    pub fn topic_for_chain(&self, chain_id: u64) -> String {
         match self {
-            NetworkMessage::NewBlock { .. } => TOPIC_BLOCKS,
-            NetworkMessage::NewTransaction(_) => TOPIC_TRANSACTIONS,
-            NetworkMessage::Attestation { .. } => TOPIC_ATTESTATIONS,
-            NetworkMessage::SyncRequest { .. } => TOPIC_SYNC,
-            NetworkMessage::SyncBlocks { .. } => TOPIC_SYNC,
-            NetworkMessage::StatusAnnounce { .. } => TOPIC_SYNC,
+            NetworkMessage::NewBlock { .. } => topic_blocks(chain_id),
+            NetworkMessage::NewTransaction(_) => topic_transactions(chain_id),
+            NetworkMessage::Attestation { .. } => topic_attestations(chain_id),
+            NetworkMessage::SyncRequest { .. } => topic_sync(chain_id),
+            NetworkMessage::SyncBlocks { .. } => topic_sync(chain_id),
+            NetworkMessage::StatusAnnounce { .. } => topic_sync(chain_id),
         }
     }
 

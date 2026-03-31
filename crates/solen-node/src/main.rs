@@ -285,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
             listen_port: p2p_port,
             bootstrap_peers,
             identity_seed: Some(validator_seed),
+            chain_id: genesis.chain_id,
             ..Default::default()
         };
 

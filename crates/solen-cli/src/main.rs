@@ -69,8 +69,8 @@ enum Commands {
     RegisterValidator {
         /// Your key name
         from: String,
-        /// Amount to stake
-        amount: u128,
+        /// Amount in SOLEN (e.g., 500000 or 500000.5)
+        amount: String,
     },
 
     /// Delegate tokens to a validator
@@ -79,8 +79,8 @@ enum Commands {
         from: String,
         /// Validator address (hex)
         validator: String,
-        /// Amount to stake
-        amount: u128,
+        /// Amount in SOLEN (e.g., 1000 or 1000.5)
+        amount: String,
     },
 
     /// Undelegate tokens from a validator
@@ -89,8 +89,8 @@ enum Commands {
         from: String,
         /// Validator address (hex)
         validator: String,
-        /// Amount to unstake
-        amount: u128,
+        /// Amount in SOLEN (e.g., 1000 or 1000.5)
+        amount: String,
     },
 
     /// Transfer tokens between accounts
@@ -99,8 +99,8 @@ enum Commands {
         from: String,
         /// Recipient name or hex ID
         to: String,
-        /// Amount to transfer
-        amount: u128,
+        /// Amount in SOLEN (e.g., 100 or 100.5)
+        amount: String,
     },
 
     /// Deploy a WASM contract
@@ -177,16 +177,20 @@ async fn main() -> anyhow::Result<()> {
             commands::cmd_claim_vesting(&rpc, &from, cli.chain_id).await?
         }
         Commands::RegisterValidator { from, amount } => {
-            commands::cmd_register_validator(&rpc, &from, amount, cli.chain_id).await?
+            let base = parse_solen_amount(&amount)?;
+            commands::cmd_register_validator(&rpc, &from, base, cli.chain_id).await?
         }
         Commands::Stake { from, validator, amount } => {
-            commands::cmd_stake(&rpc, &from, &validator, amount, cli.chain_id).await?
+            let base = parse_solen_amount(&amount)?;
+            commands::cmd_stake(&rpc, &from, &validator, base, cli.chain_id).await?
         }
         Commands::Unstake { from, validator, amount } => {
-            commands::cmd_unstake(&rpc, &from, &validator, amount, cli.chain_id).await?
+            let base = parse_solen_amount(&amount)?;
+            commands::cmd_unstake(&rpc, &from, &validator, base, cli.chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
-            commands::cmd_transfer(&rpc, &from, &to, amount, cli.chain_id).await?
+            let base = parse_solen_amount(&amount)?;
+            commands::cmd_transfer(&rpc, &from, &to, base, cli.chain_id).await?
         }
         Commands::Deploy { from, wasm_file } => {
             commands::cmd_deploy(&rpc, &from, &wasm_file, cli.chain_id).await?
@@ -210,4 +214,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a SOLEN amount (e.g., "500000" or "100.5") to base units (u128).
+/// 1 SOLEN = 100,000,000 base units (8 decimals).
+fn parse_solen_amount(s: &str) -> anyhow::Result<u128> {
+    const DECIMALS: u32 = 8;
+    let multiplier = 10u128.pow(DECIMALS);
+
+    if let Some(dot) = s.find('.') {
+        let whole: u128 = s[..dot].parse().map_err(|_| anyhow::anyhow!("invalid amount"))?;
+        let frac_str = &s[dot + 1..];
+        let frac_len = frac_str.len();
+        if frac_len > DECIMALS as usize {
+            anyhow::bail!("too many decimal places (max {})", DECIMALS);
+        }
+        let frac: u128 = frac_str.parse().map_err(|_| anyhow::anyhow!("invalid amount"))?;
+        let frac_multiplier = 10u128.pow(DECIMALS - frac_len as u32);
+        Ok(whole * multiplier + frac * frac_multiplier)
+    } else {
+        let whole: u128 = s.parse().map_err(|_| anyhow::anyhow!("invalid amount"))?;
+        Ok(whole * multiplier)
+    }
 }

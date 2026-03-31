@@ -525,18 +525,18 @@ async fn main() -> anyhow::Result<()> {
                 if syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
                     let known = net_height_for_status.load(std::sync::atomic::Ordering::Relaxed);
 
-                    // At genesis (height 0), wait longer (60s / ~4 ticks) for peers
-                    // to join before starting solo production.
-                    // Wait longer at genesis for peers. After sync, wait for live
-                    // block verification (~60s) before falling back to solo production.
-                    let min_ticks = if height == 0 && known == 0 { 5 } else { 4 };
-
-                    if ticks_since_start >= min_ticks {
-                        if known == 0 || height + 1 >= known {
-                            tracing::info!(height, network_height = known, "no sync needed — resuming block production");
-                            syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    if height == 0 && known == 0 && ticks_since_start >= 5 {
+                        // Genesis: no peers yet after 75s, start solo.
+                        tracing::info!("no peers found — starting as first validator");
+                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if known > 0 && height + 1 >= known && ticks_since_start >= 4 {
+                        // We've heard from a peer AND we're at their height,
+                        // but haven't accepted a live block yet.
+                        // Safety fallback after 60s.
+                        tracing::info!(height, network_height = known, "timeout — resuming block production");
+                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Otherwise: keep waiting for a live block to verify state.
                 }
 
                 interval.tick().await;

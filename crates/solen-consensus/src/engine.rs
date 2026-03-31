@@ -457,23 +457,31 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Check for double-sign: if we already have a pending block at this
-        // height from the same proposer with a different state root, it's evidence
-        // of equivocation. Skip during catch-up (state_unverified) to avoid
-        // false positives from receiving blocks via different gossipsub paths.
-        if !self.state_unverified.load(std::sync::atomic::Ordering::Relaxed) {
+        // Reject if we already have a pending OR finalized block at this height.
+        {
+            // Check if already finalized in our chain.
+            let chain = self.chain.read().unwrap();
+            if chain.iter().any(|b| b.header.height == header.height) {
+                return false; // Already finalized.
+            }
+            drop(chain);
+
             let pending = self.pending_blocks.read().unwrap();
             if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
-                if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
-                    let mut vs = self.validator_set.write().unwrap();
-                    if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
-                        let mut store = self.store.write().unwrap();
-                        crate::slashing::persist_slashing_evidence(
-                            store.as_mut(), &slash_result, header.height,
-                        );
+                // Check for double-sign (same proposer, different block) — but only
+                // when fully synced to avoid false positives during catch-up.
+                if !self.state_unverified.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
+                        let mut vs = self.validator_set.write().unwrap();
+                        if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
+                            let mut store = self.store.write().unwrap();
+                            crate::slashing::persist_slashing_evidence(
+                                store.as_mut(), &slash_result, header.height,
+                            );
+                        }
                     }
-                    return false;
                 }
+                return false; // Already have a block at this height.
             }
         }
 

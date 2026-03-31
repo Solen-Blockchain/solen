@@ -116,7 +116,8 @@ fn execute_staking_call(
             drop(state);
 
             staking = StakingContract::load(store);
-            match staking.register_validator(*sender, amount) {
+            let current_epoch = read_current_epoch(store);
+            match staking.register_validator_at_epoch(*sender, amount, current_epoch) {
                 Ok(()) => {
                     let mut data = Vec::with_capacity(48);
                     data.extend_from_slice(sender);

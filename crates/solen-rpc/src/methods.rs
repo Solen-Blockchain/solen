@@ -106,6 +106,21 @@ pub struct CallViewResult {
     pub error: Option<String>,
 }
 
+/// Governance proposal info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceProposalInfo {
+    pub id: u64,
+    pub proposer: String,
+    pub action: String,
+    pub description: String,
+    pub status: String,
+    pub voting_end_epoch: u64,
+    pub execute_after_epoch: u64,
+    pub total_for: String,
+    pub total_against: String,
+    pub vote_count: usize,
+}
+
 /// Vesting schedule info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VestingInfo {
@@ -145,6 +160,9 @@ pub trait SolenApi {
 
     #[method(name = "solen_getStakingInfo")]
     fn get_staking_info(&self, account_id: String) -> RpcResult<StakingInfo>;
+
+    #[method(name = "solen_getGovernanceProposals")]
+    fn get_governance_proposals(&self) -> RpcResult<Vec<GovernanceProposalInfo>>;
 
     /// Read-only contract call — no signature needed, no state changes.
     #[method(name = "solen_callView")]
@@ -291,6 +309,29 @@ impl SolenApiServer for SolenRpc {
                 })
                 .collect(),
         })
+    }
+
+    fn get_governance_proposals(&self) -> RpcResult<Vec<GovernanceProposalInfo>> {
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let gov = solen_system_contracts::governance::GovernanceContract::load(store.as_ref());
+
+        let proposals = gov.proposals.iter().map(|p| {
+            GovernanceProposalInfo {
+                id: p.id,
+                proposer: hex_encode(&p.proposer),
+                action: format!("{:?}", p.action),
+                description: p.description.clone(),
+                status: format!("{:?}", p.status),
+                voting_end_epoch: p.voting_end_epoch,
+                execute_after_epoch: p.execute_after_epoch,
+                total_for: p.total_for.to_string(),
+                total_against: p.total_against.to_string(),
+                vote_count: p.votes.len(),
+            }
+        }).collect();
+
+        Ok(proposals)
     }
 
     fn call_view(

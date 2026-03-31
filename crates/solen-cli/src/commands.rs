@@ -151,7 +151,7 @@ pub async fn cmd_register_validator(
     if result.accepted {
         println!("Validator registered successfully.");
         println!("  Validator ID: {}", sender_hex);
-        println!("  Self-stake:   {} SOLEN", amount);
+        println!("  Self-stake:   {} SOLEN", format_solen(amount));
         println!("\nStart your validator node with --validator-seed to begin producing blocks.");
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
@@ -202,7 +202,7 @@ pub async fn cmd_stake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Stake submitted successfully.");
-        println!("  Delegated {} to {}...", amount, &validator_id[..16]);
+        println!("  Delegated {} SOLEN to {}...", format_solen(amount), &validator_id[..16]);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
     }
@@ -252,7 +252,7 @@ pub async fn cmd_unstake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Unstake submitted successfully.");
-        println!("  Undelegating {} from {}...", amount, &validator_id[..16]);
+        println!("  Undelegating {} SOLEN from {}...", format_solen(amount), &validator_id[..16]);
         println!("  Funds available after unbonding period (7 epochs).");
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -644,6 +644,18 @@ pub async fn cmd_multisig(
     }
 
     Ok(())
+}
+
+/// Format base units as human-readable SOLEN amount.
+fn format_solen(base_units: u128) -> String {
+    let whole = base_units / 100_000_000;
+    let frac = base_units % 100_000_000;
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        let frac_str = format!("{:08}", frac).trim_end_matches('0').to_string();
+        format!("{}.{}", whole, frac_str)
+    }
 }
 
 fn format_timestamp(ms: u64) -> String {

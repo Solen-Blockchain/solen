@@ -253,8 +253,12 @@ impl NetworkService {
                                 mdns::Event::Discovered(peers),
                             )) => {
                                 for (peer_id, addr) in peers {
-                                    debug!(%peer_id, %addr, "discovered peer via mDNS");
-                                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                    // Only add mDNS peers on the same P2P port (same network).
+                                    let same_port = addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::Tcp(p) if p == config.listen_port));
+                                    if same_port {
+                                        debug!(%peer_id, %addr, "discovered peer via mDNS");
+                                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                    }
                                 }
                             }
                             SwarmEvent::Behaviour(SolenBehaviourEvent::Mdns(

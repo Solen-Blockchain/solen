@@ -105,6 +105,7 @@ impl NetworkService {
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(1))
             .validation_mode(gossipsub::ValidationMode::Permissive)
+            .max_transmit_size(1024 * 1024) // 1 MB — sync blocks include operations + receipts
             .mesh_n(8)              // target mesh size
             .mesh_n_low(4)          // minimum before requesting more
             .mesh_n_high(12)        // maximum before pruning

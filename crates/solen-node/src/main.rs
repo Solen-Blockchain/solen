@@ -402,16 +402,10 @@ async fn main() -> anyhow::Result<()> {
                                 from_height: our_height + 1,
                                 to_height: height,
                             });
-                        } else if syncing_for_p2p.load(std::sync::atomic::Ordering::Relaxed) {
-                            // Peer is at our height (or behind) — we're in sync.
-                            if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                                tracing::info!(
-                                    our_height,
-                                    peer_height = height,
-                                    "peer confirmed we are in sync — resuming block production"
-                                );
-                            }
                         }
+                        // Syncing flag is only cleared by:
+                        // 1. Successfully accepting a live block (state root verified)
+                        // 2. Status broadcast timeout (safety fallback)
                     }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
                         // Serve blocks to the requesting peer.

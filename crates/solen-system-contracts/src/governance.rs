@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use solen_types::AccountId;
 use thiserror::Error;
 
-/// Voting period in epochs.
-pub const VOTING_PERIOD: u64 = 14;
+/// Default voting period in epochs (used if not set in genesis).
+pub const DEFAULT_VOTING_PERIOD: u64 = 14;
 
 /// Timelock delay after passing (in epochs).
 pub const TIMELOCK_DELAY: u64 = 3;
@@ -97,6 +97,13 @@ pub struct GovernanceContract {
     pub proposals: Vec<Proposal>,
     next_proposal_id: u64,
     pub is_paused: bool,
+    /// Voting period in epochs (configurable via genesis).
+    #[serde(default = "default_voting_period")]
+    pub voting_period: u64,
+}
+
+fn default_voting_period() -> u64 {
+    DEFAULT_VOTING_PERIOD
 }
 
 impl GovernanceContract {
@@ -115,7 +122,7 @@ impl GovernanceContract {
         let id = self.next_proposal_id;
         self.next_proposal_id += 1;
 
-        let voting_end = current_epoch + VOTING_PERIOD;
+        let voting_end = current_epoch + self.voting_period;
         let execute_after = voting_end + TIMELOCK_DELAY;
 
         self.proposals.push(Proposal {

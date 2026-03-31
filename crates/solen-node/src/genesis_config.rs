@@ -34,6 +34,9 @@ pub struct GenesisConfig {
     /// Investor vesting recipients.
     #[serde(default)]
     pub investor_vesting: Vec<VestingRecipient>,
+    /// Governance voting period in epochs (default: 14 for testnet, 604800 for mainnet ~14 days).
+    #[serde(default)]
+    pub governance_voting_period: u64,
 }
 
 /// A validator in the genesis set.
@@ -300,6 +303,14 @@ impl GenesisConfig {
         }
         vesting.save(store);
 
+        // Initialize governance contract with voting period.
+        if self.governance_voting_period > 0 {
+            let mut gov = solen_system_contracts::governance::GovernanceContract::new();
+            gov.voting_period = self.governance_voting_period;
+            gov.save(store);
+            info!(voting_period = self.governance_voting_period, "governance initialized");
+        }
+
         info!(
             chain_name = %self.chain_name,
             chain_id = self.chain_id,
@@ -350,6 +361,7 @@ impl GenesisConfig {
             }),
             team_vesting: vec![],
             investor_vesting: vec![],
+            governance_voting_period: 14, // ~46 min for dev testing
         }
     }
 
@@ -417,6 +429,7 @@ impl GenesisConfig {
                     amount: 5_000_000_000_000_000, // 50M SOLEN
                 },
             ],
+            governance_voting_period: 14, // ~46 min for testnet testing
         }
     }
 }

@@ -1009,7 +1009,7 @@ impl ConsensusEngine {
             let mut vs = self.validator_set.write().unwrap();
             em.process_epoch_transition(&mut vs);
 
-            // Sync validator set from staking contract.
+            // Sync new validators from staking contract into consensus set.
             let store = self.store.read().unwrap();
             let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
 
@@ -1017,18 +1017,16 @@ impl ConsensusEngine {
                 if !sv.is_active {
                     continue;
                 }
-                if vs.get_mut(&sv.id).is_none() {
-                    // New validator registered via staking contract — add to consensus set.
-                    let info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
-                    vs.add(info);
-                    info!(
+                // Only add NEW validators — don't modify existing ones.
+                let exists = vs.all().iter().any(|v| v.id == sv.id);
+                if !exists {
+                    let new_info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
+                    vs.add(new_info);
+                    tracing::info!(
                         validator = ?&sv.id[..4],
                         stake = sv.total_stake(),
                         "new validator joined consensus set"
                     );
-                } else if let Some(v) = vs.get_mut(&sv.id) {
-                    // Update stake for existing validators.
-                    v.stake = sv.total_stake();
                 }
             }
         }

@@ -105,8 +105,6 @@ pub struct ConsensusEngine {
     /// Count of consecutive fork mismatches at the same height.
     fork_mismatch_count: Arc<std::sync::atomic::AtomicU32>,
     fork_mismatch_height: Arc<std::sync::atomic::AtomicU64>,
-    /// Set after fast-forward — state is approximate, skip state root verification.
-    state_unverified: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConsensusEngine {
@@ -178,7 +176,6 @@ impl ConsensusEngine {
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
             fork_mismatch_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             fork_mismatch_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            state_unverified: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -583,43 +580,6 @@ impl ConsensusEngine {
 
             info!("full resync initiated — will rebuild state from peers via StatusAnnounce");
         }
-    }
-
-    /// Fast-forward the chain height to catch up with the network.
-    /// This skips intermediate blocks (we don't have them) and
-    /// updates the chain metadata so the next accept_block works.
-    fn fast_forward_to(&self, height: u64, epoch: u64) {
-        let placeholder = FinalizedBlock {
-            header: BlockHeader {
-                height,
-                epoch,
-                parent_hash: [0u8; 32],
-                state_root: self.store.read().unwrap().state_root(),
-                transactions_root: [0u8; 32],
-                receipts_root: [0u8; 32],
-                proposer: [0u8; 32],
-                timestamp_ms: now_ms(),
-            },
-            result: BlockResult {
-                state_root: self.store.read().unwrap().state_root(),
-                receipts: vec![],
-                gas_used: 0,
-            },
-            attestations: vec![],
-            operations: vec![],
-        };
-
-        self.chain.write().unwrap().push(placeholder);
-
-        // Persist the new height.
-        {
-            let mut store = self.store.write().unwrap();
-            save_chain_meta(store.as_mut(), height, epoch);
-        }
-
-        self.epoch_manager.write().unwrap().current_epoch = epoch;
-
-        info!(height, epoch, "fast-forwarded chain height");
     }
 
     /// Accept an attestation from a validator. If quorum is reached,

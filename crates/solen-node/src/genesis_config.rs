@@ -184,7 +184,7 @@ impl GenesisConfig {
 
             genesis_accounts.push(GenesisAccount {
                 id,
-                balance: 1_000_000_000_000,
+                balance: 1_000_000_000_000_000, // 10M SOLEN for testnet faucet
                 auth_methods: vec![AuthMethod::Ed25519 { public_key }],
             });
 

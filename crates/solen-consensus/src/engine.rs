@@ -1000,13 +1000,37 @@ impl ConsensusEngine {
         self.try_epoch_transition(height);
     }
 
-    /// Process epoch transition if at a boundary. Acquires locks in consistent
-    /// order (epoch_manager first, then validator_set) to prevent deadlocks.
+    /// Process epoch transition if at a boundary. Syncs the consensus
+    /// validator set with the staking contract so new validators are
+    /// included in proposer rotation and quorum calculations.
     fn try_epoch_transition(&self, height: u64) {
         let mut em = self.epoch_manager.write().unwrap();
         if em.is_epoch_boundary(height) {
             let mut vs = self.validator_set.write().unwrap();
             em.process_epoch_transition(&mut vs);
+
+            // Sync validator set from staking contract.
+            let store = self.store.read().unwrap();
+            let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+
+            for sv in &staking.validators {
+                if !sv.is_active {
+                    continue;
+                }
+                if vs.get_mut(&sv.id).is_none() {
+                    // New validator registered via staking contract — add to consensus set.
+                    let info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
+                    vs.add(info);
+                    info!(
+                        validator = ?&sv.id[..4],
+                        stake = sv.total_stake(),
+                        "new validator joined consensus set"
+                    );
+                } else if let Some(v) = vs.get_mut(&sv.id) {
+                    // Update stake for existing validators.
+                    v.stake = sv.total_stake();
+                }
+            }
         }
     }
 

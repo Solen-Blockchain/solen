@@ -97,6 +97,11 @@ impl ValidatorSet {
         self.validators.iter_mut().find(|v| v.id == *id)
     }
 
+    /// Add a new validator to the set.
+    pub fn add(&mut self, info: ValidatorInfo) {
+        self.validators.push(info);
+    }
+
     /// Jail a validator (remove from active set).
     pub fn jail(&mut self, id: &ValidatorId) -> bool {
         if let Some(v) = self.get_mut(id) {

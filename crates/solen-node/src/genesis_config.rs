@@ -339,7 +339,7 @@ impl GenesisConfig {
                     id_hex: None,
                     balance: 5_000,
                     public_key_hex: None,
-                    seed_hex: None,
+                    seed_hex: Some("0b".repeat(32)),
                 },
             ],
             faucet: Some(FaucetConfig {

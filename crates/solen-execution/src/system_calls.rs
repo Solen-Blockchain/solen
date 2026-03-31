@@ -90,6 +90,55 @@ fn execute_staking_call(
     let mut events = Vec::new();
 
     let result = match method {
+        "register" => {
+            // Register as a new validator with self-stake.
+            // args: amount[16] (stake amount, must be >= MIN_VALIDATOR_STAKE)
+            // The sender becomes the validator (validator ID = sender).
+            let amount = match read_u128(args, 0) {
+                Some(a) => a,
+                None => return err("invalid args: need amount[16]"),
+            };
+
+            // Deduct from sender balance.
+            let mut state = StateManager::new(store);
+            match state.require_account(sender) {
+                Ok(mut acct) => {
+                    if acct.balance < amount {
+                        return err("insufficient balance for registration");
+                    }
+                    acct.balance -= amount;
+                    if let Err(e) = state.save_account(&acct) {
+                        return err(&format!("state save failed: {e}"));
+                    }
+                }
+                Err(e) => return err(&e.to_string()),
+            }
+            drop(state);
+
+            staking = StakingContract::load(store);
+            match staking.register_validator(*sender, amount) {
+                Ok(()) => {
+                    let mut data = Vec::with_capacity(48);
+                    data.extend_from_slice(sender);
+                    data.extend_from_slice(&amount.to_le_bytes());
+                    events.push(Event {
+                        emitter: STAKING_ADDRESS,
+                        topic: b"validator_registered".to_vec(),
+                        data,
+                    });
+                    Ok(())
+                }
+                Err(e) => {
+                    // Refund on failure.
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(amount);
+                        let _ = state.save_account(&acct);
+                    }
+                    Err(e.to_string())
+                }
+            }
+        }
         "delegate" => {
             // args: validator_id[32] + amount[16]
             let validator = match read_account_id(args, 0) {

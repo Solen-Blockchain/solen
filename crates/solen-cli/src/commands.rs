@@ -111,6 +111,55 @@ pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str, chain_id: u64) -> Re
 
 // ── Stake ───────────────────────────────────────────────────────
 
+pub async fn cmd_register_validator(
+    rpc: &RpcClient,
+    from: &str,
+    amount: u128,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Build args: amount[16 LE]
+    let amount_bytes = amount.to_le_bytes();
+    let args = hex_encode(&amount_bytes);
+
+    let staking_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x01;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "register".to_string(),
+            args: hex_decode(&args)?,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Validator registered successfully.");
+        println!("  Validator ID: {}", sender_hex);
+        println!("  Self-stake:   {} SOLEN", amount);
+        println!("\nStart your validator node with --validator-seed to begin producing blocks.");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 pub async fn cmd_stake(
     rpc: &RpcClient,
     from: &str,

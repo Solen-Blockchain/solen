@@ -65,6 +65,14 @@ enum Commands {
         from: String,
     },
 
+    /// Register as a new validator with self-stake (min 500,000 SOLEN)
+    RegisterValidator {
+        /// Your key name
+        from: String,
+        /// Amount to stake
+        amount: u128,
+    },
+
     /// Delegate tokens to a validator
     Stake {
         /// Your key name
@@ -167,6 +175,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validators => commands::cmd_validators(&rpc).await?,
         Commands::ClaimVesting { from } => {
             commands::cmd_claim_vesting(&rpc, &from, cli.chain_id).await?
+        }
+        Commands::RegisterValidator { from, amount } => {
+            commands::cmd_register_validator(&rpc, &from, amount, cli.chain_id).await?
         }
         Commands::Stake { from, validator, amount } => {
             commands::cmd_stake(&rpc, &from, &validator, amount, cli.chain_id).await?

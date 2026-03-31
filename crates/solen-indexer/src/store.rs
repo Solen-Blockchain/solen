@@ -60,6 +60,8 @@ pub struct IndexStore {
     pub account_txs: HashMap<String, Vec<usize>>,
     /// Account -> set of token contract IDs that have sent tokens to this account.
     pub account_tokens: HashMap<String, HashSet<String>>,
+    /// Contract → set of accounts that hold tokens from this contract.
+    pub token_holders: HashMap<String, HashSet<String>>,
     /// Set of known contract addresses (accounts with code deployed).
     pub contracts: HashSet<String>,
     /// Published contract source code by code_hash.
@@ -182,6 +184,18 @@ impl IndexStore {
             .entry(account.to_string())
             .or_default()
             .insert(contract.to_string());
+        self.token_holders
+            .entry(contract.to_string())
+            .or_default()
+            .insert(account.to_string());
+    }
+
+    /// Get all known holders of a token contract.
+    pub fn get_token_holders(&self, contract: &str) -> Vec<String> {
+        self.token_holders
+            .get(contract)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Record a deployed contract.

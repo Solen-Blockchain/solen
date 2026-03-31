@@ -74,6 +74,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/accounts/:account/tokens", get(get_account_tokens))
         .route("/api/contracts/:code_hash/source", get(get_contract_source).post(publish_contract_source))
         .route("/api/contracts", get(get_contracts))
+        .route("/api/contracts/:contract/holders", get(get_token_holders))
         .with_state(state)
 }
 
@@ -255,6 +256,14 @@ async fn get_validator_stats(
 
     stats.sort_by(|a, b| b.blocks_proposed.cmp(&a.blocks_proposed));
     Json(stats)
+}
+
+async fn get_token_holders(
+    State(state): State<ApiState>,
+    Path(contract): Path<String>,
+) -> Json<Vec<String>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_token_holders(&contract))
 }
 
 async fn get_contract_source(

@@ -111,6 +111,166 @@ pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str, chain_id: u64) -> Re
 
 // ── Stake ───────────────────────────────────────────────────────
 
+// ── Governance ─────────────────────────────────────────────────
+
+pub async fn cmd_propose_block_time(
+    rpc: &RpcClient,
+    from: &str,
+    new_block_time_ms: u64,
+    description: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&new_block_time_ms.to_le_bytes());
+    args.extend_from_slice(description.as_bytes());
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "propose_set_block_time".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Proposal submitted: change block time to {}ms", new_block_time_ms);
+        println!("  Description: {}", description);
+        println!("\nVoting period: 14 epochs. Use `solen vote` to vote.");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
+pub async fn cmd_vote(
+    rpc: &RpcClient,
+    from: &str,
+    proposal_id: u64,
+    support: bool,
+    weight: u128,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&proposal_id.to_le_bytes());
+    args.push(if support { 1 } else { 0 });
+    args.extend_from_slice(&weight.to_le_bytes());
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "vote".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Vote submitted: {} on proposal #{}", if support { "YES" } else { "NO" }, proposal_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
+pub async fn cmd_finalize_proposal(
+    rpc: &RpcClient,
+    from: &str,
+    proposal_id: u64,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "finalize".to_string(),
+            args: proposal_id.to_le_bytes().to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Proposal #{} finalized.", proposal_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
+pub async fn cmd_execute_proposal(
+    rpc: &RpcClient,
+    from: &str,
+    proposal_id: u64,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "execute".to_string(),
+            args: proposal_id.to_le_bytes().to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Proposal #{} executed!", proposal_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
 pub async fn cmd_register_validator(
     rpc: &RpcClient,
     from: &str,

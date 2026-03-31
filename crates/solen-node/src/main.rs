@@ -611,7 +611,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Poll frequently but enforce block_time between proposals.
         let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(200));
-        let min_interval = std::time::Duration::from_millis(block_time);
+        let mut min_interval = std::time::Duration::from_millis(block_time);
         let quorum_timeout = std::time::Duration::from_secs(10);
         let mut last_finalized_height = engine_clone.height();
         let mut last_finalized_at = std::time::Instant::now();
@@ -652,6 +652,23 @@ async fn main() -> anyhow::Result<()> {
             if current_height > last_finalized_height {
                 last_finalized_height = current_height;
                 last_finalized_at = std::time::Instant::now();
+
+                // Check if block time was changed by governance.
+                if current_height % 100 == 0 {
+                    let store_lock = engine_clone.store();
+                    let store = store_lock.read().unwrap();
+                    if let Ok(Some(data)) = store.get(b"__config_block_time__") {
+                        if data.len() >= 8 {
+                            let mut buf = [0u8; 8];
+                            buf.copy_from_slice(&data[..8]);
+                            let new_bt = u64::from_le_bytes(buf);
+                            if new_bt > 0 && new_bt != min_interval.as_millis() as u64 {
+                                info!(old_ms = min_interval.as_millis(), new_ms = new_bt, "block time updated by governance");
+                                min_interval = std::time::Duration::from_millis(new_bt);
+                            }
+                        }
+                    }
+                }
             }
 
             // Enforce minimum interval since last finalized block.

@@ -65,6 +65,46 @@ enum Commands {
         from: String,
     },
 
+    /// Propose changing the block time (governance)
+    ProposeBlockTime {
+        /// Your key name
+        from: String,
+        /// New block time in milliseconds
+        new_block_time_ms: u64,
+        /// Description of the proposal
+        description: String,
+    },
+
+    /// Vote on a governance proposal
+    Vote {
+        /// Your key name
+        from: String,
+        /// Proposal ID
+        proposal_id: u64,
+        /// Vote yes or no
+        #[arg(long)]
+        yes: bool,
+        /// Stake weight for the vote
+        #[arg(long, default_value = "1")]
+        weight: String,
+    },
+
+    /// Finalize a governance proposal after voting period
+    FinalizeProposal {
+        /// Your key name
+        from: String,
+        /// Proposal ID
+        proposal_id: u64,
+    },
+
+    /// Execute a passed governance proposal after timelock
+    ExecuteProposal {
+        /// Your key name
+        from: String,
+        /// Proposal ID
+        proposal_id: u64,
+    },
+
     /// Register as a new validator with self-stake (min 500,000 SOLEN)
     RegisterValidator {
         /// Your key name
@@ -175,6 +215,19 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validators => commands::cmd_validators(&rpc).await?,
         Commands::ClaimVesting { from } => {
             commands::cmd_claim_vesting(&rpc, &from, cli.chain_id).await?
+        }
+        Commands::ProposeBlockTime { from, new_block_time_ms, description } => {
+            commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, cli.chain_id).await?
+        }
+        Commands::Vote { from, proposal_id, yes, weight } => {
+            let base = parse_solen_amount(&weight)?;
+            commands::cmd_vote(&rpc, &from, proposal_id, yes, base, cli.chain_id).await?
+        }
+        Commands::FinalizeProposal { from, proposal_id } => {
+            commands::cmd_finalize_proposal(&rpc, &from, proposal_id, cli.chain_id).await?
+        }
+        Commands::ExecuteProposal { from, proposal_id } => {
+            commands::cmd_execute_proposal(&rpc, &from, proposal_id, cli.chain_id).await?
         }
         Commands::RegisterValidator { from, amount } => {
             let base = parse_solen_amount(&amount)?;

@@ -293,6 +293,26 @@ fn execute_governance_call(
             });
             Ok(())
         }
+        "propose_set_block_time" => {
+            let new_block_time = match read_u64(args, 0) {
+                Some(t) => t,
+                None => return err("invalid args: need new_block_time_ms[8]"),
+            };
+            let desc = String::from_utf8_lossy(&args[8..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetBlockTime { new_block_time_ms: new_block_time },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
         "vote" => {
             // args: proposal_id[8] + support[1] + stake_weight[16]
             let proposal_id = match read_u64(args, 0) {
@@ -309,6 +329,75 @@ fn execute_governance_call(
                         emitter: GOVERNANCE_ADDRESS,
                         topic: b"voted".to_vec(),
                         data: proposal_id.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "finalize" => {
+            let proposal_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need proposal_id[8]"),
+            };
+            let epoch = read_current_epoch(store);
+
+            // Read total stake from staking contract for quorum calculation.
+            let staking = solen_system_contracts::staking::StakingContract::load(store);
+            let total_stake: u128 = staking.validators.iter()
+                .filter(|v| v.is_active)
+                .map(|v| v.total_stake())
+                .sum();
+
+            match gov.finalize(proposal_id, total_stake, epoch) {
+                Ok(status) => {
+                    let status_str = format!("{:?}", status);
+                    events.push(Event {
+                        emitter: GOVERNANCE_ADDRESS,
+                        topic: b"proposal_finalized".to_vec(),
+                        data: {
+                            let mut d = proposal_id.to_le_bytes().to_vec();
+                            d.extend_from_slice(status_str.as_bytes());
+                            d
+                        },
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "execute" => {
+            let proposal_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need proposal_id[8]"),
+            };
+            let epoch = read_current_epoch(store);
+
+            match gov.execute(proposal_id, epoch) {
+                Ok(action) => {
+                    // Apply the action to chain state.
+                    let action_desc = match &action {
+                        ProposalAction::SetBaseFee { new_fee } => {
+                            // Store new base fee in chain config.
+                            let _ = store.put(b"__config_base_fee__", &new_fee.to_le_bytes());
+                            format!("base_fee={}", new_fee)
+                        }
+                        ProposalAction::SetBlockTime { new_block_time_ms } => {
+                            let _ = store.put(b"__config_block_time__", &new_block_time_ms.to_le_bytes());
+                            format!("block_time={}ms", new_block_time_ms)
+                        }
+                        ProposalAction::EmergencyPause => "paused".to_string(),
+                        ProposalAction::EmergencyResume => "resumed".to_string(),
+                        _ => format!("{:?}", action),
+                    };
+                    events.push(Event {
+                        emitter: GOVERNANCE_ADDRESS,
+                        topic: b"proposal_executed".to_vec(),
+                        data: {
+                            let mut d = proposal_id.to_le_bytes().to_vec();
+                            d.extend_from_slice(action_desc.as_bytes());
+                            d
+                        },
                     });
                     Ok(())
                 }

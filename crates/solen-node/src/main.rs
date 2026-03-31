@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         let net_for_attest = handle.clone();
         let syncing_for_p2p = syncing.clone();
         let net_height_for_p2p = network_height.clone();
+        let peer_heights_for_p2p = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
         let attestation_kp = Arc::new(validator_kp);
         let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
@@ -380,26 +381,44 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     NetworkMessage::StatusAnnounce { height, .. } => {
-                        // Track the highest known network height.
-                        net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
+                        // Track peer heights to prevent a single rogue node from
+                        // stalling the network with a fake longer chain.
+                        peer_heights_for_p2p.lock().unwrap().push(height);
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
-                            // More than 1 block behind — enter sync mode.
-                            syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
-                            tracing::info!(
-                                our_height,
-                                peer_height = height,
-                                "peer is ahead, requesting sync"
-                            );
-                            net_for_attest.broadcast(NetworkMessage::SyncRequest {
-                                from_height: our_height + 1,
-                                to_height: height,
-                            });
+                            // Check if multiple peers agree we're behind before
+                            // entering sync mode. A single rogue peer can't stall us.
+                            let peer_h = peer_heights_for_p2p.lock().unwrap();
+                            let peers_ahead = peer_h.iter().filter(|&&h| h > our_height + 1).count();
+                            let total_peers = peer_h.len();
+                            drop(peer_h);
+
+                            // Need at least 2 peers ahead, or if only 1 peer total, trust it.
+                            if peers_ahead >= 2 || total_peers <= 1 {
+                                net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
+                                syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!(
+                                    our_height,
+                                    peer_height = height,
+                                    peers_ahead,
+                                    "peers confirm we are behind, requesting sync"
+                                );
+                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                    from_height: our_height + 1,
+                                    to_height: height,
+                                });
+                            } else {
+                                tracing::debug!(
+                                    our_height,
+                                    peer_height = height,
+                                    peers_ahead,
+                                    "single peer claims higher height — waiting for confirmation"
+                                );
+                            }
+                        } else {
+                            net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
                         }
-                        // Syncing flag is only cleared by:
-                        // 1. Successfully accepting a live block (state root verified)
-                        // 2. Status broadcast timeout (safety fallback)
                     }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
                         // Serve blocks to the requesting peer.

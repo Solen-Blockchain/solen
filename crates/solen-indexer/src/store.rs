@@ -30,6 +30,16 @@ pub struct IndexedTx {
     pub events: Vec<IndexedEvent>,
 }
 
+/// Published contract source code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractSource {
+    pub code_hash: String,
+    pub source_code: String,
+    pub language: String,
+    pub compiler_version: String,
+    pub published_at: u64,
+}
+
 /// An indexed event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedEvent {
@@ -52,6 +62,8 @@ pub struct IndexStore {
     pub account_tokens: HashMap<String, HashSet<String>>,
     /// Set of known contract addresses (accounts with code deployed).
     pub contracts: HashSet<String>,
+    /// Published contract source code by code_hash.
+    pub contract_sources: HashMap<String, ContractSource>,
     /// Blocks proposed per validator.
     pub blocks_proposed: HashMap<String, u64>,
     /// Last block height proposed per validator.

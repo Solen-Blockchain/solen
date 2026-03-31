@@ -160,7 +160,8 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
 // ── Method implementations ──────────────────────────────────────
 
 fn do_abi() -> i32 {
-    sdk::return_value(br#"[
+    sdk::return_value(br#"{
+"methods":[
 {"name":"init","args":"name_len[1]+name[]+symbol_len[1]+symbol[]","mutates":true},
 {"name":"mint","args":"to[32]+amount[16]","mutates":true},
 {"name":"transfer","args":"to[32]+amount[16]","mutates":true},
@@ -173,7 +174,14 @@ fn do_abi() -> i32 {
 {"name":"symbol","args":"","mutates":false},
 {"name":"decimals","args":"","mutates":false},
 {"name":"owner","args":"","mutates":false}
-]"#)
+],
+"events":[
+{"topic":"initialized","data":"owner[32]"},
+{"topic":"mint","data":"to[32]+amount[16]"},
+{"topic":"transfer","data":"to[32]+amount[16]"},
+{"topic":"approval","data":"amount[16]"}
+]
+}"#)
 }
 
 fn do_init(args: &[u8]) -> i32 {

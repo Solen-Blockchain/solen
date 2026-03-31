@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, Query, State};
 use axum::response::Json;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
@@ -72,6 +72,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/validators", get(get_validators))
         .route("/api/validators/stats", get(get_validator_stats))
         .route("/api/accounts/:account/tokens", get(get_account_tokens))
+        .route("/api/contracts/:code_hash/source", get(get_contract_source).post(publish_contract_source))
         .route("/api/contracts", get(get_contracts))
         .with_state(state)
 }
@@ -254,6 +255,49 @@ async fn get_validator_stats(
 
     stats.sort_by(|a, b| b.blocks_proposed.cmp(&a.blocks_proposed));
     Json(stats)
+}
+
+async fn get_contract_source(
+    State(state): State<ApiState>,
+    Path(code_hash): Path<String>,
+) -> Json<Option<crate::store::ContractSource>> {
+    let store = state.store.read().unwrap();
+    Json(store.contract_sources.get(&code_hash).cloned())
+}
+
+#[derive(Deserialize)]
+struct PublishSourceRequest {
+    code_hash: String,
+    source_code: String,
+    language: Option<String>,
+    compiler_version: Option<String>,
+}
+
+async fn publish_contract_source(
+    State(state): State<ApiState>,
+    Path(code_hash): Path<String>,
+    Json(body): Json<PublishSourceRequest>,
+) -> Json<serde_json::Value> {
+    let mut store = state.store.write().unwrap();
+
+    // Verify the code_hash is a known contract.
+    if !store.contracts.contains(&code_hash) && !store.contracts.contains(&body.code_hash) {
+        return Json(serde_json::json!({"error": "unknown contract code hash"}));
+    }
+
+    let source = crate::store::ContractSource {
+        code_hash: code_hash.clone(),
+        source_code: body.source_code,
+        language: body.language.unwrap_or_else(|| "rust".to_string()),
+        compiler_version: body.compiler_version.unwrap_or_else(|| "unknown".to_string()),
+        published_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
+    store.contract_sources.insert(code_hash, source);
+    Json(serde_json::json!({"success": true}))
 }
 
 async fn get_account_tokens(

@@ -23,6 +23,13 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
         tx_count: block.result.receipts.len(),
         gas_used: block.result.gas_used,
     };
+    // Track proposer stats.
+    let proposer_hex = hex(&block.header.proposer);
+    if block.header.proposer != [0u8; 32] {
+        *store.blocks_proposed.entry(proposer_hex.clone()).or_insert(0) += 1;
+        store.last_proposed.insert(proposer_hex, block.header.height);
+    }
+
     store.add_block(block_summary);
 
     for (i, receipt) in block.result.receipts.iter().enumerate() {

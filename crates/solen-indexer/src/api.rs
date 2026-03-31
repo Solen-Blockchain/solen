@@ -70,6 +70,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
+        .route("/api/validators/stats", get(get_validator_stats))
         .route("/api/accounts/:account/tokens", get(get_account_tokens))
         .route("/api/contracts", get(get_contracts))
         .with_state(state)
@@ -219,6 +220,42 @@ async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetRespo
 }
 
 /// Start the explorer API server.
+#[derive(Serialize)]
+struct ValidatorStats {
+    validator: String,
+    blocks_proposed: u64,
+    last_proposed_height: u64,
+    uptime_pct: f64,
+}
+
+async fn get_validator_stats(
+    State(state): State<ApiState>,
+) -> Json<Vec<ValidatorStats>> {
+    let store = state.store.read().unwrap();
+    let total_blocks = store.latest_height.max(1);
+
+    // Get all known proposers.
+    let mut stats: Vec<ValidatorStats> = store.blocks_proposed
+        .iter()
+        .map(|(validator, &count)| {
+            let last = store.last_proposed.get(validator).copied().unwrap_or(0);
+            // Approximate expected blocks: total / active_validators.
+            // We don't know exact count, so just show raw numbers and
+            // percentage of all blocks this validator proposed.
+            let uptime_pct = (count as f64 / total_blocks as f64) * 100.0;
+            ValidatorStats {
+                validator: validator.clone(),
+                blocks_proposed: count,
+                last_proposed_height: last,
+                uptime_pct,
+            }
+        })
+        .collect();
+
+    stats.sort_by(|a, b| b.blocks_proposed.cmp(&a.blocks_proposed));
+    Json(stats)
+}
+
 async fn get_account_tokens(
     State(state): State<ApiState>,
     Path(account): Path<String>,

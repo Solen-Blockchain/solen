@@ -52,6 +52,10 @@ pub struct IndexStore {
     pub account_tokens: HashMap<String, HashSet<String>>,
     /// Set of known contract addresses (accounts with code deployed).
     pub contracts: HashSet<String>,
+    /// Blocks proposed per validator.
+    pub blocks_proposed: HashMap<String, u64>,
+    /// Last block height proposed per validator.
+    pub last_proposed: HashMap<String, u64>,
     pub latest_height: u64,
 }
 

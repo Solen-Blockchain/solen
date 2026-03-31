@@ -459,8 +459,9 @@ impl ConsensusEngine {
 
         // Check for double-sign: if we already have a pending block at this
         // height from the same proposer with a different state root, it's evidence
-        // of equivocation.
-        {
+        // of equivocation. Skip during catch-up (state_unverified) to avoid
+        // false positives from receiving blocks via different gossipsub paths.
+        if !self.state_unverified.load(std::sync::atomic::Ordering::Relaxed) {
             let pending = self.pending_blocks.read().unwrap();
             if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
                 if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {

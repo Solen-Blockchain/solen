@@ -12,7 +12,8 @@ use thiserror::Error;
 pub const UNBONDING_PERIOD: u64 = 7;
 
 /// Minimum stake to register as a validator.
-pub const MIN_VALIDATOR_STAKE: u128 = 500_000;
+/// 500,000 SOLEN in base units (8 decimals).
+pub const MIN_VALIDATOR_STAKE: u128 = 500_000 * 100_000_000;
 
 /// Minimum number of active validators. The network will reject
 /// deregistrations that would drop below this count.
@@ -481,11 +482,11 @@ mod tests {
     fn register_and_delegate() {
         let mut sc = StakingContract::new();
 
-        sc.register_validator(vid(1), 500_000).unwrap();
+        sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap();
         sc.delegate(aid(10), vid(1), 20_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.total_stake(), 520_000);
+        assert_eq!(val.total_stake(), MIN_VALIDATOR_STAKE + 20_000);
         assert_eq!(sc.delegator_total_stake(&aid(10)), 20_000);
     }
 
@@ -499,7 +500,7 @@ mod tests {
     #[test]
     fn undelegate_and_withdraw() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 500_000).unwrap();
+        sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap();
         sc.delegate(aid(10), vid(1), 3000).unwrap();
 
         // Undelegate at epoch 5.
@@ -518,21 +519,22 @@ mod tests {
     #[test]
     fn reward_distribution() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 500_000).unwrap();
-        sc.delegate(aid(10), vid(1), 500_000).unwrap();
+        sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap();
+        sc.delegate(aid(10), vid(1), MIN_VALIDATOR_STAKE).unwrap();
 
-        // Total stake = 1,000,000. Distribute 10,000 reward.
+        // Total stake = 2 * MIN_VALIDATOR_STAKE. Distribute 10,000 reward.
+        let total_stake = MIN_VALIDATOR_STAKE * 2;
         sc.distribute_rewards(vid(1), 10_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / 1_000_000);
+        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / total_stake);
     }
 
     #[test]
     fn duplicate_registration_fails() {
         let mut sc = StakingContract::new();
-        sc.register_validator(vid(1), 500_000).unwrap();
-        let err = sc.register_validator(vid(1), 500_000).unwrap_err();
+        sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap();
+        let err = sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap_err();
         assert!(matches!(err, StakingError::AlreadyRegistered));
     }
 
@@ -552,7 +554,7 @@ mod tests {
         // Can deregister after lock period (if enough validators).
         // But we need MIN_VALIDATOR_COUNT active validators first.
         for i in 2..=25 {
-            sc.register_validator(vid(i), 500_000).unwrap();
+            sc.register_validator(vid(i), MIN_VALIDATOR_STAKE).unwrap();
         }
 
         let stake = sc.deregister_validator(&vid(1), GENESIS_LOCK_EPOCHS + 1).unwrap();
@@ -566,7 +568,7 @@ mod tests {
 
         // Register exactly MIN_VALIDATOR_COUNT validators.
         for i in 1..=(MIN_VALIDATOR_COUNT as u8) {
-            sc.register_validator(vid(i), 500_000).unwrap();
+            sc.register_validator(vid(i), MIN_VALIDATOR_STAKE).unwrap();
         }
 
         // Can't deregister — would drop below minimum.
@@ -574,9 +576,9 @@ mod tests {
         assert!(matches!(err, StakingError::BelowMinValidators { .. }));
 
         // Add one more, then we can remove one.
-        sc.register_validator(vid(99), 500_000).unwrap();
+        sc.register_validator(vid(99), MIN_VALIDATOR_STAKE).unwrap();
         let stake = sc.deregister_validator(&vid(1), 999_999).unwrap();
-        assert_eq!(stake, 500_000);
+        assert_eq!(stake, MIN_VALIDATOR_STAKE);
     }
 
     #[test]
@@ -585,7 +587,7 @@ mod tests {
 
         // Register enough validators.
         for i in 1..=25 {
-            sc.register_validator(vid(i), 500_000).unwrap();
+            sc.register_validator(vid(i), MIN_VALIDATOR_STAKE).unwrap();
         }
 
         // Non-genesis validator can deregister at any epoch.
@@ -593,6 +595,6 @@ mod tests {
         assert!(!val.is_genesis);
 
         let stake = sc.deregister_validator(&vid(5), 0).unwrap();
-        assert_eq!(stake, 500_000);
+        assert_eq!(stake, MIN_VALIDATOR_STAKE);
     }
 }

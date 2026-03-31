@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, Query, State};
 use axum::response::Json;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;

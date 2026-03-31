@@ -478,6 +478,23 @@ impl ConsensusEngine {
                             crate::slashing::persist_slashing_evidence(
                                 store.as_mut(), &slash_result, header.height,
                             );
+                            // Credit slashed funds to treasury.
+                            {
+                                use borsh::BorshDeserialize;
+                                let key = {
+                                    let mut k = b"acc/".to_vec();
+                                    k.extend_from_slice(&solen_types::system::TREASURY_ADDRESS);
+                                    k
+                                };
+                                if let Ok(Some(data)) = store.get(&key) {
+                                    if let Ok(mut acct) = solen_types::account::Account::try_from_slice(&data) {
+                                        acct.balance = acct.balance.saturating_add(slash_result.penalty);
+                                        if let Ok(encoded) = borsh::to_vec(&acct) {
+                                            let _ = store.put(&key, &encoded);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

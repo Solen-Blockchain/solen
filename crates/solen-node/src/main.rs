@@ -611,6 +611,17 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
 
+            // Don't do anything consensus-related while syncing.
+            if syncing_for_consensus.load(std::sync::atomic::Ordering::Relaxed) {
+                // Still track finalization from sync so we don't stall after sync completes.
+                let current_height = engine_clone.height();
+                if current_height > last_finalized_height {
+                    last_finalized_height = current_height;
+                    last_finalized_at = std::time::Instant::now();
+                }
+                continue;
+            }
+
             // Force-finalize blocks stuck waiting for quorum.
             let force_finalized = engine_clone.finalize_timed_out_blocks(quorum_timeout);
 
@@ -632,11 +643,6 @@ async fn main() -> anyhow::Result<()> {
 
             // Enforce minimum interval since last finalized block.
             if last_finalized_at.elapsed() < min_interval {
-                continue;
-            }
-
-            // Don't produce blocks while syncing from peers.
-            if syncing_for_consensus.load(std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
 

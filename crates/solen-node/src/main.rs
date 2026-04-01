@@ -297,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
         let syncing_for_p2p = syncing.clone();
         let net_height_for_p2p = network_height.clone();
         let peer_heights_for_p2p = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let peer_heights_for_status = peer_heights_for_p2p.clone();
         let attestation_kp = Arc::new(validator_kp);
         let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
@@ -540,9 +541,14 @@ async fn main() -> anyhow::Result<()> {
                 if syncing_for_status.load(std::sync::atomic::Ordering::Relaxed) {
                     let known = net_height_for_status.load(std::sync::atomic::Ordering::Relaxed);
 
-                    if height == 0 && known == 0 && ticks_since_start >= 5 {
-                        // Genesis: no peers yet after 75s, start solo.
+                    let has_peers = !peer_heights_for_status.lock().unwrap().is_empty();
+                    if height == 0 && !has_peers && ticks_since_start >= 5 {
+                        // Genesis: no peers connected after 75s, start solo.
                         tracing::info!("no peers found — starting as first validator");
+                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if height == 0 && has_peers && ticks_since_start >= 3 {
+                        // Genesis with peers: everyone is at height 0, safe to start.
+                        tracing::info!("peers connected at genesis — resuming block production");
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if known > 0 && height + 1 >= known && ticks_since_start >= 4 {
                         // We've heard from a peer AND we're at their height,

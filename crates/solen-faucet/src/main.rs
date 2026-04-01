@@ -5,7 +5,7 @@
 //!   GET  /status        → faucet balance, drip amount, cooldown
 //!   GET  /health        → 200 OK
 //!
-//! Intended to run at faucet.solenchain.com
+//! Intended to run at faucet.solenchain.io
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

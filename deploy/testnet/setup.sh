@@ -13,7 +13,7 @@ set -euo pipefail
 #
 #   3. Set up SSL certs with certbot:
 #        sudo apt-get install -y certbot python3-certbot-nginx
-#        sudo certbot --nginx -d testnet-rpc.solenchain.com -d testnet-faucet.solenchain.com -d testnet-api.solenchain.com
+#        sudo certbot --nginx -d testnet-rpc.solenchain.io -d testnet-faucet.solenchain.io -d testnet-api.solenchain.io
 #
 #   4. Clone the repo:
 #        git clone <repo> ~/solen && cd ~/solen
@@ -72,10 +72,10 @@ echo "  journalctl -u solen-node -f"
 echo "  journalctl -u solen-faucet -f"
 echo ""
 echo "Endpoints:"
-echo "  RPC:     https://testnet-rpc.solenchain.com"
-echo "  Faucet:  https://testnet-faucet.solenchain.com"
-echo "  API:     https://testnet-api.solenchain.com"
+echo "  RPC:     https://testnet-rpc.solenchain.io"
+echo "  Faucet:  https://testnet-faucet.solenchain.io"
+echo "  API:     https://testnet-api.solenchain.io"
 echo ""
 echo "Test with CLI:"
-echo "  solen --rpc https://testnet-rpc.solenchain.com status"
-echo "  curl -X POST https://testnet-faucet.solenchain.com/drip -H 'Content-Type: application/json' -d '{\"account\": \"myaccount\"}'"
+echo "  solen --rpc https://testnet-rpc.solenchain.io status"
+echo "  curl -X POST https://testnet-faucet.solenchain.io/drip -H 'Content-Type: application/json' -d '{\"account\": \"myaccount\"}'"

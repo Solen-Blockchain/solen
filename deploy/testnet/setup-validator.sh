@@ -89,10 +89,10 @@ ExecStart=/opt/solen/bin/solen-node \\
     --genesis /opt/solen/config/genesis.json \\
     --data-dir /opt/solen/data/testnet \\
     --validator-seed $SEED \\
-    --bootstrap /dns4/testnet-seed1.solenchain.com/tcp/40333 \\
-    --bootstrap /dns4/testnet-seed2.solenchain.com/tcp/40333 \\
-    --bootstrap /dns4/testnet-seed3.solenchain.com/tcp/40333 \\
-    --bootstrap /dns4/testnet-seed4.solenchain.com/tcp/40333
+    --bootstrap /dns4/testnet-seed1.solenchain.io/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed2.solenchain.io/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed3.solenchain.io/tcp/40333 \\
+    --bootstrap /dns4/testnet-seed4.solenchain.io/tcp/40333
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -120,5 +120,5 @@ echo ""
 echo "Check status:"
 echo "  /opt/solen/bin/solen --rpc http://127.0.0.1:19944 status"
 echo ""
-echo "This node will connect to testnet-seed1.solenchain.com"
+echo "This node will connect to testnet-seed1.solenchain.io"
 echo "and participate as validator-$INDEX in consensus."

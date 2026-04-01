@@ -6,8 +6,8 @@ Deployment configurations for running Solen network infrastructure.
 
 | Network | RPC | Faucet | API | P2P Seeds |
 |---------|-----|--------|-----|-----------|
-| **Mainnet** | `rpc.solenchain.com` | — | `api.solenchain.com` | `seed1.solenchain.com` |
-| **Testnet** | `testnet-rpc.solenchain.com` | `testnet-faucet.solenchain.com` | `testnet-api.solenchain.com` | `testnet-seed1.solenchain.com` |
+| **Mainnet** | `rpc.solenchain.io` | — | `api.solenchain.io` | `seed1.solenchain.io` |
+| **Testnet** | `testnet-rpc.solenchain.io` | `testnet-faucet.solenchain.io` | `testnet-api.solenchain.io` | `testnet-seed1.solenchain.io` |
 
 ## Testnet
 
@@ -50,7 +50,7 @@ sudo systemctl start solen-node
 sudo systemctl start solen-node
 ```
 
-These validators connect to `testnet-seed1.solenchain.com` and join consensus automatically. No nginx or faucet needed on these servers.
+These validators connect to `testnet-seed1.solenchain.io` and join consensus automatically. No nginx or faucet needed on these servers.
 
 ### Validator Topology
 
@@ -66,7 +66,7 @@ With 4 validators, the network tolerates 1 node offline while maintaining 3/4 (7
 ### Get Testnet Tokens
 
 ```bash
-curl -X POST https://testnet-faucet.solenchain.com/drip \
+curl -X POST https://testnet-faucet.solenchain.io/drip \
   -H "Content-Type: application/json" \
   -d '{"account": "myaccount"}'
 ```
@@ -74,15 +74,15 @@ curl -X POST https://testnet-faucet.solenchain.com/drip \
 Or with the CLI:
 
 ```bash
-solen --rpc https://testnet-rpc.solenchain.com key generate mykey
-# Then request tokens at testnet-faucet.solenchain.com
+solen --rpc https://testnet-rpc.solenchain.io key generate mykey
+# Then request tokens at testnet-faucet.solenchain.io
 ```
 
 ### DNS Records
 
 | Record | Type | Value |
 |--------|------|-------|
-| `testnet-rpc.solenchain.com` | A | `<server 1 IP>` |
-| `testnet-faucet.solenchain.com` | A | `<server 1 IP>` |
-| `testnet-api.solenchain.com` | A | `<server 1 IP>` |
-| `testnet-seed1.solenchain.com` | A | `<server 1 IP>` |
+| `testnet-rpc.solenchain.io` | A | `<server 1 IP>` |
+| `testnet-faucet.solenchain.io` | A | `<server 1 IP>` |
+| `testnet-api.solenchain.io` | A | `<server 1 IP>` |
+| `testnet-seed1.solenchain.io` | A | `<server 1 IP>` |

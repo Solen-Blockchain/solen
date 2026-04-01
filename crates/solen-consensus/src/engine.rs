@@ -906,9 +906,9 @@ impl ConsensusEngine {
     pub fn clear_stale_pending(&self, current_height: u64) {
         let mut pending = self.pending_blocks.write().unwrap();
         let before = pending.len();
-        pending.retain(|h, _| *h > current_height);
+        pending.retain(|h, _| *h >= current_height);
         let mut atts = self.pending_attestations.write().unwrap();
-        atts.retain(|h, _| *h > current_height);
+        atts.retain(|h, _| *h >= current_height);
         let cleared = before - pending.len();
         if cleared > 0 {
             info!(cleared, current_height, "cleared stale pending blocks after sync");

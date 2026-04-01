@@ -430,6 +430,50 @@ impl ConsensusEngine {
             return false;
         }
 
+        // Check for duplicate pending/finalized blocks BEFORE executing.
+        // Executing first then rejecting would corrupt state.
+        {
+            // Check if already finalized in our chain.
+            let chain = self.chain.read().unwrap();
+            if chain.iter().any(|b| b.header.height == header.height) {
+                return false; // Already finalized.
+            }
+            drop(chain);
+
+            let pending = self.pending_blocks.read().unwrap();
+            if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
+                // Check for double-sign (same proposer, different block).
+                if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
+                    drop(pending);
+                    let mut vs = self.validator_set.write().unwrap();
+                    if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
+                        let mut store = self.store.write().unwrap();
+                        crate::slashing::persist_slashing_evidence(
+                            store.as_mut(), &slash_result, header.height,
+                        );
+                        // Credit slashed funds to treasury.
+                        {
+                            use borsh::BorshDeserialize;
+                            let key = {
+                                let mut k = b"acc/".to_vec();
+                                k.extend_from_slice(&solen_types::system::TREASURY_ADDRESS);
+                                k
+                            };
+                            if let Ok(Some(data)) = store.get(&key) {
+                                if let Ok(mut acct) = solen_types::account::Account::try_from_slice(&data) {
+                                    acct.balance = acct.balance.saturating_add(slash_result.penalty);
+                                    if let Ok(encoded) = borsh::to_vec(&acct) {
+                                        let _ = store.put(&key, &encoded);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return false; // Already have a block at this height.
+            }
+        }
+
         // Execute the operations (including epoch rewards if applicable).
         // Using execute_block_with_height ensures deterministic reward distribution.
         let result = {
@@ -444,53 +488,11 @@ impl ConsensusEngine {
         if !state_matches {
             warn!(
                 height = header.height,
+                ours = ?&current_root[..4],
+                theirs = ?&header.state_root[..4],
                 "state root mismatch — rejecting block"
             );
             return false;
-        }
-
-        // Reject if we already have a pending OR finalized block at this height.
-        {
-            // Check if already finalized in our chain.
-            let chain = self.chain.read().unwrap();
-            if chain.iter().any(|b| b.header.height == header.height) {
-                return false; // Already finalized.
-            }
-            drop(chain);
-
-            let pending = self.pending_blocks.read().unwrap();
-            if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
-                // Check for double-sign (same proposer, different block).
-                {
-                    if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
-                        let mut vs = self.validator_set.write().unwrap();
-                        if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
-                            let mut store = self.store.write().unwrap();
-                            crate::slashing::persist_slashing_evidence(
-                                store.as_mut(), &slash_result, header.height,
-                            );
-                            // Credit slashed funds to treasury.
-                            {
-                                use borsh::BorshDeserialize;
-                                let key = {
-                                    let mut k = b"acc/".to_vec();
-                                    k.extend_from_slice(&solen_types::system::TREASURY_ADDRESS);
-                                    k
-                                };
-                                if let Ok(Some(data)) = store.get(&key) {
-                                    if let Ok(mut acct) = solen_types::account::Account::try_from_slice(&data) {
-                                        acct.balance = acct.balance.saturating_add(slash_result.penalty);
-                                        if let Ok(encoded) = borsh::to_vec(&acct) {
-                                            let _ = store.put(&key, &encoded);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                return false; // Already have a block at this height.
-            }
         }
 
         // Store as pending, waiting for attestations.
@@ -849,6 +851,24 @@ impl ConsensusEngine {
     ) {
         let height = header.height;
 
+        // Reject if we already have this block.
+        {
+            let chain = self.chain.read().unwrap();
+            if let Some(last) = chain.last() {
+                if height <= last.header.height {
+                    return; // Already have this height.
+                }
+                if height != last.header.height + 1 {
+                    warn!(
+                        height,
+                        our_height = last.header.height,
+                        "sync block has gap — skipping"
+                    );
+                    return; // Gap — can't apply.
+                }
+            }
+        }
+
         // Validate epoch matches expected value.
         let expected_epoch = height / crate::epoch::EPOCH_LENGTH;
         if header.epoch != expected_epoch {
@@ -866,6 +886,16 @@ impl ConsensusEngine {
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_with_height(store.as_mut(), operations, height)
         };
+
+        // Verify our computed state root matches the block header.
+        if exec_result.state_root != header.state_root {
+            warn!(
+                height,
+                ours = ?&exec_result.state_root[..4],
+                theirs = ?&header.state_root[..4],
+                "state root mismatch in synced block — applying anyway (peer is authoritative)"
+            );
+        }
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).
@@ -933,9 +963,9 @@ impl ConsensusEngine {
     pub fn clear_stale_pending(&self, current_height: u64) {
         let mut pending = self.pending_blocks.write().unwrap();
         let before = pending.len();
-        pending.retain(|h, _| *h >= current_height);
+        pending.retain(|h, _| *h > current_height);
         let mut atts = self.pending_attestations.write().unwrap();
-        atts.retain(|h, _| *h >= current_height);
+        atts.retain(|h, _| *h > current_height);
         let cleared = before - pending.len();
         if cleared > 0 {
             info!(cleared, current_height, "cleared stale pending blocks after sync");

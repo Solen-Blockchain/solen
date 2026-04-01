@@ -465,22 +465,23 @@ async fn main() -> anyhow::Result<()> {
                         let mut synced = 0u64;
                         let mut highest_peer_height = 0u64;
 
+                        // Snapshot height once at start — replay_synced_block does its
+                        // own internal height check, so we just feed blocks in order.
                         for sync_block in &blocks {
                             if sync_block.header.height > highest_peer_height {
                                 highest_peer_height = sync_block.header.height;
                             }
-                            if sync_block.header.height <= engine_for_p2p.height() {
-                                continue; // already have this block
-                            }
-                            if sync_block.header.height != engine_for_p2p.height() + 1 {
-                                continue; // gap — can't apply yet
-                            }
+                            // replay_synced_block internally checks height and rejects
+                            // duplicates/gaps, so we can safely call it for every block.
+                            let before = engine_for_p2p.height();
                             engine_for_p2p.replay_synced_block(
                                 &sync_block.header,
                                 &sync_block.operations,
                                 sync_block.receipts.clone(),
                             );
-                            synced += 1;
+                            if engine_for_p2p.height() > before {
+                                synced += 1;
+                            }
                         }
 
                         if synced > 0 {

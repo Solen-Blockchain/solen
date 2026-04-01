@@ -613,8 +613,9 @@ async fn main() -> anyhow::Result<()> {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
         if engine_clone.active_validator_count() > 1 {
-            info!("waiting 10s for P2P mesh to form before block production...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            let wait = if engine_clone.height() == 0 { 30 } else { 10 };
+            info!(seconds = wait, "waiting for P2P mesh to form before block production...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
             info!("starting block production");
         }
 

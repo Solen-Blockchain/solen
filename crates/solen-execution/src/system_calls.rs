@@ -384,6 +384,10 @@ fn execute_governance_call(
                 Ok(status) => {
                     let status_str = format!("{:?}", status);
 
+                    // Save finalized status BEFORE deposit handling
+                    // (deposit handling needs StateManager which conflicts with gov).
+                    gov.save(store);
+
                     // Handle deposit: return to proposer if passed, send to treasury if rejected.
                     if deposit > 0 {
                         use solen_system_contracts::governance::ProposalStatus;
@@ -396,9 +400,9 @@ fn execute_governance_call(
                             acct.balance = acct.balance.saturating_add(deposit);
                             let _ = state.save_account(&acct);
                         }
-                        drop(state);
-                        gov = GovernanceContract::load(store);
                     }
+                    // Reload after deposit handling.
+                    gov = GovernanceContract::load(store);
 
                     events.push(Event {
                         emitter: GOVERNANCE_ADDRESS,

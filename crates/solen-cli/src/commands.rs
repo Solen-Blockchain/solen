@@ -818,6 +818,201 @@ fn format_solen(base_units: u128) -> String {
     }
 }
 
+pub async fn cmd_initiate_recovery(
+    rpc: &RpcClient,
+    from: &str,
+    target: &str,
+    new_public_key_hex: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let target_id = resolve_account_id(target)?;
+    let target_bytes = hex_decode(&target_id)?;
+
+    // Parse new public key.
+    let new_pk_hex = new_public_key_hex.strip_prefix("0x").unwrap_or(new_public_key_hex);
+    let new_pk_bytes = hex_decode(new_pk_hex)?;
+    if new_pk_bytes.len() != 32 {
+        anyhow::bail!("new public key must be 32 bytes (64 hex chars)");
+    }
+    let mut new_pk = [0u8; 32];
+    new_pk.copy_from_slice(&new_pk_bytes);
+
+    // Build new auth methods JSON: single Ed25519 key.
+    let new_auth = vec![solen_types::account::AuthMethod::Ed25519 { public_key: new_pk }];
+    let auth_json = serde_json::to_vec(&new_auth)?;
+
+    // args: target[32] + auth_json[...]
+    let mut args = Vec::new();
+    args.extend_from_slice(&target_bytes);
+    args.extend_from_slice(&auth_json);
+
+    let guardian_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x08;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: guardian_addr,
+            method: "initiate_recovery".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Recovery initiated successfully.");
+        println!("  Target:     {}", target_id);
+        println!("  New key:    {}", new_pk_hex);
+        println!("  Timelock:   ~1 week (151,200 blocks)");
+        println!("\nOther guardians must confirm with: confirm-recovery");
+        println!("The account owner can cancel with: cancel-recovery");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_confirm_recovery(
+    rpc: &RpcClient,
+    from: &str,
+    recovery_id: u64,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let guardian_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x08;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: guardian_addr,
+            method: "confirm_recovery".to_string(),
+            args: recovery_id.to_le_bytes().to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Recovery #{} confirmed.", recovery_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_cancel_recovery(
+    rpc: &RpcClient,
+    from: &str,
+    recovery_id: u64,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let guardian_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x08;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: guardian_addr,
+            method: "cancel_recovery".to_string(),
+            args: recovery_id.to_le_bytes().to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Recovery #{} cancelled.", recovery_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_execute_recovery(
+    rpc: &RpcClient,
+    from: &str,
+    recovery_id: u64,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let guardian_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x08;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: guardian_addr,
+            method: "execute_recovery".to_string(),
+            args: recovery_id.to_le_bytes().to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Recovery #{} executed! Account auth methods have been replaced.", recovery_id);
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 pub async fn cmd_register_rollup(
     rpc: &RpcClient,
     from: &str,

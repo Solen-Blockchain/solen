@@ -26,6 +26,9 @@ pub const VESTING_ADDRESS: AccountId = addr(0x06);
 /// Paymaster registry system contract — manages fee sponsorship.
 pub const PAYMASTER_REGISTRY_ADDRESS: AccountId = addr(0x07);
 
+/// Guardian recovery system contract — social recovery for lost keys.
+pub const GUARDIAN_ADDRESS: AccountId = addr(0x08);
+
 /// Staking rewards pool — holds the 500M SOLEN allocated for validator rewards.
 pub const STAKING_POOL_ADDRESS: AccountId = addr(0x10);
 
@@ -60,7 +63,7 @@ pub fn is_system_contract(id: &AccountId) -> bool {
 }
 
 /// All system contract addresses.
-pub const ALL_SYSTEM_ADDRESSES: [AccountId; 7] = [
+pub const ALL_SYSTEM_ADDRESSES: [AccountId; 8] = [
     STAKING_ADDRESS,
     GOVERNANCE_ADDRESS,
     BRIDGE_ADDRESS,
@@ -68,4 +71,5 @@ pub const ALL_SYSTEM_ADDRESSES: [AccountId; 7] = [
     INTENT_ADDRESS,
     VESTING_ADDRESS,
     PAYMASTER_REGISTRY_ADDRESS,
+    GUARDIAN_ADDRESS,
 ];

@@ -193,6 +193,40 @@ enum Commands {
         from: String,
     },
 
+    /// Initiate guardian recovery for a lost account (sender must be a guardian)
+    InitiateRecovery {
+        /// Your key name (must be a guardian of the target account)
+        from: String,
+        /// Target account to recover (hex)
+        target: String,
+        /// New public key for the recovered account (hex, 64 chars)
+        new_public_key: String,
+    },
+
+    /// Confirm a pending guardian recovery (sender must be a guardian)
+    ConfirmRecovery {
+        /// Your key name (must be a guardian of the target account)
+        from: String,
+        /// Recovery ID
+        recovery_id: u64,
+    },
+
+    /// Cancel a pending recovery (sender must be the account owner)
+    CancelRecovery {
+        /// Your key name (the account being recovered)
+        from: String,
+        /// Recovery ID
+        recovery_id: u64,
+    },
+
+    /// Execute a recovery after timelock expires
+    ExecuteRecovery {
+        /// Your key name (anyone can execute after timelock + confirmations)
+        from: String,
+        /// Recovery ID
+        recovery_id: u64,
+    },
+
     /// Convert an account to multi-sig (threshold signing)
     Multisig {
         /// Account key name (current owner)
@@ -283,6 +317,18 @@ async fn main() -> anyhow::Result<()> {
             args,
         } => {
             commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), cli.chain_id).await?
+        }
+        Commands::InitiateRecovery { from, target, new_public_key } => {
+            commands::cmd_initiate_recovery(&rpc, &from, &target, &new_public_key, cli.chain_id).await?
+        }
+        Commands::ConfirmRecovery { from, recovery_id } => {
+            commands::cmd_confirm_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
+        }
+        Commands::CancelRecovery { from, recovery_id } => {
+            commands::cmd_cancel_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
+        }
+        Commands::ExecuteRecovery { from, recovery_id } => {
+            commands::cmd_execute_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
         }
         Commands::RegisterRollup { from, rollup_id, name, proof_type, genesis_state_root } => {
             commands::cmd_register_rollup(&rpc, &from, rollup_id, &name, &proof_type, &genesis_state_root, cli.chain_id).await?

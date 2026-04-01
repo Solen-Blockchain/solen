@@ -45,6 +45,8 @@ pub fn execute_system_call(
         execute_intent_call(store, sender, method, args)
     } else if *target == PAYMASTER_REGISTRY_ADDRESS {
         execute_paymaster_call(store, sender, method, args)
+    } else if *target == GUARDIAN_ADDRESS {
+        execute_guardian_call(store, sender, method, args)
     } else {
         SystemCallResult {
             gas_used: 0,
@@ -765,6 +767,207 @@ fn execute_paymaster_call(
             SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
         }
         _ => err(&format!("unknown paymaster method: {method}")),
+    }
+}
+
+// ── Guardian Recovery ─────────────────────────────────────────
+
+fn execute_guardian_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+    args: &[u8],
+) -> SystemCallResult {
+    use solen_system_contracts::guardian::GuardianContract;
+    use solen_types::account::AuthMethod;
+
+    let mut guardian = GuardianContract::load(store);
+    let mut events = Vec::new();
+
+    // Read current height from chain meta.
+    let current_height = match store.get(b"__chain_meta__") {
+        Ok(Some(data)) if data.len() >= 8 => {
+            let mut h = [0u8; 8];
+            h.copy_from_slice(&data[..8]);
+            u64::from_le_bytes(h)
+        }
+        _ => 0,
+    };
+
+    let result = match method {
+        "initiate_recovery" => {
+            // args: target_account[32] + new_auth_methods_json[...]
+            let target = match read_account_id(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need target_account[32] + new_auth_methods_json"),
+            };
+
+            // Parse new auth methods from JSON.
+            let json_bytes = &args[32..];
+            let new_auth: Vec<AuthMethod> = match serde_json::from_slice(json_bytes) {
+                Ok(a) => a,
+                Err(e) => return err(&format!("invalid new_auth_methods JSON: {e}")),
+            };
+
+            // Load target account to get its guardian list.
+            let state = StateManager::new(store);
+            let target_acct = match state.get_account(&target) {
+                Ok(Some(a)) => a,
+                _ => return err("target account not found"),
+            };
+            drop(state);
+
+            let guardian_ids: Vec<AccountId> = target_acct.auth_methods.iter()
+                .filter_map(|m| {
+                    if let AuthMethod::Guardian { guardian_id } = m {
+                        Some(*guardian_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if guardian_ids.is_empty() {
+                return err("target account has no guardians configured");
+            }
+
+            match guardian.initiate_recovery(target, *sender, new_auth, &guardian_ids, current_height) {
+                Ok(id) => {
+                    events.push(Event {
+                        emitter: GUARDIAN_ADDRESS,
+                        topic: b"recovery_initiated".to_vec(),
+                        data: {
+                            let mut d = target.to_vec();
+                            d.extend_from_slice(&id.to_le_bytes());
+                            d
+                        },
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "confirm_recovery" => {
+            // args: recovery_id[8]
+            let recovery_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need recovery_id[8]"),
+            };
+
+            // Look up the recovery to get the target account's guardians.
+            let target = match guardian.recovery_requests.iter()
+                .find(|r| r.id == recovery_id)
+                .map(|r| r.target_account)
+            {
+                Some(t) => t,
+                None => return err("recovery request not found"),
+            };
+
+            let state = StateManager::new(store);
+            let target_acct = match state.get_account(&target) {
+                Ok(Some(a)) => a,
+                _ => return err("target account not found"),
+            };
+            drop(state);
+
+            let guardian_ids: Vec<AccountId> = target_acct.auth_methods.iter()
+                .filter_map(|m| {
+                    if let AuthMethod::Guardian { guardian_id } = m {
+                        Some(*guardian_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            match guardian.confirm_recovery(recovery_id, *sender, &guardian_ids) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: GUARDIAN_ADDRESS,
+                        topic: b"recovery_confirmed".to_vec(),
+                        data: {
+                            let mut d = sender.to_vec();
+                            d.extend_from_slice(&recovery_id.to_le_bytes());
+                            d
+                        },
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "cancel_recovery" => {
+            // args: recovery_id[8]
+            let recovery_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need recovery_id[8]"),
+            };
+
+            match guardian.cancel_recovery(recovery_id, sender) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: GUARDIAN_ADDRESS,
+                        topic: b"recovery_cancelled".to_vec(),
+                        data: recovery_id.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "execute_recovery" => {
+            // args: recovery_id[8]
+            let recovery_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need recovery_id[8]"),
+            };
+
+            // Check timelock and confirmations.
+            if let Err(e) = guardian.can_execute(recovery_id, current_height) {
+                return err(&e);
+            }
+
+            // Execute: update the target account's auth methods.
+            let req = match guardian.mark_executed(recovery_id) {
+                Ok(r) => r,
+                Err(e) => return err(&e),
+            };
+
+            // Save guardian state BEFORE modifying accounts (same pattern as governance).
+            guardian.save(store);
+
+            let mut state = StateManager::new(store);
+            match state.get_account(&req.target_account) {
+                Ok(Some(mut acct)) => {
+                    acct.auth_methods = req.new_auth_methods.clone();
+                    if let Err(e) = state.save_account(&acct) {
+                        return err(&format!("failed to update account: {e}"));
+                    }
+                }
+                _ => return err("target account not found"),
+            }
+
+            events.push(Event {
+                emitter: GUARDIAN_ADDRESS,
+                topic: b"recovery_executed".to_vec(),
+                data: {
+                    let mut d = req.target_account.to_vec();
+                    d.extend_from_slice(&recovery_id.to_le_bytes());
+                    d
+                },
+            });
+
+            // Already saved above, return early.
+            return SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None };
+        }
+        _ => Err(format!("unknown guardian method: {method}")),
+    };
+
+    guardian.save(store);
+
+    match result {
+        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
+        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
     }
 }
 

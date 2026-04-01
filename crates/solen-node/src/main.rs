@@ -323,6 +323,8 @@ async fn main() -> anyhow::Result<()> {
                             // Block accepted with matching state root.
                             // If we were syncing, we're now verified in sync.
                             if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                // Clear stale pending blocks/attestations from before sync.
+                                engine_for_p2p.clear_stale_pending(header.height);
                                 tracing::info!(
                                     height = header.height,
                                     "state verified — resuming block production"

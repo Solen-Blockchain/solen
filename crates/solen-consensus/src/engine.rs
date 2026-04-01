@@ -901,6 +901,20 @@ impl ConsensusEngine {
     }
 
     /// Check if a block is pending at the given height (proposed but not finalized).
+    /// Clear all pending blocks and attestations at or below the given height.
+    /// Called after sync to prevent stale blocks from being force-finalized.
+    pub fn clear_stale_pending(&self, current_height: u64) {
+        let mut pending = self.pending_blocks.write().unwrap();
+        let before = pending.len();
+        pending.retain(|h, _| *h > current_height);
+        let mut atts = self.pending_attestations.write().unwrap();
+        atts.retain(|h, _| *h > current_height);
+        let cleared = before - pending.len();
+        if cleared > 0 {
+            info!(cleared, current_height, "cleared stale pending blocks after sync");
+        }
+    }
+
     pub fn has_pending_block(&self, height: u64) -> bool {
         self.pending_blocks.read().unwrap().contains_key(&height)
     }

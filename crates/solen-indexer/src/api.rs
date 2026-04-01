@@ -319,7 +319,6 @@ async fn publish_contract_source(
 
 /// Compile Rust contract source and verify bytecode hash matches.
 fn verify_rust_contract(source_code: &str, expected_hash: &str) -> bool {
-    use std::io::Write;
     use std::process::Command;
 
     let tmp = match tempfile::TempDir::new() {

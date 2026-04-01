@@ -27,6 +27,8 @@ pub enum BridgeError {
     WithdrawalDisputed,
     #[error("vault already exists for rollup {0}")]
     VaultAlreadyExists(RollupId),
+    #[error("rollup already registered: {0}")]
+    RollupAlreadyRegistered(RollupId),
 }
 
 /// Status of a pending withdrawal.
@@ -61,17 +63,69 @@ pub struct BridgeVault {
     pub withdrawal_delay: u64,
 }
 
+/// A registered rollup domain on L1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredRollup {
+    pub rollup_id: RollupId,
+    pub name: String,
+    pub proof_type: String,
+    pub sequencer: AccountId,
+    pub genesis_state_root: Hash,
+    pub registered_at_height: u64,
+}
+
 /// The bridge contract state.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BridgeContract {
     pub vaults: Vec<BridgeVault>,
     pub pending_withdrawals: Vec<PendingWithdrawal>,
+    pub registered_rollups: Vec<RegisteredRollup>,
     next_withdrawal_id: u64,
 }
 
 impl BridgeContract {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register a rollup domain on L1. Also creates a bridge vault.
+    pub fn register_rollup(
+        &mut self,
+        rollup_id: RollupId,
+        name: String,
+        proof_type: String,
+        sequencer: AccountId,
+        genesis_state_root: Hash,
+        height: u64,
+    ) -> Result<(), BridgeError> {
+        if self.registered_rollups.iter().any(|r| r.rollup_id == rollup_id) {
+            return Err(BridgeError::RollupAlreadyRegistered(rollup_id));
+        }
+        self.registered_rollups.push(RegisteredRollup {
+            rollup_id,
+            name,
+            proof_type,
+            sequencer,
+            genesis_state_root,
+            registered_at_height: height,
+        });
+        // Also create a vault if one doesn't exist.
+        if !self.vaults.iter().any(|v| v.rollup_id == rollup_id) {
+            self.vaults.push(BridgeVault {
+                rollup_id,
+                balance: 0,
+                total_deposited: 0,
+                total_withdrawn: 0,
+                challenge_window: DEFAULT_CHALLENGE_WINDOW,
+                withdrawal_delay: DEFAULT_WITHDRAWAL_DELAY,
+            });
+        }
+        Ok(())
+    }
+
+    /// Get a registered rollup by ID.
+    pub fn get_rollup(&self, rollup_id: RollupId) -> Option<&RegisteredRollup> {
+        self.registered_rollups.iter().find(|r| r.rollup_id == rollup_id)
     }
 
     /// Register a new bridge vault for a rollup.

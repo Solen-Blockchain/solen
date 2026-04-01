@@ -165,6 +165,34 @@ enum Commands {
         args: Option<String>,
     },
 
+    /// Register a rollup domain on L1 (requires 10,000 SOLEN deposit)
+    RegisterRollup {
+        /// Your key name
+        from: String,
+        /// Rollup ID (numeric)
+        rollup_id: u64,
+        /// Rollup name
+        name: String,
+        /// Proof type (e.g., "mock", "validity", "fraud")
+        #[arg(long, default_value = "mock")]
+        proof_type: String,
+        /// Genesis state root (64-char hex, defaults to zero)
+        #[arg(long, default_value = "0000000000000000000000000000000000000000000000000000000000000000")]
+        genesis_state_root: String,
+    },
+
+    /// Register a deployed contract as a paymaster (fee sponsor)
+    RegisterPaymaster {
+        /// Contract key name (must be a deployed contract)
+        from: String,
+    },
+
+    /// Unregister a contract as a paymaster
+    UnregisterPaymaster {
+        /// Contract key name
+        from: String,
+    },
+
     /// Convert an account to multi-sig (threshold signing)
     Multisig {
         /// Account key name (current owner)
@@ -255,6 +283,15 @@ async fn main() -> anyhow::Result<()> {
             args,
         } => {
             commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), cli.chain_id).await?
+        }
+        Commands::RegisterRollup { from, rollup_id, name, proof_type, genesis_state_root } => {
+            commands::cmd_register_rollup(&rpc, &from, rollup_id, &name, &proof_type, &genesis_state_root, cli.chain_id).await?
+        }
+        Commands::RegisterPaymaster { from } => {
+            commands::cmd_register_paymaster(&rpc, &from, cli.chain_id).await?
+        }
+        Commands::UnregisterPaymaster { from } => {
+            commands::cmd_unregister_paymaster(&rpc, &from, cli.chain_id).await?
         }
         Commands::Multisig { from, threshold, signers } => {
             commands::cmd_multisig(&rpc, &from, threshold, &signers, cli.chain_id).await?

@@ -23,6 +23,9 @@ pub const INTENT_ADDRESS: AccountId = addr(0x05);
 /// Vesting system contract — holds team/investor tokens with time locks.
 pub const VESTING_ADDRESS: AccountId = addr(0x06);
 
+/// Paymaster registry system contract — manages fee sponsorship.
+pub const PAYMASTER_REGISTRY_ADDRESS: AccountId = addr(0x07);
+
 /// Staking rewards pool — holds the 500M SOLEN allocated for validator rewards.
 pub const STAKING_POOL_ADDRESS: AccountId = addr(0x10);
 
@@ -57,11 +60,12 @@ pub fn is_system_contract(id: &AccountId) -> bool {
 }
 
 /// All system contract addresses.
-pub const ALL_SYSTEM_ADDRESSES: [AccountId; 6] = [
+pub const ALL_SYSTEM_ADDRESSES: [AccountId; 7] = [
     STAKING_ADDRESS,
     GOVERNANCE_ADDRESS,
     BRIDGE_ADDRESS,
     TREASURY_ADDRESS,
     INTENT_ADDRESS,
     VESTING_ADDRESS,
+    PAYMASTER_REGISTRY_ADDRESS,
 ];

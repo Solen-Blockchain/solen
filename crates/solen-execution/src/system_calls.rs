@@ -43,6 +43,8 @@ pub fn execute_system_call(
         execute_vesting_call(store, sender, method)
     } else if *target == INTENT_ADDRESS {
         execute_intent_call(store, sender, method, args)
+    } else if *target == PAYMASTER_REGISTRY_ADDRESS {
+        execute_paymaster_call(store, sender, method, args)
     } else {
         SystemCallResult {
             gas_used: 0,
@@ -534,6 +536,97 @@ fn execute_bridge_call(
                 Err(e) => Err(e.to_string()),
             }
         }
+        "register_rollup" => {
+            // args: rollup_id[8] + name_len[4] + name[...] + proof_type_len[4] + proof_type[...] + sequencer[32] + genesis_state_root[32]
+            let rollup_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need rollup_id[8]"),
+            };
+            // Parse name (length-prefixed)
+            if args.len() < 12 {
+                return err("invalid args: too short");
+            }
+            let name_len = u32::from_le_bytes([args[8], args[9], args[10], args[11]]) as usize;
+            let name_end = 12 + name_len;
+            if args.len() < name_end + 4 {
+                return err("invalid args: name too long");
+            }
+            let name = String::from_utf8_lossy(&args[12..name_end]).to_string();
+
+            // Parse proof_type (length-prefixed)
+            let pt_len = u32::from_le_bytes([args[name_end], args[name_end+1], args[name_end+2], args[name_end+3]]) as usize;
+            let pt_end = name_end + 4 + pt_len;
+            if args.len() < pt_end + 64 {
+                return err("invalid args: need sequencer[32] + genesis_state_root[32]");
+            }
+            let proof_type = String::from_utf8_lossy(&args[name_end+4..pt_end]).to_string();
+
+            // Parse sequencer and genesis_state_root
+            let sequencer = match read_account_id(args, pt_end) {
+                Some(id) => id,
+                None => return err("invalid args: bad sequencer"),
+            };
+            let mut genesis_state_root = [0u8; 32];
+            genesis_state_root.copy_from_slice(&args[pt_end+32..pt_end+64]);
+
+            // Require a registration deposit (10,000 SOLEN).
+            let deposit: u128 = 10_000 * 100_000_000;
+            let mut state = StateManager::new(store);
+            if let Ok(mut acct) = state.require_account(sender) {
+                if acct.balance < deposit + MIN_FEE_RESERVE {
+                    return err("insufficient balance for rollup registration deposit");
+                }
+                acct.balance -= deposit;
+                let _ = state.save_account(&acct);
+
+                // Credit deposit to bridge address.
+                if let Ok(mut bridge_acct) = state.require_account(&BRIDGE_ADDRESS) {
+                    bridge_acct.balance += deposit;
+                    let _ = state.save_account(&bridge_acct);
+                }
+            } else {
+                return err("sender account not found");
+            }
+            drop(state);
+
+            // Reload bridge after state changes.
+            bridge = solen_system_contracts::bridge::BridgeContract::load(store);
+
+            // Read current height from chain meta.
+            let height = match store.get(b"__chain_meta__") {
+                Ok(Some(data)) if data.len() >= 8 => {
+                    let mut h = [0u8; 8];
+                    h.copy_from_slice(&data[..8]);
+                    u64::from_le_bytes(h)
+                }
+                _ => 0,
+            };
+
+            match bridge.register_rollup(rollup_id, name, proof_type, sequencer, genesis_state_root, height) {
+                Ok(()) => {
+                    // Store rollup registration info in a well-known state key
+                    // so the RPC can find it without the bridge contract.
+                    let reg_key = format!("__rollup_{}__", rollup_id);
+                    let reg_data = serde_json::json!({
+                        "rollup_id": rollup_id,
+                        "proof_type": bridge.get_rollup(rollup_id).map(|r| r.proof_type.clone()).unwrap_or_default(),
+                        "genesis_state_root": hex_encode(&genesis_state_root),
+                        "sequencer": hex_encode(&sequencer),
+                    });
+                    if let Ok(data) = serde_json::to_vec(&reg_data) {
+                        let _ = store.put(reg_key.as_bytes(), &data);
+                    }
+
+                    events.push(Event {
+                        emitter: BRIDGE_ADDRESS,
+                        topic: b"rollup_registered".to_vec(),
+                        data: rollup_id.to_le_bytes().to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
         _ => Err(format!("unknown bridge method: {method}")),
     };
 
@@ -583,6 +676,100 @@ fn execute_intent_call(
 ) -> SystemCallResult {
     // Intent pool runs in-memory, not in state. Expose via RPC instead.
     err(&format!("intent operations use RPC, not system calls: {method}"))
+}
+
+// ── Paymaster Registry ────────────────────────────────────────
+
+fn execute_paymaster_call(
+    store: &mut dyn StateStore,
+    sender: &AccountId,
+    method: &str,
+    _args: &[u8],
+) -> SystemCallResult {
+    let mut events = Vec::new();
+
+    match method {
+        "register" => {
+            // Register the sender's contract as a paymaster.
+            // The contract must implement a `willSponsor` view method.
+            // args: (none — sender registers themselves)
+            //
+            // Verify sender has contract code deployed.
+            let state = StateManager::new(store);
+            match state.get_account(sender) {
+                Ok(Some(acct)) if acct.code_hash != [0u8; 32] => {}
+                _ => return err("only contracts can register as paymasters"),
+            }
+            drop(state);
+
+            // Load existing paymasters list.
+            let paymasters_key = b"__paymasters__";
+            let mut paymasters: Vec<AccountId> = match store.get(paymasters_key) {
+                Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+                _ => vec![],
+            };
+
+            // Check not already registered.
+            if paymasters.contains(sender) {
+                return err("already registered as paymaster");
+            }
+
+            paymasters.push(*sender);
+
+            if let Ok(data) = serde_json::to_vec(&paymasters) {
+                let _ = store.put(paymasters_key, &data);
+            }
+
+            events.push(Event {
+                emitter: PAYMASTER_REGISTRY_ADDRESS,
+                topic: b"paymaster_registered".to_vec(),
+                data: sender.to_vec(),
+            });
+
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+        }
+        "unregister" => {
+            let paymasters_key = b"__paymasters__";
+            let mut paymasters: Vec<AccountId> = match store.get(paymasters_key) {
+                Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+                _ => vec![],
+            };
+
+            paymasters.retain(|p| p != sender);
+
+            if let Ok(data) = serde_json::to_vec(&paymasters) {
+                let _ = store.put(paymasters_key, &data);
+            }
+
+            events.push(Event {
+                emitter: PAYMASTER_REGISTRY_ADDRESS,
+                topic: b"paymaster_unregistered".to_vec(),
+                data: sender.to_vec(),
+            });
+
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+        }
+        "list" => {
+            let paymasters_key = b"__paymasters__";
+            let paymasters: Vec<AccountId> = match store.get(paymasters_key) {
+                Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+                _ => vec![],
+            };
+
+            events.push(Event {
+                emitter: PAYMASTER_REGISTRY_ADDRESS,
+                topic: b"paymaster_list".to_vec(),
+                data: format!("{}", paymasters.len()).into_bytes(),
+            });
+
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+        }
+        _ => err(&format!("unknown paymaster method: {method}")),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── Vesting ─────────────────────────────────────────────────────

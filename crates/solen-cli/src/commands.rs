@@ -818,6 +818,163 @@ fn format_solen(base_units: u128) -> String {
     }
 }
 
+pub async fn cmd_register_rollup(
+    rpc: &RpcClient,
+    from: &str,
+    rollup_id: u64,
+    name: &str,
+    proof_type: &str,
+    genesis_state_root_hex: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    // Build args: rollup_id[8] + name_len[4] + name + proof_type_len[4] + proof_type + sequencer[32] + genesis_state_root[32]
+    let mut args = Vec::new();
+    args.extend_from_slice(&rollup_id.to_le_bytes());
+
+    let name_bytes = name.as_bytes();
+    args.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+    args.extend_from_slice(name_bytes);
+
+    let pt_bytes = proof_type.as_bytes();
+    args.extend_from_slice(&(pt_bytes.len() as u32).to_le_bytes());
+    args.extend_from_slice(pt_bytes);
+
+    // Sequencer = sender
+    args.extend_from_slice(&sender_id);
+
+    // Genesis state root
+    let root_hex = genesis_state_root_hex.strip_prefix("0x").unwrap_or(genesis_state_root_hex);
+    let root_bytes = hex_decode(root_hex)?;
+    if root_bytes.len() != 32 {
+        anyhow::bail!("genesis state root must be 32 bytes (64 hex chars)");
+    }
+    args.extend_from_slice(&root_bytes);
+
+    let bridge_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x03;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: bridge_addr,
+            method: "register_rollup".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Rollup registered successfully.");
+        println!("  Rollup ID:    {}", rollup_id);
+        println!("  Name:         {}", name);
+        println!("  Proof type:   {}", proof_type);
+        println!("  Sequencer:    {}", sender_hex);
+        println!("  Deposit:      10,000 SOLEN");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_register_paymaster(
+    rpc: &RpcClient,
+    from: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let paymaster_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x07;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: paymaster_addr,
+            method: "register".to_string(),
+            args: vec![],
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Paymaster registered successfully.");
+        println!("  Contract: {}", sender_hex);
+        println!("\nYour contract must implement a 'willSponsor' view method.");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_unregister_paymaster(
+    rpc: &RpcClient,
+    from: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let paymaster_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x07;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: paymaster_addr,
+            method: "unregister".to_string(),
+            args: vec![],
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Paymaster unregistered successfully.");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 fn format_timestamp(ms: u64) -> String {
     let secs = ms / 1000;
     let now = std::time::SystemTime::now()

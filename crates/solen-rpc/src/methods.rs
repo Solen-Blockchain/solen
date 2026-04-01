@@ -798,16 +798,35 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn get_rollup_status(&self, rollup_id: u64) -> RpcResult<RollupStatusInfo> {
+        // Check in-memory proof registry first.
         let registry = self.engine.proof_registry();
         let registry = registry.read().map_err(|e| internal_error(e.to_string()))?;
-
         let last_state_root = registry.last_state_root(rollup_id);
+
+        if last_state_root.is_some() {
+            return Ok(RollupStatusInfo {
+                rollup_id,
+                registered: true,
+                last_verified_state_root: last_state_root.map(|r| hex_encode(&r)),
+                last_batch_index: None,
+            });
+        }
+        drop(registry);
+
+        // Fall back to on-chain registration state.
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let reg_key = format!("__rollup_{}__", rollup_id);
+        let registered = match store.get(reg_key.as_bytes()) {
+            Ok(Some(_)) => true,
+            _ => false,
+        };
 
         Ok(RollupStatusInfo {
             rollup_id,
-            registered: last_state_root.is_some(),
-            last_verified_state_root: last_state_root.map(|r| hex_encode(&r)),
-            last_batch_index: None, // TODO: track batch indices in registry
+            registered,
+            last_verified_state_root: None,
+            last_batch_index: None,
         })
     }
 
@@ -823,6 +842,34 @@ impl SolenApiServer for SolenRpc {
             data_hash,
             proof,
         };
+
+        // If the rollup is registered on-chain but not in the in-memory registry,
+        // auto-register it so batch verification can proceed.
+        {
+            let registry = self.engine.proof_registry();
+            let mut registry = registry.write().map_err(|e| internal_error(e.to_string()))?;
+            if registry.last_state_root(req.rollup_id).is_none() {
+                let store = self.engine.store();
+                let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+                let reg_key = format!("__rollup_{}__", req.rollup_id);
+                if let Ok(Some(data)) = store.get(reg_key.as_bytes()) {
+                    if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        let proof_type = info["proof_type"].as_str().unwrap_or("mock");
+                        let genesis_root = if let Some(hex) = info["genesis_state_root"].as_str() {
+                            let bytes: Vec<u8> = (0..hex.len()).step_by(2)
+                                .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+                                .collect();
+                            let mut root = [0u8; 32];
+                            if bytes.len() == 32 { root.copy_from_slice(&bytes); }
+                            root
+                        } else {
+                            [0u8; 32]
+                        };
+                        let _ = registry.register_rollup(req.rollup_id, proof_type, genesis_root);
+                    }
+                }
+            }
+        }
 
         let registry = self.engine.proof_registry();
         let mut registry = registry.write().map_err(|e| internal_error(e.to_string()))?;

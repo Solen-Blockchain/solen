@@ -8,6 +8,8 @@ use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
 use solen_execution::state::ReadonlyStateManager;
+use solen_intents::types::{Constraint, Intent};
+use solen_types::rollup::BatchCommitment;
 use solen_types::transaction::UserOperation;
 
 /// Account info returned by the RPC.
@@ -132,6 +134,84 @@ pub struct VestingInfo {
     pub vesting_type: String,
 }
 
+/// Intent submission request (from RPC clients).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentRequest {
+    pub sender: String,
+    pub constraints: Vec<ConstraintInfo>,
+    pub max_fee: String,
+    pub expiry_height: u64,
+    pub signature: String,
+    pub tip: String,
+}
+
+/// Constraint info for RPC serialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ConstraintInfo {
+    MinBalance { account: String, min_amount: String },
+    MaxSpend { account: String, max_amount: String },
+    RequireTransfer { from: String, to: String, min_amount: String },
+    RequireCall { target: String, method: String },
+    Custom { verifier: String, data: String },
+}
+
+/// Intent submission result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentSubmitResult {
+    pub accepted: bool,
+    pub intent_id: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Pending intent info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentInfo {
+    pub id: u64,
+    pub sender: String,
+    pub constraints: Vec<ConstraintInfo>,
+    pub max_fee: String,
+    pub expiry_height: u64,
+    pub tip: String,
+    pub status: String,
+}
+
+/// Sponsorship check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsorshipResult {
+    pub sponsored: bool,
+    pub paymaster: Option<String>,
+    pub max_gas: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Rollup status info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollupStatusInfo {
+    pub rollup_id: u64,
+    pub registered: bool,
+    pub last_verified_state_root: Option<String>,
+    pub last_batch_index: Option<u64>,
+}
+
+/// Batch submission request (hex-encoded fields).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSubmitRequest {
+    pub rollup_id: u64,
+    pub batch_index: u64,
+    pub state_root: String,
+    pub data_hash: String,
+    pub proof: String,
+}
+
+/// Batch submission result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSubmitResult {
+    pub accepted: bool,
+    pub verified: bool,
+    pub error: Option<String>,
+}
+
 #[rpc(server)]
 pub trait SolenApi {
     #[method(name = "solen_getBalance")]
@@ -175,6 +255,22 @@ pub trait SolenApi {
 
     #[method(name = "solen_getVestingInfo")]
     fn get_vesting_info(&self, account_id: String) -> RpcResult<VestingInfo>;
+
+    /// Submit an intent for solver resolution.
+    #[method(name = "solen_submitIntent")]
+    fn submit_intent(&self, intent: IntentRequest) -> RpcResult<IntentSubmitResult>;
+
+    /// Check if a paymaster will sponsor an operation's fees.
+    #[method(name = "solen_checkSponsorship")]
+    fn check_sponsorship(&self, op: UserOperation) -> RpcResult<SponsorshipResult>;
+
+    /// Get rollup registration info and latest state commitment.
+    #[method(name = "solen_getRollupStatus")]
+    fn get_rollup_status(&self, rollup_id: u64) -> RpcResult<RollupStatusInfo>;
+
+    /// Submit a rollup batch commitment for verification.
+    #[method(name = "solen_submitBatch")]
+    fn submit_batch(&self, batch: BatchSubmitRequest) -> RpcResult<BatchSubmitResult>;
 }
 
 /// Implementation of the Solen RPC API.
@@ -573,6 +669,222 @@ impl SolenApiServer for SolenRpc {
                 vesting_type: "".into(),
             }),
         }
+    }
+
+    fn submit_intent(&self, req: IntentRequest) -> RpcResult<IntentSubmitResult> {
+        let sender = parse_account_id(&req.sender)?;
+        let signature = hex_decode(&req.signature)?;
+        let max_fee: u128 = req.max_fee.parse().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "invalid max_fee", None::<()>)
+        })?;
+        let tip: u128 = req.tip.parse().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "invalid tip", None::<()>)
+        })?;
+
+        // Convert constraints from RPC format to internal format.
+        let constraints: Result<Vec<Constraint>, _> = req.constraints.iter().map(|c| {
+            constraint_from_info(c)
+        }).collect();
+        let constraints = constraints?;
+
+        let intent = Intent {
+            id: 0, // assigned by pool
+            sender,
+            constraints,
+            max_fee,
+            expiry_height: req.expiry_height,
+            signature,
+            tip,
+        };
+
+        let pool = self.engine.intent_pool();
+        match pool.submit(intent) {
+            Ok(id) => Ok(IntentSubmitResult {
+                accepted: true,
+                intent_id: Some(id),
+                error: None,
+            }),
+            Err(e) => Ok(IntentSubmitResult {
+                accepted: false,
+                intent_id: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    fn check_sponsorship(&self, op: UserOperation) -> RpcResult<SponsorshipResult> {
+        // Check if any registered paymaster contract is willing to sponsor this operation.
+        // Paymasters are contracts that implement a `willSponsor` view method.
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+
+        // Look for paymaster registry in state.
+        let paymaster_key = b"__paymasters__";
+        let paymasters: Vec<[u8; 32]> = match store.get(paymaster_key) {
+            Ok(Some(data)) => serde_json::from_slice(&data).unwrap_or_default(),
+            _ => vec![],
+        };
+
+        if paymasters.is_empty() {
+            return Ok(SponsorshipResult {
+                sponsored: false,
+                paymaster: None,
+                max_gas: None,
+                reason: Some("no paymasters registered".to_string()),
+            });
+        }
+
+        // Simulate a view call to each paymaster's willSponsor method.
+        let op_bytes = serde_json::to_vec(&op).unwrap_or_default();
+        for pm in &paymasters {
+            let state = ReadonlyStateManager::new(store.as_ref());
+            let account = match state.get_account(pm) {
+                Ok(Some(a)) if a.code_hash != [0u8; 32] => a,
+                _ => continue,
+            };
+
+            let mut input = b"willSponsor\0".to_vec();
+            input.extend_from_slice(&op_bytes);
+
+            let code_key = {
+                let mut k = b"code/".to_vec();
+                k.extend_from_slice(&account.code_hash);
+                k
+            };
+            let bytecode = match store.get(&code_key) {
+                Ok(Some(b)) => b,
+                _ => continue,
+            };
+
+            let ctx = solen_vm::host::HostContext {
+                caller: [0u8; 32],
+                block_height: self.engine.height(),
+                storage: std::collections::HashMap::new(),
+                events: Vec::new(),
+                return_data: Vec::new(),
+            };
+
+            let vm = match solen_vm::runtime::VmRuntime::new() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if let Ok(result) = vm.execute(&account.code_hash, &bytecode, &input, ctx, None) {
+                if !result.return_data.is_empty() && result.return_data[0] == 1 {
+                    let max_gas = if result.return_data.len() >= 17 {
+                        let mut buf = [0u8; 16];
+                        buf.copy_from_slice(&result.return_data[1..17]);
+                        Some(u128::from_le_bytes(buf).to_string())
+                    } else {
+                        None
+                    };
+
+                    return Ok(SponsorshipResult {
+                        sponsored: true,
+                        paymaster: Some(hex_encode(pm)),
+                        max_gas,
+                        reason: None,
+                    });
+                }
+            }
+        }
+
+        Ok(SponsorshipResult {
+            sponsored: false,
+            paymaster: None,
+            max_gas: None,
+            reason: Some("no paymaster willing to sponsor".to_string()),
+        })
+    }
+
+    fn get_rollup_status(&self, rollup_id: u64) -> RpcResult<RollupStatusInfo> {
+        let registry = self.engine.proof_registry();
+        let registry = registry.read().map_err(|e| internal_error(e.to_string()))?;
+
+        let last_state_root = registry.last_state_root(rollup_id);
+
+        Ok(RollupStatusInfo {
+            rollup_id,
+            registered: last_state_root.is_some(),
+            last_verified_state_root: last_state_root.map(|r| hex_encode(&r)),
+            last_batch_index: None, // TODO: track batch indices in registry
+        })
+    }
+
+    fn submit_batch(&self, req: BatchSubmitRequest) -> RpcResult<BatchSubmitResult> {
+        let state_root = parse_hash(&req.state_root)?;
+        let data_hash = parse_hash(&req.data_hash)?;
+        let proof = hex_decode(&req.proof)?;
+
+        let commitment = BatchCommitment {
+            rollup_id: req.rollup_id,
+            batch_index: req.batch_index,
+            state_root,
+            data_hash,
+            proof,
+        };
+
+        let registry = self.engine.proof_registry();
+        let mut registry = registry.write().map_err(|e| internal_error(e.to_string()))?;
+
+        match registry.verify_batch(&commitment) {
+            Ok(verified) => Ok(BatchSubmitResult {
+                accepted: true,
+                verified,
+                error: if verified { None } else { Some("proof verification failed".to_string()) },
+            }),
+            Err(e) => Ok(BatchSubmitResult {
+                accepted: false,
+                verified: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+}
+
+fn parse_hash(s: &str) -> RpcResult<[u8; 32]> {
+    let bytes = hex_decode(s)?;
+    if bytes.len() != 32 {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!("hash must be 32 bytes, got {}", bytes.len()),
+            None::<()>,
+        ));
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bytes);
+    Ok(h)
+}
+
+fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
+    match c {
+        ConstraintInfo::MinBalance { account, min_amount } => Ok(Constraint::MinBalance {
+            account: parse_account_id(account)?,
+            min_amount: min_amount.parse().map_err(|_| {
+                ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>)
+            })?,
+        }),
+        ConstraintInfo::MaxSpend { account, max_amount } => Ok(Constraint::MaxSpend {
+            account: parse_account_id(account)?,
+            max_amount: max_amount.parse().map_err(|_| {
+                ErrorObjectOwned::owned(-32602, "invalid max_amount", None::<()>)
+            })?,
+        }),
+        ConstraintInfo::RequireTransfer { from, to, min_amount } => Ok(Constraint::RequireTransfer {
+            from: parse_account_id(from)?,
+            to: parse_account_id(to)?,
+            min_amount: min_amount.parse().map_err(|_| {
+                ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>)
+            })?,
+        }),
+        ConstraintInfo::RequireCall { target, method } => Ok(Constraint::RequireCall {
+            target: parse_account_id(target)?,
+            method: method.clone(),
+        }),
+        ConstraintInfo::Custom { verifier, data } => Ok(Constraint::Custom {
+            verifier: parse_account_id(verifier)?,
+            data: hex_decode(data)?,
+        }),
     }
 }
 

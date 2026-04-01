@@ -88,3 +88,4 @@ solen-rpc = { path = "crates/solen-rpc" }
 solen-p2p = { path = "crates/solen-p2p" }
 solen-indexer = { path = "crates/solen-indexer" }
 solen-storage = { path = "crates/solen-storage" }
+solen-intents = { path = "crates/solen-intents" }

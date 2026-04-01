@@ -12,7 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use solen_crypto::blake3_hash;
 use solen_execution::executor::BlockExecutor;
+use solen_execution::proof::ProofVerifierRegistry;
 use solen_execution::receipt::BlockResult;
+use solen_intents::pool::IntentPool;
 use solen_storage::StateStore;
 use solen_types::block::BlockHeader;
 use solen_types::transaction::UserOperation;
@@ -102,6 +104,10 @@ pub struct ConsensusEngine {
     pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
     /// Reward events from epoch transitions, included in the next block's receipts.
     pending_reward_receipts: Arc<RwLock<Vec<solen_execution::receipt::ExecutionReceipt>>>,
+    /// Intent pool for intent-aware execution.
+    intent_pool: Arc<IntentPool>,
+    /// Rollup proof verification registry.
+    proof_registry: Arc<RwLock<ProofVerifierRegistry>>,
 }
 
 impl ConsensusEngine {
@@ -171,6 +177,12 @@ impl ConsensusEngine {
             pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
+            intent_pool: Arc::new(IntentPool::new(10_000)),
+            proof_registry: {
+                let mut reg = ProofVerifierRegistry::new();
+                reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
+                Arc::new(RwLock::new(reg))
+            },
         }
     }
 
@@ -192,6 +204,14 @@ impl ConsensusEngine {
 
     pub fn validator_set(&self) -> Arc<RwLock<ValidatorSet>> {
         self.validator_set.clone()
+    }
+
+    pub fn intent_pool(&self) -> Arc<IntentPool> {
+        self.intent_pool.clone()
+    }
+
+    pub fn proof_registry(&self) -> Arc<RwLock<ProofVerifierRegistry>> {
+        self.proof_registry.clone()
     }
 
     /// Simulate an operation using the engine's executor (with correct chain_id).
@@ -223,6 +243,13 @@ impl ConsensusEngine {
     pub fn produce_block(&self) -> ProducedBlock {
         let ops = self.mempool.drain(self.config.max_ops_per_block);
         let op_count = ops.len();
+
+        // Expire intents past current height.
+        let current_h = self.height();
+        let expired = self.intent_pool.expire(current_h);
+        if expired > 0 {
+            debug!(expired, height = current_h, "expired intents");
+        }
 
         let (parent_hash, height) = {
             let chain = self.chain.read().unwrap();

@@ -305,6 +305,8 @@ impl BlockExecutor {
                 events: vec![],
             };
         }
+
+        let max_possible_fee = 0u128; // No upfront reservation.
         drop(state);
 
         // Execute each action. For multi-action operations, save the sender's
@@ -344,11 +346,23 @@ impl BlockExecutor {
             }
         }
 
-        // If any action failed, roll back the sender's balance to pre-execution state.
+        // If any action failed, roll back the sender's balance and refund reserved fee.
         if let Some(err) = action_failed {
-            if let Some(original) = pre_state {
+            if let Some(mut original) = pre_state {
+                // Restore original balance but consume the actual gas fee.
+                let actual_fee = self.fee_config.calculate_fee(gas_used);
+                original.balance = original.balance.saturating_sub(actual_fee);
                 let mut state = StateManager::new(store);
                 let _ = state.save_account(&original);
+            } else if max_possible_fee > 0 {
+                // Refund reserved fee minus actual gas.
+                let actual_fee = self.fee_config.calculate_fee(gas_used);
+                let refund = max_possible_fee.saturating_sub(actual_fee);
+                let mut state = StateManager::new(store);
+                if let Ok(Some(mut acct)) = state.get_account(&op.sender) {
+                    acct.balance = acct.balance.saturating_add(refund);
+                    let _ = state.save_account(&acct);
+                }
             }
             warn!(sender = ?op.sender[..4], error = %err, "action execution failed");
             return ExecutionReceipt {
@@ -361,25 +375,14 @@ impl BlockExecutor {
             };
         }
 
-        // Deduct fees from sender, credit treasury.
+        // Settle fees: refund reserved amount, charge actual gas used.
         let total_fee = self.fee_config.calculate_fee(gas_used);
-        if total_fee > 0 {
+        if max_possible_fee > 0 || total_fee > 0 {
             let mut state = StateManager::new(store);
             if let Ok(Some(mut sender_acct)) = state.get_account(&op.sender) {
-                if sender_acct.balance < total_fee {
-                    return ExecutionReceipt {
-                        sender: op.sender,
-                        nonce: op.nonce,
-                        success: false,
-                        gas_used,
-                        error: Some(format!(
-                            "insufficient balance for fee: need {} but have {}",
-                            total_fee, sender_acct.balance
-                        )),
-                        events,
-                    };
-                }
-                sender_acct.balance -= total_fee;
+                // Refund the reserved max fee, then deduct actual fee.
+                sender_acct.balance = sender_acct.balance.saturating_add(max_possible_fee);
+                sender_acct.balance = sender_acct.balance.saturating_sub(total_fee);
                 save_or_warn(&mut state, &sender_acct);
 
                 // Credit treasury (non-burned portion).

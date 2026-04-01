@@ -21,6 +21,9 @@ pub struct SystemCallResult {
 const SYSTEM_CALL_GAS: u64 = 200;
 
 /// Execute a system contract call.
+/// Minimum balance to retain after system call deductions (for gas fees).
+const MIN_FEE_RESERVE: u128 = 10_000;
+
 pub fn execute_system_call(
     store: &mut dyn StateStore,
     sender: &AccountId,
@@ -103,8 +106,8 @@ fn execute_staking_call(
             let mut state = StateManager::new(store);
             match state.require_account(sender) {
                 Ok(mut acct) => {
-                    if acct.balance < amount {
-                        return err("insufficient balance for registration");
+                    if acct.balance < amount + MIN_FEE_RESERVE {
+                        return err("insufficient balance for registration (need fee reserve)");
                     }
                     acct.balance -= amount;
                     if let Err(e) = state.save_account(&acct) {
@@ -155,8 +158,8 @@ fn execute_staking_call(
             let mut state = StateManager::new(store);
             match state.require_account(sender) {
                 Ok(mut acct) => {
-                    if acct.balance < amount {
-                        return err("insufficient balance for delegation");
+                    if acct.balance < amount + MIN_FEE_RESERVE {
+                        return err("insufficient balance for delegation (need fee reserve)");
                     }
                     acct.balance -= amount;
                     if let Err(e) = state.save_account(&acct) {
@@ -278,10 +281,10 @@ fn execute_governance_call(
         let mut state = StateManager::new(store);
         match state.require_account(sender) {
             Ok(mut acct) => {
-                if acct.balance < PROPOSAL_DEPOSIT {
+                if acct.balance < PROPOSAL_DEPOSIT + MIN_FEE_RESERVE {
                     return err(&format!(
-                        "insufficient balance for proposal deposit: need {} (1,000 SOLEN)",
-                        PROPOSAL_DEPOSIT
+                        "insufficient balance for proposal deposit: need {} (1,000 SOLEN + fee reserve)",
+                        PROPOSAL_DEPOSIT + MIN_FEE_RESERVE
                     ));
                 }
                 acct.balance -= PROPOSAL_DEPOSIT;

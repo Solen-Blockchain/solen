@@ -353,6 +353,7 @@ strip = true
 "#;
     // Find the SDK path — check common locations.
     let candidates = [
+        std::path::PathBuf::from("/opt/solen/crates/solen-contract-sdk"),
         std::path::PathBuf::from("/root/solen/crates/solen-contract-sdk"),
         std::path::PathBuf::from("/home/solen/solen/crates/solen-contract-sdk"),
         std::env::current_exe()
@@ -362,6 +363,10 @@ strip = true
             .unwrap_or_default(),
         std::path::PathBuf::from("crates/solen-contract-sdk"),
     ];
+    for c in &candidates {
+        let exists = c.join("Cargo.toml").exists();
+        tracing::info!(path = %c.display(), exists, "contract verification: checking SDK candidate");
+    }
     let sdk_path = candidates.iter()
         .find(|p| p.join("Cargo.toml").exists())
         .cloned()

@@ -56,6 +56,12 @@ pub enum ProposalAction {
     SetMaxOpsPerBlock { new_max: usize },
     /// Register a new rollup domain.
     RegisterRollup { rollup_id: u64, name: String },
+    /// Change the fee burn rate (basis points, 0-10000).
+    SetBurnRate { new_burn_rate_bps: u64 },
+    /// Change epoch reward amount (base units per epoch).
+    SetEpochReward { new_reward: u128 },
+    /// Change minimum validator self-stake (base units).
+    SetMinValidatorStake { new_min_stake: u128 },
     /// Emergency pause (circuit breaker).
     EmergencyPause,
     /// Resume from emergency pause.

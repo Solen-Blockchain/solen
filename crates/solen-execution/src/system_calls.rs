@@ -106,6 +106,16 @@ fn execute_staking_call(
                 None => return err("invalid args: need amount[16]"),
             };
 
+            // Check governance-configured min stake (falls back to default).
+            let min_stake = read_config_u128(store, b"__config_min_validator_stake__")
+                .unwrap_or(solen_system_contracts::staking::MIN_VALIDATOR_STAKE);
+            if amount < min_stake {
+                return err(&format!(
+                    "insufficient stake: need {} but got {}",
+                    min_stake, amount
+                ));
+            }
+
             // Deduct from sender balance.
             let mut state = StateManager::new(store);
             match state.require_account(sender) {
@@ -343,6 +353,69 @@ fn execute_governance_call(
             });
             Ok(())
         }
+        "propose_set_burn_rate" => {
+            let new_burn_rate_bps = match read_u64(args, 0) {
+                Some(r) => r,
+                None => return err("invalid args: need new_burn_rate_bps[8]"),
+            };
+            if new_burn_rate_bps > 10_000 {
+                return err("burn rate cannot exceed 10000 bps (100%)");
+            }
+            let desc = String::from_utf8_lossy(&args[8..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetBurnRate { new_burn_rate_bps },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
+        "propose_set_epoch_reward" => {
+            let new_reward = match read_u128(args, 0) {
+                Some(r) => r,
+                None => return err("invalid args: need new_reward[16]"),
+            };
+            let desc = String::from_utf8_lossy(&args[16..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetEpochReward { new_reward },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
+        "propose_set_min_validator_stake" => {
+            let new_min_stake = match read_u128(args, 0) {
+                Some(s) => s,
+                None => return err("invalid args: need new_min_stake[16]"),
+            };
+            let desc = String::from_utf8_lossy(&args[16..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetMinValidatorStake { new_min_stake },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
         "vote" => {
             // args: proposal_id[8] + support[1] + stake_weight[16]
             let proposal_id = match read_u64(args, 0) {
@@ -441,6 +514,18 @@ fn execute_governance_call(
                         ProposalAction::SetBlockTime { new_block_time_ms } => {
                             let _ = store.put(b"__config_block_time__", &new_block_time_ms.to_le_bytes());
                             format!("block_time={}ms", new_block_time_ms)
+                        }
+                        ProposalAction::SetBurnRate { new_burn_rate_bps } => {
+                            let _ = store.put(b"__config_burn_rate__", &new_burn_rate_bps.to_le_bytes());
+                            format!("burn_rate={}bps", new_burn_rate_bps)
+                        }
+                        ProposalAction::SetEpochReward { new_reward } => {
+                            let _ = store.put(b"__config_epoch_reward__", &new_reward.to_le_bytes());
+                            format!("epoch_reward={}", new_reward)
+                        }
+                        ProposalAction::SetMinValidatorStake { new_min_stake } => {
+                            let _ = store.put(b"__config_min_validator_stake__", &new_min_stake.to_le_bytes());
+                            format!("min_validator_stake={}", new_min_stake)
                         }
                         ProposalAction::EmergencyPause => "paused".to_string(),
                         ProposalAction::EmergencyResume => "resumed".to_string(),
@@ -1071,5 +1156,16 @@ fn read_current_epoch(store: &dyn StateStore) -> u64 {
             height / 100 // epoch length = 100 blocks
         }
         _ => 0,
+    }
+}
+
+fn read_config_u128(store: &dyn StateStore, key: &[u8]) -> Option<u128> {
+    match store.get(key) {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&data[..16]);
+            Some(u128::from_le_bytes(buf))
+        }
+        _ => None,
     }
 }

@@ -376,7 +376,16 @@ impl BlockExecutor {
         }
 
         // Settle fees: refund reserved amount, charge actual gas used.
-        let total_fee = self.fee_config.calculate_fee(gas_used);
+        // Read burn rate from governance config (may have been changed by proposal).
+        let mut fee_config = self.fee_config.clone();
+        if let Ok(Some(data)) = store.get(b"__config_burn_rate__") {
+            if data.len() >= 8 {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&data[..8]);
+                fee_config.burn_rate_bps = u64::from_le_bytes(buf);
+            }
+        }
+        let total_fee = fee_config.calculate_fee(gas_used);
         if max_possible_fee > 0 || total_fee > 0 {
             let mut state = StateManager::new(store);
             if let Ok(Some(mut sender_acct)) = state.get_account(&op.sender) {
@@ -386,10 +395,10 @@ impl BlockExecutor {
                 save_or_warn(&mut state, &sender_acct);
 
                 // Credit treasury (non-burned portion).
-                let treasury_share = self.fee_config.treasury_amount(total_fee);
+                let treasury_share = fee_config.treasury_amount(total_fee);
                 if treasury_share > 0 {
                     if let Ok(Some(mut treasury)) =
-                        state.get_account(&self.fee_config.treasury_account)
+                        state.get_account(&fee_config.treasury_account)
                     {
                         treasury.balance = treasury.balance.saturating_add(treasury_share);
                         save_or_warn(&mut state, &treasury);
@@ -646,7 +655,16 @@ fn distribute_epoch_rewards_in_executor(
     use solen_types::system::STAKING_POOL_ADDRESS;
 
     let current_epoch = height / 100; // epoch length = 100 blocks
-    let reward_per_epoch: u128 = 31_700_000_000; // 317 SOLEN (8 decimals)
+
+    // Read epoch reward from governance config, or use default (317 SOLEN).
+    let reward_per_epoch: u128 = match store.get(b"__config_epoch_reward__") {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&data[..16]);
+            u128::from_le_bytes(buf)
+        }
+        _ => 31_700_000_000, // 317 SOLEN (8 decimals)
+    };
 
     let staking = StakingContract::load(store);
 

@@ -38,6 +38,9 @@ pub struct ContractSource {
     pub language: String,
     pub compiler_version: String,
     pub published_at: u64,
+    /// Whether the source has been verified to compile to the on-chain bytecode.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// An indexed event.

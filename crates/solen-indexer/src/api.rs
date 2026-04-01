@@ -301,6 +301,7 @@ async fn publish_contract_source(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
+        verified: false,
     };
 
     store.contract_sources.insert(code_hash, source);

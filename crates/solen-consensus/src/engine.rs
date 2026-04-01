@@ -102,9 +102,6 @@ pub struct ConsensusEngine {
     pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
     /// Reward events from epoch transitions, included in the next block's receipts.
     pending_reward_receipts: Arc<RwLock<Vec<solen_execution::receipt::ExecutionReceipt>>>,
-    /// Count of consecutive fork mismatches at the same height.
-    fork_mismatch_count: Arc<std::sync::atomic::AtomicU32>,
-    fork_mismatch_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ConsensusEngine {
@@ -174,8 +171,6 @@ impl ConsensusEngine {
             pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
-            fork_mismatch_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            fork_mismatch_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -386,34 +381,14 @@ impl ConsensusEngine {
         };
 
         if fork_detected {
-            // The peer's chain is the network consensus — adopt it.
-            // Pop our conflicting block and re-execute the peer's version.
-            let fmt = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
-            let our_hash = {
-                let mut chain = self.chain.write().unwrap();
-                let hash = chain.last().map(|b| fmt(&block_hash(&b.header))).unwrap_or_default();
-                chain.pop(); // Remove our conflicting block.
-                hash
-            };
-            let their_parent = fmt(&header.parent_hash);
-            warn!(
+            // Parent hash doesn't match — our last block differs from the network's.
+            // Don't pop or modify our chain. Just reject this block.
+            // Sync will eventually deliver the correct block sequence.
+            debug!(
                 height = header.height,
-                our_block_hash = &our_hash[..16],
-                their_parent_hash = &their_parent[..16],
-                "parent hash mismatch — adopting peer's chain"
+                "parent hash mismatch — rejecting block, waiting for sync"
             );
-            // Clear any pending state for this height.
-            self.pending_blocks.write().unwrap().remove(&(header.height - 1));
-            self.pending_blocks.write().unwrap().remove(&header.height);
-            self.pending_attestations.write().unwrap().remove(&header.height);
-            // Fall through to re-execute and accept the peer's block below.
-            // Recompute expected height after popping.
-            let new_height = self.height();
-            if header.height != new_height + 1 {
-                // Still can't accept — too far apart. Let sync handle it.
-                self.handle_fork(header.height);
-                return false;
-            }
+            return false;
         }
 
         if header.height > expected_height && !fork_detected {
@@ -504,82 +479,6 @@ impl ConsensusEngine {
         );
 
         true
-    }
-
-    /// Handle a fork: track repeated mismatches and escalate response.
-    ///
-    /// - First 3 mismatches at the same height: just reject and wait for sync.
-    /// - After 3+: full state reset and resync from genesis.
-    ///
-    /// This avoids nuking state on transient disagreements but recovers
-    /// from genuine state divergence.
-    fn handle_fork(&self, fork_height: u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-
-        let last_height = self.fork_mismatch_height.load(Relaxed);
-        if last_height == fork_height {
-            self.fork_mismatch_count.fetch_add(1, Relaxed);
-        } else {
-            self.fork_mismatch_height.store(fork_height, Relaxed);
-            self.fork_mismatch_count.store(1, Relaxed);
-        }
-
-        let count = self.fork_mismatch_count.load(Relaxed);
-
-        if count <= 3 {
-            // Mild response: clear pending state, wait for sync to resolve it.
-            warn!(
-                fork_height,
-                mismatch_count = count,
-                "parent hash mismatch — rejecting block ({}/3 before resync)",
-                count
-            );
-            self.pending_blocks.write().unwrap().remove(&fork_height);
-            self.pending_attestations.write().unwrap().remove(&fork_height);
-        } else {
-            // Escalate: we're stuck on the wrong fork. Full state reset.
-            warn!(
-                fork_height,
-                mismatch_count = count,
-                "persistent fork — resetting state to resync from peers"
-            );
-
-            // Clear in-memory chain.
-            self.chain.write().unwrap().clear();
-
-            // Wipe account state and system contracts.
-            {
-                let mut store = self.store.write().unwrap();
-                let mut total_deleted = 0usize;
-                for prefix in &[b"acc/" as &[u8], b"cs/", b"code/"] {
-                    if let Ok(n) = store.delete_prefix(prefix) {
-                        total_deleted += n;
-                    }
-                }
-                for key in &[
-                    b"__staking_state__" as &[u8],
-                    b"__governance_state__",
-                    b"__bridge_state__",
-                    b"__treasury_state__",
-                    b"__vesting_state__",
-                ] {
-                    let _ = store.delete(*key);
-                }
-                save_chain_meta(store.as_mut(), 0, 0);
-                info!(deleted = total_deleted, "wiped state for full resync");
-            }
-
-            // Reset epoch and pending state.
-            self.epoch_manager.write().unwrap().current_epoch = 0;
-            self.pending_blocks.write().unwrap().clear();
-            self.pending_attestations.write().unwrap().clear();
-            self.pending_reward_receipts.write().unwrap().clear();
-
-            // Reset counter.
-            self.fork_mismatch_count.store(0, Relaxed);
-
-            info!("full resync initiated — will rebuild state from peers via StatusAnnounce");
-        }
     }
 
     /// Accept an attestation from a validator. If quorum is reached,

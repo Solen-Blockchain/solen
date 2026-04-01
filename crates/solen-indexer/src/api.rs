@@ -348,11 +348,20 @@ opt-level = "z"
 lto = true
 strip = true
 "#;
-    // Find the SDK path relative to the binary.
-    let sdk_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .map(|p| p.join("../../crates/solen-contract-sdk"))
+    // Find the SDK path — check common locations.
+    let candidates = [
+        std::path::PathBuf::from("/root/solen/crates/solen-contract-sdk"),
+        std::path::PathBuf::from("/home/solen/solen/crates/solen-contract-sdk"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .map(|p| p.join("../../crates/solen-contract-sdk"))
+            .unwrap_or_default(),
+        std::path::PathBuf::from("crates/solen-contract-sdk"),
+    ];
+    let sdk_path = candidates.iter()
+        .find(|p| p.join("Cargo.toml").exists())
+        .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("crates/solen-contract-sdk"));
 
     let cargo_toml = cargo_toml.replace("${SDK_PATH}", &sdk_path.to_string_lossy());

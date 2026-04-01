@@ -275,6 +275,7 @@ async fn get_contract_source(
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct PublishSourceRequest {
     code_hash: String,
     source_code: String,

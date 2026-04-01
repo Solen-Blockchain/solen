@@ -20,6 +20,11 @@ pub const QUORUM_BPS: u64 = 3000; // 30%
 /// Supermajority threshold for passing (basis points).
 pub const PASS_THRESHOLD_BPS: u64 = 6667; // 66.67%
 
+/// Minimum deposit to create a proposal (in base units).
+/// Returned if proposal passes, sent to treasury if rejected.
+/// 1,000 SOLEN = 100,000,000,000 base units.
+pub const PROPOSAL_DEPOSIT: u128 = 1_000 * 100_000_000;
+
 #[derive(Debug, Error)]
 pub enum GovernanceError {
     #[error("proposal not found")]
@@ -89,6 +94,9 @@ pub struct Proposal {
     pub votes: Vec<Vote>,
     pub total_for: u128,
     pub total_against: u128,
+    /// Deposit paid by proposer (returned if passed, burned if rejected).
+    #[serde(default)]
+    pub deposit: u128,
 }
 
 /// The governance contract state.
@@ -108,7 +116,10 @@ fn default_voting_period() -> u64 {
 
 impl GovernanceContract {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            voting_period: DEFAULT_VOTING_PERIOD,
+            ..Default::default()
+        }
     }
 
     /// Create a new proposal.
@@ -137,6 +148,7 @@ impl GovernanceContract {
             votes: Vec::new(),
             total_for: 0,
             total_against: 0,
+            deposit: PROPOSAL_DEPOSIT,
         });
 
         id

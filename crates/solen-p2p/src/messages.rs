@@ -70,18 +70,23 @@ impl NetworkMessage {
         }
     }
 
-    /// Serialize to compressed JSON bytes for gossip.
+    /// Serialize to bytes for gossip.
+    /// SyncBlocks are compressed (large payloads). Everything else is raw JSON.
     pub fn encode(&self) -> Option<Vec<u8>> {
         let json = serde_json::to_vec(self).ok()?;
-        // Prefix with 0x01 to indicate compressed format.
-        let mut compressed = vec![0x01];
-        let mut encoder = flate2::write::DeflateEncoder::new(
-            Vec::new(),
-            flate2::Compression::fast(),
-        );
-        std::io::Write::write_all(&mut encoder, &json).ok()?;
-        compressed.extend(encoder.finish().ok()?);
-        Some(compressed)
+        if matches!(self, NetworkMessage::SyncBlocks { .. }) && json.len() > 1024 {
+            // Compress large sync messages. Prefix with 0x01.
+            let mut compressed = vec![0x01];
+            let mut encoder = flate2::write::DeflateEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            );
+            std::io::Write::write_all(&mut encoder, &json).ok()?;
+            compressed.extend(encoder.finish().ok()?);
+            Some(compressed)
+        } else {
+            Some(json)
+        }
     }
 
     /// Deserialize from gossip bytes (supports both compressed and raw JSON).
@@ -94,7 +99,7 @@ impl NetworkMessage {
                 return serde_json::from_slice(&json);
             }
         }
-        // Fall back to raw JSON (backwards compatible with old nodes).
+        // Raw JSON (default for blocks, attestations, etc.).
         serde_json::from_slice(data)
     }
 }

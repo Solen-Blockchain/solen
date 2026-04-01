@@ -267,10 +267,33 @@ fn execute_governance_call(
     method: &str,
     args: &[u8],
 ) -> SystemCallResult {
-    use solen_system_contracts::governance::{GovernanceContract, ProposalAction};
+    use solen_system_contracts::governance::{GovernanceContract, ProposalAction, PROPOSAL_DEPOSIT};
 
     let mut gov = GovernanceContract::load(store);
     let mut events = Vec::new();
+
+    // Deduct proposal deposit for proposal methods.
+    let is_proposal = method.starts_with("propose_");
+    if is_proposal {
+        let mut state = StateManager::new(store);
+        match state.require_account(sender) {
+            Ok(mut acct) => {
+                if acct.balance < PROPOSAL_DEPOSIT {
+                    return err(&format!(
+                        "insufficient balance for proposal deposit: need {} (1,000 SOLEN)",
+                        PROPOSAL_DEPOSIT
+                    ));
+                }
+                acct.balance -= PROPOSAL_DEPOSIT;
+                if let Err(e) = state.save_account(&acct) {
+                    return err(&format!("state save failed: {e}"));
+                }
+            }
+            Err(e) => return err(&e.to_string()),
+        }
+        drop(state);
+        gov = GovernanceContract::load(store);
+    }
 
     let result = match method {
         "propose_set_base_fee" => {
@@ -349,9 +372,31 @@ fn execute_governance_call(
                 .map(|v| v.total_stake())
                 .sum();
 
+            // Get proposer and deposit before finalizing.
+            let (proposer, deposit) = gov.get_proposal(proposal_id)
+                .map(|p| (p.proposer, p.deposit))
+                .unwrap_or(([0u8; 32], 0));
+
             match gov.finalize(proposal_id, total_stake, epoch) {
                 Ok(status) => {
                     let status_str = format!("{:?}", status);
+
+                    // Handle deposit: return to proposer if passed, send to treasury if rejected.
+                    if deposit > 0 {
+                        use solen_system_contracts::governance::ProposalStatus;
+                        let recipient = match status {
+                            ProposalStatus::Passed => proposer,
+                            _ => solen_types::system::TREASURY_ADDRESS,
+                        };
+                        let mut state = StateManager::new(store);
+                        if let Ok(mut acct) = state.require_account(&recipient) {
+                            acct.balance = acct.balance.saturating_add(deposit);
+                            let _ = state.save_account(&acct);
+                        }
+                        drop(state);
+                        gov = GovernanceContract::load(store);
+                    }
+
                     events.push(Event {
                         emitter: GOVERNANCE_ADDRESS,
                         topic: b"proposal_finalized".to_vec(),

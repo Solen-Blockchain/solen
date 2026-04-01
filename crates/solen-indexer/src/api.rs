@@ -288,24 +288,125 @@ async fn publish_contract_source(
     Path(code_hash): Path<String>,
     Json(body): Json<PublishSourceRequest>,
 ) -> Json<serde_json::Value> {
+    let source_code = body.source_code.clone();
+    let language = body.language.unwrap_or_else(|| "rust".to_string());
+    let compiler_version = body.compiler_version.unwrap_or_else(|| "unknown".to_string());
+    let expected_hash = code_hash.clone();
+
+    // Try to verify by compiling the source.
+    let verified = if language == "rust" {
+        verify_rust_contract(&source_code, &expected_hash)
+    } else {
+        false
+    };
+
     let mut store = state.store.write().unwrap();
-
-    // Accept any code hash — source can be published for any deployed contract.
-
     let source = crate::store::ContractSource {
         code_hash: code_hash.clone(),
-        source_code: body.source_code,
-        language: body.language.unwrap_or_else(|| "rust".to_string()),
-        compiler_version: body.compiler_version.unwrap_or_else(|| "unknown".to_string()),
+        source_code,
+        language,
+        compiler_version,
         published_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
-        verified: false,
+        verified,
     };
 
     store.contract_sources.insert(code_hash, source);
-    Json(serde_json::json!({"success": true}))
+    Json(serde_json::json!({"success": true, "verified": verified}))
+}
+
+/// Compile Rust contract source and verify bytecode hash matches.
+fn verify_rust_contract(source_code: &str, expected_hash: &str) -> bool {
+    use std::io::Write;
+    use std::process::Command;
+
+    let tmp = match tempfile::TempDir::new() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    let src_dir = tmp.path().join("src");
+    if std::fs::create_dir_all(&src_dir).is_err() {
+        return false;
+    }
+
+    // Write Cargo.toml.
+    let cargo_toml = r#"[package]
+name = "verify-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+solen-contract-sdk = { path = "${SDK_PATH}" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+"#;
+    // Find the SDK path relative to the binary.
+    let sdk_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .map(|p| p.join("../../crates/solen-contract-sdk"))
+        .unwrap_or_else(|| std::path::PathBuf::from("crates/solen-contract-sdk"));
+
+    let cargo_toml = cargo_toml.replace("${SDK_PATH}", &sdk_path.to_string_lossy());
+
+    if std::fs::write(tmp.path().join("Cargo.toml"), &cargo_toml).is_err() {
+        return false;
+    }
+
+    if std::fs::write(src_dir.join("lib.rs"), source_code).is_err() {
+        return false;
+    }
+
+    // Compile.
+    let output = Command::new("cargo")
+        .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+        .current_dir(tmp.path())
+        .env("CARGO_TARGET_DIR", tmp.path().join("target"))
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        tracing::warn!("contract verification: compilation failed");
+        return false;
+    }
+
+    // Find the WASM output.
+    let wasm_path = tmp.path()
+        .join("target/wasm32-unknown-unknown/release/verify_contract.wasm");
+
+    let wasm_bytes = match std::fs::read(&wasm_path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    // Hash and compare.
+    let hash = solen_crypto::blake3_hash(&wasm_bytes);
+    let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+
+    if hash_hex == expected_hash {
+        tracing::info!("contract verification: VERIFIED — bytecode matches");
+        true
+    } else {
+        tracing::warn!(
+            expected = expected_hash,
+            actual = hash_hex,
+            "contract verification: hash mismatch"
+        );
+        false
+    }
 }
 
 async fn get_account_tokens(

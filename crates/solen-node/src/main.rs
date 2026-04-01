@@ -321,11 +321,15 @@ async fn main() -> anyhow::Result<()> {
                         // accept_block handles fast-forward for gaps.
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {
-                            // Block accepted with matching state root.
-                            // If we were syncing, we're now verified in sync.
+                            // Block accepted (stored as pending, not yet executed).
+                            // If we were syncing, this live block verifies our state.
+                            // Force-finalize it immediately — the network already has
+                            // consensus on this block, no need to wait for attestations.
                             if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                                // Clear stale pending blocks/attestations from before sync.
-                                engine_for_p2p.clear_stale_pending(header.height);
+                                // Clear stale pending blocks from BEFORE this height.
+                                engine_for_p2p.clear_stale_pending(header.height.saturating_sub(1));
+                                // Immediately finalize the accepted block (executes it).
+                                engine_for_p2p.force_finalize_block(header.height);
                                 tracing::info!(
                                     height = header.height,
                                     "state verified — resuming block production"

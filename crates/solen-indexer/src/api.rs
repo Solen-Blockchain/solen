@@ -289,10 +289,7 @@ async fn publish_contract_source(
 ) -> Json<serde_json::Value> {
     let mut store = state.store.write().unwrap();
 
-    // Verify the code_hash is a known contract.
-    if !store.contracts.contains(&code_hash) && !store.contracts.contains(&body.code_hash) {
-        return Json(serde_json::json!({"error": "unknown contract code hash"}));
-    }
+    // Accept any code hash — source can be published for any deployed contract.
 
     let source = crate::store::ContractSource {
         code_hash: code_hash.clone(),

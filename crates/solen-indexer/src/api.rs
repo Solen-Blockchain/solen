@@ -323,7 +323,10 @@ fn verify_rust_contract(source_code: &str, expected_hash: &str) -> bool {
 
     let tmp = match tempfile::TempDir::new() {
         Ok(d) => d,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::warn!(error = %e, "contract verification: failed to create temp dir");
+            return false;
+        }
     };
 
     let src_dir = tmp.path().join("src");
@@ -364,6 +367,8 @@ strip = true
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("crates/solen-contract-sdk"));
 
+    tracing::info!(sdk_path = %sdk_path.display(), "contract verification: using SDK path");
+
     let cargo_toml = cargo_toml.replace("${SDK_PATH}", &sdk_path.to_string_lossy());
 
     if std::fs::write(tmp.path().join("Cargo.toml"), &cargo_toml).is_err() {
@@ -387,7 +392,8 @@ strip = true
     };
 
     if !output.status.success() {
-        tracing::warn!("contract verification: compilation failed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(stderr = %stderr, "contract verification: compilation failed");
         return false;
     }
 

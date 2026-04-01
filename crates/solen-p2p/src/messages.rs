@@ -70,13 +70,31 @@ impl NetworkMessage {
         }
     }
 
-    /// Serialize to JSON bytes for gossip.
+    /// Serialize to compressed JSON bytes for gossip.
     pub fn encode(&self) -> Option<Vec<u8>> {
-        serde_json::to_vec(self).ok()
+        let json = serde_json::to_vec(self).ok()?;
+        // Prefix with 0x01 to indicate compressed format.
+        let mut compressed = vec![0x01];
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        );
+        std::io::Write::write_all(&mut encoder, &json).ok()?;
+        compressed.extend(encoder.finish().ok()?);
+        Some(compressed)
     }
 
-    /// Deserialize from JSON bytes.
+    /// Deserialize from gossip bytes (supports both compressed and raw JSON).
     pub fn decode(data: &[u8]) -> Result<Self, serde_json::Error> {
+        if data.first() == Some(&0x01) {
+            // Compressed format.
+            let mut decoder = flate2::read::DeflateDecoder::new(&data[1..]);
+            let mut json = Vec::new();
+            if std::io::Read::read_to_end(&mut decoder, &mut json).is_ok() {
+                return serde_json::from_slice(&json);
+            }
+        }
+        // Fall back to raw JSON (backwards compatible with old nodes).
         serde_json::from_slice(data)
     }
 }

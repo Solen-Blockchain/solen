@@ -422,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
                         // Serve blocks to the requesting peer.
-                        let max_batch = 10; // Keep small — blocks include operations + receipts
+                        let max_batch = 20;
                         let _to = to_height.min(from_height + max_batch as u64 - 1);
                         let blocks = engine_for_p2p.get_blocks_for_sync(from_height, max_batch);
 

@@ -390,7 +390,15 @@ async fn main() -> anyhow::Result<()> {
                     NetworkMessage::StatusAnnounce { height, .. } => {
                         // Track peer heights to prevent a single rogue node from
                         // stalling the network with a fake longer chain.
-                        peer_heights_for_p2p.lock().unwrap().push(height);
+                        {
+                            let mut ph = peer_heights_for_p2p.lock().unwrap();
+                            ph.push(height);
+                            // Cap to prevent unbounded growth (memory leak).
+                            let len = ph.len();
+                            if len > 100 {
+                                ph.drain(..len - 100);
+                            }
+                        }
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {

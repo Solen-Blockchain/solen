@@ -269,8 +269,8 @@ impl StakingContract {
             .iter_mut()
             .find(|d| d.delegator == delegator && d.validator == validator)
         {
-            d.amount += amount;
-            d.reward_debt += reward_debt;
+            d.amount = d.amount.saturating_add(amount);
+            d.reward_debt = d.reward_debt.saturating_add(reward_debt);
             // Don't reset eligible_from_epoch on additional delegation
         } else {
             self.delegations.push(Delegation {

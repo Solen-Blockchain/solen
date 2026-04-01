@@ -939,33 +939,9 @@ fn execute_guardian_call(
                 None => return err("invalid args: need recovery_id[8]"),
             };
 
-            // Look up the recovery to get the target account's guardians.
-            let target = match guardian.recovery_requests.iter()
-                .find(|r| r.id == recovery_id)
-                .map(|r| r.target_account)
-            {
-                Some(t) => t,
-                None => return err("recovery request not found"),
-            };
-
-            let state = StateManager::new(store);
-            let target_acct = match state.get_account(&target) {
-                Ok(Some(a)) => a,
-                _ => return err("target account not found"),
-            };
-            drop(state);
-
-            let guardian_ids: Vec<AccountId> = target_acct.auth_methods.iter()
-                .filter_map(|m| {
-                    if let AuthMethod::Guardian { guardian_id } = m {
-                        Some(*guardian_id)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            match guardian.confirm_recovery(recovery_id, *sender, &guardian_ids) {
+            // Guardian IDs are stored in the recovery request (captured at
+            // initiation time). No need to re-read from the account.
+            match guardian.confirm_recovery(recovery_id, *sender) {
                 Ok(()) => {
                     events.push(Event {
                         emitter: GUARDIAN_ADDRESS,

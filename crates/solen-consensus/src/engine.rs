@@ -461,6 +461,20 @@ impl ConsensusEngine {
             return false;
         }
 
+        // Validate proposer is a known active validator.
+        {
+            let vs = self.validator_set.read().unwrap();
+            let is_valid_proposer = vs.active().iter().any(|v| v.id == header.proposer);
+            if !is_valid_proposer {
+                warn!(
+                    height = header.height,
+                    proposer = ?header.proposer[..4],
+                    "proposer not in active validator set — rejecting block"
+                );
+                return false;
+            }
+        }
+
         // Check for duplicate pending/finalized blocks.
         {
             let chain = self.chain.read().unwrap();
@@ -888,7 +902,7 @@ impl ConsensusEngine {
     ) {
         let height = header.height;
 
-        // Reject if we already have this block.
+        // Reject if we already have this block or there's a gap.
         {
             let chain = self.chain.read().unwrap();
             if let Some(last) = chain.last() {
@@ -902,6 +916,15 @@ impl ConsensusEngine {
                         "sync block has gap — skipping"
                     );
                     return; // Gap — can't apply.
+                }
+                // Validate parent hash matches our last block.
+                let expected_parent = block_hash(&last.header);
+                if header.parent_hash != expected_parent && header.parent_hash != [0u8; 32] {
+                    warn!(
+                        height,
+                        "parent hash mismatch in synced block — skipping"
+                    );
+                    return;
                 }
             }
         }

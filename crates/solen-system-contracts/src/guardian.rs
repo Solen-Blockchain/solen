@@ -39,8 +39,10 @@ pub struct RecoveryRequest {
     pub execute_after: u64,
     /// Guardians who have confirmed this recovery.
     pub confirmations: Vec<AccountId>,
-    /// Total number of guardians on the account at initiation time.
-    pub required_guardians: usize,
+    /// Guardian IDs captured at initiation time. Only these guardians
+    /// can confirm — prevents attacks where guardians change between
+    /// initiation and confirmation.
+    pub guardian_ids: Vec<AccountId>,
     /// Minimum confirmations needed (majority of guardians, min 2).
     pub threshold: usize,
     pub status: RecoveryStatus,
@@ -68,6 +70,11 @@ impl GuardianContract {
         guardian_ids: &[AccountId],
         current_height: u64,
     ) -> Result<u64, String> {
+        // Reject empty guardian list (would allow 0-threshold recovery).
+        if guardian_ids.is_empty() {
+            return Err("target account has no guardians".into());
+        }
+
         // Verify the initiator is a guardian.
         if !guardian_ids.contains(&initiator) {
             return Err("sender is not a guardian of the target account".into());
@@ -99,9 +106,9 @@ impl GuardianContract {
             target_account,
             new_auth_methods,
             initiated_at: current_height,
-            execute_after: current_height + RECOVERY_TIMELOCK_BLOCKS,
+            execute_after: current_height.saturating_add(RECOVERY_TIMELOCK_BLOCKS),
             confirmations: vec![initiator], // initiator auto-confirms
-            required_guardians: guardian_ids.len(),
+            guardian_ids: guardian_ids.to_vec(), // snapshot at initiation time
             threshold,
             status: RecoveryStatus::Pending,
         });
@@ -109,20 +116,21 @@ impl GuardianContract {
         Ok(id)
     }
 
-    /// Confirm a recovery request. Sender must be a guardian.
+    /// Confirm a recovery request. Sender must be one of the guardians
+    /// captured at initiation time (not the current account guardians).
     pub fn confirm_recovery(
         &mut self,
         recovery_id: u64,
         confirmer: AccountId,
-        guardian_ids: &[AccountId],
     ) -> Result<(), String> {
-        if !guardian_ids.contains(&confirmer) {
-            return Err("sender is not a guardian of the target account".into());
-        }
-
         let req = self.recovery_requests.iter_mut()
             .find(|r| r.id == recovery_id && r.status == RecoveryStatus::Pending)
             .ok_or("recovery request not found or not pending")?;
+
+        // Validate against the guardian list captured at initiation.
+        if !req.guardian_ids.contains(&confirmer) {
+            return Err("sender is not a guardian of the target account".into());
+        }
 
         if req.confirmations.contains(&confirmer) {
             return Err("already confirmed".into());
@@ -245,7 +253,7 @@ mod tests {
         assert_eq!(req.confirmations.len(), 1); // initiator auto-confirmed
 
         // Guardian 11 confirms.
-        contract.confirm_recovery(id, aid(11), &guardians).unwrap();
+        contract.confirm_recovery(id, aid(11)).unwrap();
         assert_eq!(contract.recovery_requests[0].confirmations.len(), 2);
 
         // Can't execute yet — timelock.

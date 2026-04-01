@@ -628,6 +628,8 @@ async fn main() -> anyhow::Result<()> {
         let mut min_interval = std::time::Duration::from_millis(block_time);
         let quorum_timeout = std::time::Duration::from_secs(10);
         let mut last_finalized_height = engine_clone.height();
+        // Reset AFTER mesh warmup so stalled_for doesn't start at 30+ seconds.
+        // This prevents all validators from thinking they're backup proposers at genesis.
         let mut last_finalized_at = std::time::Instant::now();
 
         loop {

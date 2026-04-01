@@ -365,13 +365,13 @@ impl ConsensusEngine {
     }
 
     /// Check if this node should act as backup proposer.
-    /// If the designated proposer hasn't produced after 6 seconds,
-    /// the next validator in rotation takes over. Every 4 seconds
-    /// after that, the next one tries.
+    ///
+    /// Follows Tendermint's round-based approach: only ONE backup proposer
+    /// is active at a time. After 3x block_time, the next validator in
+    /// rotation becomes the backup. After another 2x block_time, the next
+    /// one takes over, and so on. At any given moment, exactly one
+    /// validator should be producing.
     pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
-        // Wait 3x the block time before backup proposer kicks in.
-        // This gives the primary proposer enough time to broadcast,
-        // especially during genesis startup when all nodes start together.
         let min_wait = std::time::Duration::from_millis(self.config.block_time_ms * 3);
         if stalled_for < min_wait {
             return false;
@@ -384,18 +384,16 @@ impl ConsensusEngine {
             return false;
         }
 
-        let wait_secs = min_wait.as_secs();
-        let skip_interval = (self.config.block_time_ms as u64 * 2).max(4000) / 1000;
-        let skips = ((stalled_for.as_secs() - wait_secs) / skip_interval) + 1;
+        // Determine which backup "round" we're in.
+        // Round 1 = first backup, round 2 = second backup, etc.
+        let elapsed_past_min = stalled_for.as_millis() as u64 - min_wait.as_millis() as u64;
+        let round_interval_ms = (self.config.block_time_ms * 2).max(4000);
+        let round = (elapsed_past_min / round_interval_ms) + 1;
 
-        for skip in 1..=skips {
-            let idx = ((next_height as usize) + skip as usize) % active.len();
-            if active[idx].id == self.config.validator_id {
-                return true;
-            }
-        }
-
-        false
+        // Only the validator at this SPECIFIC round position should propose.
+        // Previous round validators should NOT still be proposing.
+        let idx = ((next_height as usize) + round as usize) % active.len();
+        active[idx].id == self.config.validator_id
     }
 
     /// Accept a block proposed by another validator.

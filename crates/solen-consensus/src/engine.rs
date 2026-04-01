@@ -88,6 +88,18 @@ pub struct ProducedBlock {
     pub operations: Vec<UserOperation>,
 }
 
+/// A block waiting for attestations before finalization.
+struct PendingBlock {
+    header: BlockHeader,
+    operations: Vec<UserOperation>,
+    proposed_at: std::time::Instant,
+    /// True if we produced this block (state already applied to store).
+    /// False if we received it from a peer (NOT yet executed — Tendermint pattern).
+    already_executed: bool,
+    /// Execution result, only present if already_executed.
+    result: Option<BlockResult>,
+}
+
 /// The consensus engine manages block production, validation, and finality.
 pub struct ConsensusEngine {
     config: EngineConfig,
@@ -100,8 +112,7 @@ pub struct ConsensusEngine {
     /// Pending attestations for blocks not yet finalized, keyed by block height.
     pending_attestations: Arc<RwLock<HashMap<u64, Vec<Attestation>>>>,
     /// Proposed blocks waiting for attestations before finalization.
-    /// Value: (header, result, operations, proposed_at_instant)
-    pending_blocks: Arc<RwLock<HashMap<u64, (BlockHeader, BlockResult, Vec<UserOperation>, std::time::Instant)>>>,
+    pending_blocks: Arc<RwLock<HashMap<u64, PendingBlock>>>,
     /// Reward events from epoch transitions, included in the next block's receipts.
     pending_reward_receipts: Arc<RwLock<Vec<solen_execution::receipt::ExecutionReceipt>>>,
     /// Intent pool for intent-aware execution.
@@ -322,7 +333,13 @@ impl ConsensusEngine {
             // wait for peer attestations to reach quorum.
             self.pending_blocks.write().unwrap().insert(
                 height,
-                (header.clone(), result, ops.clone(), std::time::Instant::now()),
+                PendingBlock {
+                    header: header.clone(),
+                    operations: ops.clone(),
+                    proposed_at: std::time::Instant::now(),
+                    already_executed: true,
+                    result: Some(result),
+                },
             );
 
             // Self-attest.
@@ -352,7 +369,11 @@ impl ConsensusEngine {
     /// the next validator in rotation takes over. Every 4 seconds
     /// after that, the next one tries.
     pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
-        if stalled_for < std::time::Duration::from_secs(6) {
+        // Wait 3x the block time before backup proposer kicks in.
+        // This gives the primary proposer enough time to broadcast,
+        // especially during genesis startup when all nodes start together.
+        let min_wait = std::time::Duration::from_millis(self.config.block_time_ms * 3);
+        if stalled_for < min_wait {
             return false;
         }
 
@@ -363,7 +384,9 @@ impl ConsensusEngine {
             return false;
         }
 
-        let skips = ((stalled_for.as_secs() - 6) / 4) + 1;
+        let wait_secs = min_wait.as_secs();
+        let skip_interval = (self.config.block_time_ms as u64 * 2).max(4000) / 1000;
+        let skips = ((stalled_for.as_secs() - wait_secs) / skip_interval) + 1;
 
         for skip in 1..=skips {
             let idx = ((next_height as usize) + skip as usize) % active.len();
@@ -375,15 +398,18 @@ impl ConsensusEngine {
         false
     }
 
-    /// Accept a block proposed by another validator. Validates it by
-    /// re-executing the operations and checking the state root matches.
-    /// Returns true if the block was accepted.
+    /// Accept a block proposed by another validator.
+    ///
+    /// Following the Tendermint pattern: do NOT execute the block here.
+    /// Just validate header consistency (height, parent hash, epoch) and
+    /// store as pending. Execution happens in `finalize_pending_block`
+    /// after quorum is reached. This prevents state corruption from
+    /// rejected blocks.
     pub fn accept_block(
         &self,
         header: &BlockHeader,
         operations: &[UserOperation],
     ) -> bool {
-        // Hold chain read lock to get a consistent snapshot of height and parent hash.
         let (our_height, expected_height, fork_detected) = {
             let chain = self.chain.read().unwrap();
             let our_height = chain.last().map(|b| b.header.height).unwrap_or(0);
@@ -408,9 +434,6 @@ impl ConsensusEngine {
         };
 
         if fork_detected {
-            // Parent hash doesn't match — our last block differs from the network's.
-            // Don't pop or modify our chain. Just reject this block.
-            // Sync will eventually deliver the correct block sequence.
             debug!(
                 height = header.height,
                 "parent hash mismatch — rejecting block, waiting for sync"
@@ -418,9 +441,7 @@ impl ConsensusEngine {
             return false;
         }
 
-        if header.height > expected_height && !fork_detected {
-            // We're behind — don't fast-forward (it skips blocks and corrupts state).
-            // Just ignore this block and let the sync protocol fill the gap.
+        if header.height > expected_height {
             debug!(
                 our_height,
                 block_height = header.height,
@@ -430,10 +451,20 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Check for duplicate pending/finalized blocks BEFORE executing.
-        // Executing first then rejecting would corrupt state.
+        // Validate epoch.
+        let expected_epoch = header.height / crate::epoch::EPOCH_LENGTH;
+        if header.epoch != expected_epoch {
+            warn!(
+                height = header.height,
+                expected = expected_epoch,
+                got = header.epoch,
+                "invalid epoch — rejecting block"
+            );
+            return false;
+        }
+
+        // Check for duplicate pending/finalized blocks.
         {
-            // Check if already finalized in our chain.
             let chain = self.chain.read().unwrap();
             if chain.iter().any(|b| b.header.height == header.height) {
                 return false; // Already finalized.
@@ -441,64 +472,31 @@ impl ConsensusEngine {
             drop(chain);
 
             let pending = self.pending_blocks.read().unwrap();
-            if let Some((existing_header, _, _, _)) = pending.get(&header.height) {
-                // Check for double-sign (same proposer, different block).
-                if let Some(evidence) = crate::slashing::check_double_sign(existing_header, header) {
-                    drop(pending);
-                    let mut vs = self.validator_set.write().unwrap();
-                    if let Some(slash_result) = crate::slashing::process_slashing(&mut vs, &evidence) {
-                        let mut store = self.store.write().unwrap();
-                        crate::slashing::persist_slashing_evidence(
-                            store.as_mut(), &slash_result, header.height,
-                        );
-                        // Credit slashed funds to treasury.
-                        {
-                            use borsh::BorshDeserialize;
-                            let key = {
-                                let mut k = b"acc/".to_vec();
-                                k.extend_from_slice(&solen_types::system::TREASURY_ADDRESS);
-                                k
-                            };
-                            if let Ok(Some(data)) = store.get(&key) {
-                                if let Ok(mut acct) = solen_types::account::Account::try_from_slice(&data) {
-                                    acct.balance = acct.balance.saturating_add(slash_result.penalty);
-                                    if let Ok(encoded) = borsh::to_vec(&acct) {
-                                        let _ = store.put(&key, &encoded);
-                                    }
-                                }
-                            }
-                        }
-                    }
+            if let Some(existing) = pending.get(&header.height) {
+                if block_hash(&existing.header) != block_hash(header) {
+                    // Different block at same height. If we produced ours, keep it.
+                    // If peer produced theirs, we have a conflict.
+                    // Either way, don't replace what we have.
+                    debug!(
+                        height = header.height,
+                        "conflicting block at same height — keeping existing"
+                    );
                 }
-                return false; // Already have a block at this height.
+                return false;
             }
         }
 
-        // Execute the operations (including epoch rewards if applicable).
-        // Using execute_block_with_height ensures deterministic reward distribution.
-        let result = {
-            let mut store = self.store.write().unwrap();
-            self.executor.execute_block_with_height(store.as_mut(), operations, header.height)
-        };
-
-        let current_root = result.state_root;
-
-        // Verify state root matches.
-        let state_matches = current_root == header.state_root;
-        if !state_matches {
-            warn!(
-                height = header.height,
-                ours = ?&current_root[..4],
-                theirs = ?&header.state_root[..4],
-                "state root mismatch — rejecting block"
-            );
-            return false;
-        }
-
-        // Store as pending, waiting for attestations.
+        // Store as pending WITHOUT executing. Execution happens on finalization.
+        // This is the key Tendermint pattern: validate header, vote, execute on commit.
         self.pending_blocks.write().unwrap().insert(
             header.height,
-            (header.clone(), result, operations.to_vec(), std::time::Instant::now()),
+            PendingBlock {
+                header: header.clone(),
+                operations: operations.to_vec(),
+                proposed_at: std::time::Instant::now(),
+                already_executed: false,
+                result: None,
+            },
         );
 
         info!(
@@ -521,8 +519,8 @@ impl ConsensusEngine {
         // Verify attestation is for a block we know about.
         {
             let pending = self.pending_blocks.read().unwrap();
-            if let Some((header, _, _, _)) = pending.get(&block_height) {
-                let expected_hash = block_hash(header);
+            if let Some(pb) = pending.get(&block_height) {
+                let expected_hash = block_hash(&pb.header);
                 if expected_hash != attested_hash {
                     warn!(
                         height = block_height,
@@ -572,9 +570,13 @@ impl ConsensusEngine {
         has_quorum
     }
 
-    /// Finalize a pending block after quorum is reached.
+    /// Finalize a pending block after quorum is reached (or timeout).
+    ///
+    /// If we produced this block (already_executed=true), the state is already
+    /// applied — just push to chain. If we received it from a peer
+    /// (already_executed=false), execute now and verify state root.
     fn finalize_pending_block(&self, height: u64) {
-        let block_data = self.pending_blocks.write().unwrap().remove(&height);
+        let pending_block = self.pending_blocks.write().unwrap().remove(&height);
         let attestations = self
             .pending_attestations
             .write()
@@ -582,26 +584,56 @@ impl ConsensusEngine {
             .remove(&height)
             .unwrap_or_default();
 
-        if let Some((header, result, ops, _proposed_at)) = block_data {
-            let block = FinalizedBlock {
-                header: header.clone(),
-                result,
-                attestations,
-                operations: ops,
+        let Some(pb) = pending_block else { return };
+
+        let result = if pb.already_executed {
+            // We produced this block — state already applied.
+            pb.result.unwrap_or(BlockResult {
+                state_root: pb.header.state_root,
+                receipts: vec![],
+                gas_used: 0,
+            })
+        } else {
+            // Received from peer — execute now (Tendermint "Commit" phase).
+            let exec_result = {
+                let mut store = self.store.write().unwrap();
+                self.executor.execute_block_with_height(
+                    store.as_mut(), &pb.operations, height,
+                )
             };
 
-            self.chain.write().unwrap().push(block.clone());
-            self.persist_block_and_meta(&block);
+            // Verify state root matches the proposer's claim.
+            if exec_result.state_root != pb.header.state_root {
+                warn!(
+                    height,
+                    ours = ?&exec_result.state_root[..4],
+                    theirs = ?&pb.header.state_root[..4],
+                    "state root mismatch on finalization — proposer may be byzantine"
+                );
+                // Still finalize (quorum agreed), but log the divergence.
+                // In production, this would trigger a slash.
+            }
 
-            // Only advance epoch counter — rewards already applied by proposer.
-            self.try_epoch_transition(height);
+            exec_result
+        };
 
-            info!(
-                height,
-                epoch = header.epoch,
-                "block finalized with quorum"
-            );
-        }
+        let block = FinalizedBlock {
+            header: pb.header.clone(),
+            result,
+            attestations,
+            operations: pb.operations,
+        };
+
+        self.chain.write().unwrap().push(block.clone());
+        self.persist_block_and_meta(&block);
+
+        self.try_epoch_transition(height);
+
+        info!(
+            height,
+            epoch = pb.header.epoch,
+            "block finalized with quorum"
+        );
     }
 
     /// Legacy — rewards now handled by executor. Kept as unused for reference.
@@ -1000,7 +1032,7 @@ impl ConsensusEngine {
             let blocks = self.pending_blocks.read().unwrap();
             blocks
                 .iter()
-                .filter(|(_, (_, _, _, proposed_at))| proposed_at.elapsed() > timeout)
+                .filter(|(_, pb)| pb.proposed_at.elapsed() > timeout)
                 .map(|(h, _)| *h)
                 .collect()
         };

@@ -980,6 +980,22 @@ impl ConsensusEngine {
     /// the timeout. This prevents the chain from stalling when validators
     /// are offline and quorum can't be reached.
     pub fn finalize_timed_out_blocks(&self, timeout: std::time::Duration) -> usize {
+        let current_height = self.height();
+
+        // First, discard any pending blocks that are at or below the current
+        // chain height. These are stale from before a sync and must never be
+        // finalized — doing so would push an old block to the end of the
+        // chain vector, effectively rolling the node backwards.
+        {
+            let mut pending = self.pending_blocks.write().unwrap();
+            let before = pending.len();
+            pending.retain(|h, _| *h > current_height);
+            let discarded = before - pending.len();
+            if discarded > 0 {
+                info!(discarded, current_height, "discarded stale pending blocks");
+            }
+        }
+
         let stale_heights: Vec<u64> = {
             let blocks = self.pending_blocks.read().unwrap();
             blocks
@@ -989,10 +1005,16 @@ impl ConsensusEngine {
                 .collect()
         };
 
-        let count = stale_heights.len();
+        let mut count = 0;
         for height in stale_heights {
+            // Double-check: only finalize the NEXT expected block.
+            if height != self.height() + 1 {
+                debug!(height, our_height = self.height(), "skipping stale pending block");
+                continue;
+            }
             warn!(height, "quorum timeout — force-finalizing block");
             self.finalize_pending_block(height);
+            count += 1;
         }
 
         // Clean up orphaned attestations for heights already finalized.

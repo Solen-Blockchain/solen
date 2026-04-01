@@ -556,6 +556,9 @@ async fn main() -> anyhow::Result<()> {
                         // We've heard from a peer AND we're at their height,
                         // but haven't accepted a live block yet.
                         // Safety fallback after 60s.
+                        // Clear stale pending blocks to prevent old blocks from
+                        // being force-finalized and rolling the chain backwards.
+                        status_engine.clear_stale_pending(height);
                         tracing::info!(height, network_height = known, "timeout — resuming block production");
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     }

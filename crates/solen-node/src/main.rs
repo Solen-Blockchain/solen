@@ -546,9 +546,10 @@ async fn main() -> anyhow::Result<()> {
                         // Genesis: no peers connected after 75s, start solo.
                         tracing::info!("no peers found — starting as first validator");
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
-                    } else if height == 0 && has_peers && ticks_since_start >= 3 {
-                        // Genesis with peers: everyone is at height 0, safe to start.
-                        tracing::info!("peers connected at genesis — resuming block production");
+                    } else if height == 0 && has_peers && ticks_since_start >= 5 {
+                        // Genesis with peers: wait long enough for gossipsub mesh
+                        // to form and the first proposer's block to arrive.
+                        tracing::info!("genesis timeout with peers — resuming block production");
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if known > 0 && height + 1 >= known && ticks_since_start >= 4 {
                         // We've heard from a peer AND we're at their height,

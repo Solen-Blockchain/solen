@@ -384,8 +384,19 @@ strip = true
         return false;
     }
 
+    // Find cargo binary.
+    let cargo_bin = [
+        std::path::PathBuf::from("/home/solen/.cargo/bin/cargo"),
+        std::path::PathBuf::from("/root/.cargo/bin/cargo"),
+        std::path::PathBuf::from("cargo"),
+    ].into_iter()
+        .find(|p| p.exists() || p.to_str() == Some("cargo"))
+        .unwrap_or_else(|| std::path::PathBuf::from("cargo"));
+
+    tracing::info!(cargo = %cargo_bin.display(), "contract verification: compiling");
+
     // Compile.
-    let output = Command::new("cargo")
+    let output = Command::new(&cargo_bin)
         .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
         .current_dir(tmp.path())
         .env("CARGO_TARGET_DIR", tmp.path().join("target"))

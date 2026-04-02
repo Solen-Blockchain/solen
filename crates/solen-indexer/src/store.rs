@@ -43,6 +43,29 @@ pub struct ContractSource {
     pub verified: bool,
 }
 
+/// An indexed rollup registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedRollup {
+    pub rollup_id: u64,
+    pub name: String,
+    pub proof_type: String,
+    pub sequencer: String,
+    pub genesis_state_root: String,
+    pub registered_at_height: u64,
+}
+
+/// An indexed rollup batch commitment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedBatch {
+    pub rollup_id: u64,
+    pub batch_index: u64,
+    pub state_root: String,
+    pub data_hash: String,
+    pub verified: bool,
+    pub block_height: u64,
+    pub tx_index: usize,
+}
+
 /// An indexed event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedEvent {
@@ -69,6 +92,10 @@ pub struct IndexStore {
     pub contracts: HashSet<String>,
     /// Published contract source code by code_hash.
     pub contract_sources: HashMap<String, ContractSource>,
+    /// Registered rollups.
+    pub rollups: HashMap<u64, IndexedRollup>,
+    /// Rollup batch commitments (rollup_id -> batches).
+    pub rollup_batches: HashMap<u64, Vec<IndexedBatch>>,
     /// Blocks proposed per validator.
     pub blocks_proposed: HashMap<String, u64>,
     /// Last block height proposed per validator.
@@ -217,5 +244,37 @@ impl IndexStore {
     /// Get all known contracts.
     pub fn get_contracts(&self) -> Vec<String> {
         self.contracts.iter().cloned().collect()
+    }
+
+    pub fn add_rollup(&mut self, rollup: IndexedRollup) {
+        self.rollups.insert(rollup.rollup_id, rollup);
+    }
+
+    pub fn add_rollup_batch(&mut self, batch: IndexedBatch) {
+        self.rollup_batches
+            .entry(batch.rollup_id)
+            .or_default()
+            .push(batch);
+    }
+
+    pub fn get_rollups(&self) -> Vec<&IndexedRollup> {
+        let mut rollups: Vec<_> = self.rollups.values().collect();
+        rollups.sort_by_key(|r| r.rollup_id);
+        rollups
+    }
+
+    pub fn get_rollup(&self, rollup_id: u64) -> Option<&IndexedRollup> {
+        self.rollups.get(&rollup_id)
+    }
+
+    pub fn get_rollup_batches(&self, rollup_id: u64, limit: usize) -> Vec<&IndexedBatch> {
+        self.rollup_batches
+            .get(&rollup_id)
+            .map(|batches| batches.iter().rev().take(limit).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn get_rollup_batch_count(&self, rollup_id: u64) -> usize {
+        self.rollup_batches.get(&rollup_id).map(|b| b.len()).unwrap_or(0)
     }
 }

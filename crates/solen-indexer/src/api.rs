@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
 use tracing::info;
 
-use crate::store::{IndexStore, IndexedBlock, IndexedEvent, IndexedTx};
+use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedRollup, IndexedTx};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -75,6 +75,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/contracts/:code_hash/source", get(get_contract_source).post(publish_contract_source))
         .route("/api/contracts", get(get_contracts))
         .route("/api/contracts/:contract/holders", get(get_token_holders))
+        .route("/api/rollups", get(get_rollups))
+        .route("/api/rollups/:rollup_id", get(get_rollup))
+        .route("/api/rollups/:rollup_id/batches", get(get_rollup_batches))
         .with_state(state)
 }
 
@@ -452,6 +455,52 @@ async fn get_contracts(
 ) -> Json<Vec<String>> {
     let store = state.store.read().unwrap();
     Json(store.get_contracts())
+}
+
+async fn get_rollups(State(state): State<ApiState>) -> Json<Vec<IndexedRollup>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_rollups().into_iter().cloned().collect())
+}
+
+#[derive(Serialize)]
+struct RollupDetailResponse {
+    #[serde(flatten)]
+    rollup: IndexedRollup,
+    total_batches: usize,
+    latest_batch: Option<IndexedBatch>,
+}
+
+async fn get_rollup(
+    State(state): State<ApiState>,
+    Path(rollup_id): Path<u64>,
+) -> Json<Option<RollupDetailResponse>> {
+    let store = state.store.read().unwrap();
+    let rollup = match store.get_rollup(rollup_id) {
+        Some(r) => r.clone(),
+        None => return Json(None),
+    };
+    let total_batches = store.get_rollup_batch_count(rollup_id);
+    let latest_batch = store.get_rollup_batches(rollup_id, 1).first().cloned().cloned();
+    Json(Some(RollupDetailResponse {
+        rollup,
+        total_batches,
+        latest_batch,
+    }))
+}
+
+async fn get_rollup_batches(
+    State(state): State<ApiState>,
+    Path(rollup_id): Path<u64>,
+    Query(params): Query<PaginationParams>,
+) -> Json<Vec<IndexedBatch>> {
+    let store = state.store.read().unwrap();
+    Json(
+        store
+            .get_rollup_batches(rollup_id, params.limit)
+            .into_iter()
+            .cloned()
+            .collect(),
+    )
 }
 
 pub async fn start_explorer_api(

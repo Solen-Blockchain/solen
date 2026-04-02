@@ -5,10 +5,22 @@ use std::sync::{Arc, RwLock};
 use solen_consensus::engine::{ConsensusEngine, FinalizedBlock};
 use tracing::debug;
 
-use crate::store::{IndexStore, IndexedBlock, IndexedEvent, IndexedTx};
+use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedRollup, IndexedTx};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn u64_from_le_hex(hex_str: &str) -> Result<u64, ()> {
+    if hex_str.len() != 16 {
+        return Err(());
+    }
+    let mut bytes = [0u8; 8];
+    for (i, chunk) in hex_str.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|_| ())?;
+        bytes[i] = u8::from_str_radix(s, 16).map_err(|_| ())?;
+    }
+    Ok(u64::from_le_bytes(bytes))
 }
 
 /// Indexes a finalized block into the store.
@@ -95,6 +107,43 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
             if event.topic == "deploy" && event.data.len() >= 64 {
                 let contract_id = &event.data[..64];
                 store.track_contract(contract_id);
+            }
+
+            // Track rollup registrations.
+            // Event: topic=rollup_registered, data=rollup_id[8 LE bytes]
+            if event.topic == "rollup_registered" && event.data.len() >= 16 {
+                // Rollup ID is the first 8 bytes LE in hex (16 hex chars).
+                if let Ok(rollup_id) = u64_from_le_hex(&event.data[..16]) {
+                    // Try to extract name/proof_type/sequencer from the tx events.
+                    // The registration info is stored in the state, but we can
+                    // infer from the call args. For now, index what we know.
+                    store.add_rollup(IndexedRollup {
+                        rollup_id,
+                        name: format!("Rollup #{}", rollup_id),
+                        proof_type: String::new(),
+                        sequencer: receipt.sender.iter().map(|b| format!("{b:02x}")).collect(),
+                        genesis_state_root: String::new(),
+                        registered_at_height: block.header.height,
+                    });
+                }
+            }
+
+            // Track batch submissions.
+            // Event: topic=batch_verified, data=rollup_id[8]+batch_index[8]+state_root[32]+data_hash[32]
+            if event.topic == "batch_verified" && event.data.len() >= 160 {
+                if let (Ok(rollup_id), Ok(batch_index)) =
+                    (u64_from_le_hex(&event.data[..16]), u64_from_le_hex(&event.data[16..32]))
+                {
+                    store.add_rollup_batch(IndexedBatch {
+                        rollup_id,
+                        batch_index,
+                        state_root: event.data[32..96].to_string(),
+                        data_hash: event.data[96..160].to_string(),
+                        verified: true,
+                        block_height: block.header.height,
+                        tx_index: i,
+                    });
+                }
             }
         }
 

@@ -43,6 +43,19 @@ pub struct ContractSource {
     pub verified: bool,
 }
 
+/// An indexed fulfilled intent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedIntent {
+    pub intent_id: u64,
+    pub sender: String,
+    pub block_height: u64,
+    pub tx_index: usize,
+    pub transfer_to: Option<String>,
+    pub transfer_amount: Option<String>,
+    pub solver_tip: Option<String>,
+    pub solver: Option<String>,
+}
+
 /// An indexed rollup registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedRollup {
@@ -92,6 +105,8 @@ pub struct IndexStore {
     pub contracts: HashSet<String>,
     /// Published contract source code by code_hash.
     pub contract_sources: HashMap<String, ContractSource>,
+    /// Fulfilled intents.
+    pub fulfilled_intents: Vec<IndexedIntent>,
     /// Registered rollups.
     pub rollups: HashMap<u64, IndexedRollup>,
     /// Rollup batch commitments (rollup_id -> batches).
@@ -244,6 +259,14 @@ impl IndexStore {
     /// Get all known contracts.
     pub fn get_contracts(&self) -> Vec<String> {
         self.contracts.iter().cloned().collect()
+    }
+
+    pub fn add_fulfilled_intent(&mut self, intent: IndexedIntent) {
+        self.fulfilled_intents.push(intent);
+    }
+
+    pub fn get_recent_intents(&self, limit: usize) -> Vec<&IndexedIntent> {
+        self.fulfilled_intents.iter().rev().take(limit).collect()
     }
 
     pub fn add_rollup(&mut self, rollup: IndexedRollup) {

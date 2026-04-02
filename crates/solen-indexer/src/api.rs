@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
 use tracing::info;
 
-use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedRollup, IndexedTx};
+use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -75,6 +75,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/contracts/:code_hash/source", get(get_contract_source).post(publish_contract_source))
         .route("/api/contracts", get(get_contracts))
         .route("/api/contracts/:contract/holders", get(get_token_holders))
+        .route("/api/intents", get(get_fulfilled_intents))
         .route("/api/rollups", get(get_rollups))
         .route("/api/rollups/:rollup_id", get(get_rollup))
         .route("/api/rollups/:rollup_id/batches", get(get_rollup_batches))
@@ -455,6 +456,14 @@ async fn get_contracts(
 ) -> Json<Vec<String>> {
     let store = state.store.read().unwrap();
     Json(store.get_contracts())
+}
+
+async fn get_fulfilled_intents(
+    State(state): State<ApiState>,
+    Query(params): Query<PaginationParams>,
+) -> Json<Vec<IndexedIntent>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_recent_intents(params.limit).into_iter().cloned().collect())
 }
 
 async fn get_rollups(State(state): State<ApiState>) -> Json<Vec<IndexedRollup>> {

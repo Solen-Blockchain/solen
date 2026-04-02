@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use solen_consensus::engine::{ConsensusEngine, FinalizedBlock};
 use tracing::debug;
 
-use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedRollup, IndexedTx};
+use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -143,6 +143,49 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                         verified: true,
                         block_height: block.header.height,
                         tx_index: i,
+                    });
+                }
+            }
+
+            // Track intent fulfillment.
+            if event.topic == "intent_fulfilled" && event.data.len() >= 16 {
+                if let Ok(intent_id) = u64_from_le_hex(&event.data[..16]) {
+                    // Find the transfer and tip from sibling events in this receipt.
+                    let mut transfer_to = None;
+                    let mut transfer_amount = None;
+                    let mut solver = None;
+                    let mut solver_tip = None;
+
+                    for sibling in &receipt.events {
+                        if sibling.topic == b"transfer" && sibling.data.len() >= 48 {
+                            transfer_to = Some(hex(&sibling.data[..32]));
+                            let amt_bytes = &sibling.data[32..48];
+                            let mut val = 0u128;
+                            for (j, &b) in amt_bytes.iter().enumerate() {
+                                val |= (b as u128) << (j * 8);
+                            }
+                            transfer_amount = Some(val.to_string());
+                        }
+                        if sibling.topic == b"solver_tip" && sibling.data.len() >= 48 {
+                            solver = Some(hex(&sibling.data[..32]));
+                            let amt_bytes = &sibling.data[32..48];
+                            let mut val = 0u128;
+                            for (j, &b) in amt_bytes.iter().enumerate() {
+                                val |= (b as u128) << (j * 8);
+                            }
+                            solver_tip = Some(val.to_string());
+                        }
+                    }
+
+                    store.add_fulfilled_intent(IndexedIntent {
+                        intent_id,
+                        sender: hex(&receipt.sender),
+                        block_height: block.header.height,
+                        tx_index: i,
+                        transfer_to,
+                        transfer_amount,
+                        solver_tip,
+                        solver,
                     });
                 }
             }

@@ -15,6 +15,7 @@ use solen_execution::executor::BlockExecutor;
 use solen_execution::proof::ProofVerifierRegistry;
 use solen_execution::receipt::BlockResult;
 use solen_intents::pool::IntentPool;
+use solen_intents::solver::{DirectTransferSolver, IntentSolver};
 use solen_storage::StateStore;
 use solen_types::block::BlockHeader;
 use solen_types::transaction::UserOperation;
@@ -252,8 +253,7 @@ impl ConsensusEngine {
     /// Produce a single block. Returns the block, its operations, and
     /// whether it was immediately finalized (single-validator mode).
     pub fn produce_block(&self) -> ProducedBlock {
-        let ops = self.mempool.drain(self.config.max_ops_per_block);
-        let op_count = ops.len();
+        let mut ops = self.mempool.drain(self.config.max_ops_per_block);
 
         // Expire intents past current height.
         let current_h = self.height();
@@ -261,6 +261,39 @@ impl ConsensusEngine {
         if expired > 0 {
             debug!(expired, height = current_h, "expired intents");
         }
+
+        // Solve pending intents and include solution operations in the block.
+        let pending = self.intent_pool.pending_intents();
+        if !pending.is_empty() {
+            let solver = DirectTransferSolver { id: self.config.validator_id };
+            let mut fulfilled_ids = Vec::new();
+
+            for intent in &pending {
+                // Check if there's already an external solution submitted.
+                let solution = self.intent_pool.select_best_solution(intent.id)
+                    .ok()
+                    .or_else(|| solver.solve(intent));
+
+                if let Some(sol) = solution {
+                    for op in &sol.operations {
+                        ops.push(op.clone());
+                    }
+                    fulfilled_ids.push(intent.id);
+                    info!(
+                        intent_id = intent.id,
+                        ops = sol.operations.len(),
+                        "intent solved and included in block"
+                    );
+                }
+            }
+
+            // Mark intents as fulfilled after including their operations.
+            for id in fulfilled_ids {
+                let _ = self.intent_pool.fulfill(id);
+            }
+        }
+
+        let op_count = ops.len();
 
         let (parent_hash, height) = {
             let chain = self.chain.read().unwrap();

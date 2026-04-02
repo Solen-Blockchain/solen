@@ -176,6 +176,23 @@ pub struct IntentInfo {
     pub status: String,
 }
 
+/// Solution submission request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolutionRequest {
+    pub intent_id: u64,
+    pub solver: String,
+    pub operations: Vec<UserOperation>,
+    pub claimed_tip: String,
+    pub score: u64,
+}
+
+/// Solution submission result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolutionSubmitResult {
+    pub accepted: bool,
+    pub error: Option<String>,
+}
+
 /// Sponsorship check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SponsorshipResult {
@@ -269,6 +286,14 @@ pub trait SolenApi {
     /// Submit an intent for solver resolution.
     #[method(name = "solen_submitIntent")]
     fn submit_intent(&self, intent: IntentRequest) -> RpcResult<IntentSubmitResult>;
+
+    /// Get pending intents available for solvers.
+    #[method(name = "solen_getPendingIntents")]
+    fn get_pending_intents(&self, limit: Option<usize>) -> RpcResult<Vec<IntentInfo>>;
+
+    /// Submit a solution for an intent.
+    #[method(name = "solen_submitSolution")]
+    fn submit_solution(&self, solution: SolutionRequest) -> RpcResult<SolutionSubmitResult>;
 
     /// Check if a paymaster will sponsor an operation's fees.
     #[method(name = "solen_checkSponsorship")]
@@ -726,6 +751,53 @@ impl SolenApiServer for SolenRpc {
         }
     }
 
+    fn get_pending_intents(&self, limit: Option<usize>) -> RpcResult<Vec<IntentInfo>> {
+        let pool = self.engine.intent_pool();
+        let pending = pool.pending_intents();
+        let limit = limit.unwrap_or(50);
+
+        let intents: Vec<IntentInfo> = pending.into_iter().take(limit).map(|i| {
+            IntentInfo {
+                id: i.id,
+                sender: hex_encode(&i.sender),
+                constraints: i.constraints.iter().map(|c| constraint_to_info(c)).collect(),
+                max_fee: i.max_fee.to_string(),
+                expiry_height: i.expiry_height,
+                tip: i.tip.to_string(),
+                status: "Pending".to_string(),
+            }
+        }).collect();
+
+        Ok(intents)
+    }
+
+    fn submit_solution(&self, req: SolutionRequest) -> RpcResult<SolutionSubmitResult> {
+        let solver = parse_account_id(&req.solver)?;
+        let claimed_tip: u128 = req.claimed_tip.parse().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>)
+        })?;
+
+        let solution = solen_intents::types::Solution {
+            intent_id: req.intent_id,
+            solver,
+            operations: req.operations,
+            claimed_tip,
+            score: req.score,
+        };
+
+        let pool = self.engine.intent_pool();
+        match pool.submit_solution(solution) {
+            Ok(()) => Ok(SolutionSubmitResult {
+                accepted: true,
+                error: None,
+            }),
+            Err(e) => Ok(SolutionSubmitResult {
+                accepted: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
     fn check_sponsorship(&self, op: UserOperation) -> RpcResult<SponsorshipResult> {
         // Check if any registered paymaster contract is willing to sponsor this operation.
         // Paymasters are contracts that implement a `willSponsor` view method.
@@ -968,6 +1040,32 @@ fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
             verifier: parse_account_id(verifier)?,
             data: hex_decode(data)?,
         }),
+    }
+}
+
+fn constraint_to_info(c: &Constraint) -> ConstraintInfo {
+    match c {
+        Constraint::MinBalance { account, min_amount } => ConstraintInfo::MinBalance {
+            account: hex_encode(account),
+            min_amount: min_amount.to_string(),
+        },
+        Constraint::MaxSpend { account, max_amount } => ConstraintInfo::MaxSpend {
+            account: hex_encode(account),
+            max_amount: max_amount.to_string(),
+        },
+        Constraint::RequireTransfer { from, to, min_amount } => ConstraintInfo::RequireTransfer {
+            from: hex_encode(from),
+            to: hex_encode(to),
+            min_amount: min_amount.to_string(),
+        },
+        Constraint::RequireCall { target, method } => ConstraintInfo::RequireCall {
+            target: hex_encode(target),
+            method: method.clone(),
+        },
+        Constraint::Custom { verifier, data } => ConstraintInfo::Custom {
+            verifier: hex_encode(verifier),
+            data: hex_encode(data),
+        },
     }
 }
 

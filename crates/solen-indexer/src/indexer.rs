@@ -57,7 +57,8 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                     || e.topic == b"epoch_reward"
                     || e.topic == b"delegator_reward"
                     || e.topic == b"delegate"
-                    || e.topic == b"undelegate")
+                    || e.topic == b"undelegate"
+                    || e.topic == b"solver_tip")
                     && e.data.len() >= 32
                 {
                     let recipient = hex(&e.data[..32]);

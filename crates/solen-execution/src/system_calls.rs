@@ -756,13 +756,133 @@ fn execute_treasury_call(
 // ── Intents ─────────────────────────────────────────────────────
 
 fn execute_intent_call(
-    _store: &mut dyn StateStore,
-    _sender: &AccountId,
+    store: &mut dyn StateStore,
+    sender: &AccountId,
     method: &str,
-    _args: &[u8],
+    args: &[u8],
 ) -> SystemCallResult {
-    // Intent pool runs in-memory, not in state. Expose via RPC instead.
-    err(&format!("intent operations use RPC, not system calls: {method}"))
+    let mut events = Vec::new();
+
+    match method {
+        "fulfill" => {
+            // args: intent_id[8] + solver[32] + claimed_tip[16] + num_transfers[4] + (to[32]+amount[16])*N
+            if args.len() < 60 {
+                return err("invalid args: too short");
+            }
+
+            let intent_id = read_u64(args, 0).unwrap_or(0);
+            let solver = match read_account_id(args, 8) {
+                Some(s) => s,
+                None => return err("invalid args: bad solver"),
+            };
+            let claimed_tip = read_u128(args, 40).unwrap_or(0);
+            let num_transfers = u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
+
+            let mut offset = 60;
+            let mut state = StateManager::new(store);
+
+            // Execute each transfer.
+            for _ in 0..num_transfers {
+                if offset + 48 > args.len() {
+                    return err("invalid args: transfer data truncated");
+                }
+                let to = match read_account_id(args, offset) {
+                    Some(t) => t,
+                    None => return err("invalid args: bad transfer recipient"),
+                };
+                let amount = read_u128(args, offset + 32).unwrap_or(0);
+                offset += 48;
+
+                // Debit sender.
+                match state.require_account(sender) {
+                    Ok(mut sender_acct) => {
+                        if sender_acct.balance < amount {
+                            return SystemCallResult {
+                                gas_used: SYSTEM_CALL_GAS,
+                                events,
+                                error: Some("insufficient balance for intent transfer".to_string()),
+                            };
+                        }
+                        sender_acct.balance -= amount;
+                        let _ = state.save_account(&sender_acct);
+                    }
+                    Err(e) => return SystemCallResult {
+                        gas_used: SYSTEM_CALL_GAS,
+                        events,
+                        error: Some(e.to_string()),
+                    },
+                }
+
+                // Credit recipient (create if needed).
+                let mut recipient = state.get_account(&to)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| solen_types::account::Account {
+                        id: to,
+                        code_hash: [0u8; 32],
+                        auth_methods: vec![],
+                        nonce: 0,
+                        balance: 0,
+                    });
+                recipient.balance += amount;
+                let _ = state.save_account(&recipient);
+
+                // Emit transfer event.
+                let mut data = Vec::with_capacity(48);
+                data.extend_from_slice(&to);
+                data.extend_from_slice(&amount.to_le_bytes());
+                events.push(Event {
+                    emitter: *sender,
+                    topic: b"transfer".to_vec(),
+                    data,
+                });
+            }
+
+            // Pay solver tip.
+            if claimed_tip > 0 {
+                match state.require_account(sender) {
+                    Ok(mut sender_acct) => {
+                        if sender_acct.balance >= claimed_tip {
+                            sender_acct.balance -= claimed_tip;
+                            let _ = state.save_account(&sender_acct);
+
+                            let mut solver_acct = state.get_account(&solver)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| solen_types::account::Account {
+                                    id: solver,
+                                    code_hash: [0u8; 32],
+                                    auth_methods: vec![],
+                                    nonce: 0,
+                                    balance: 0,
+                                });
+                            solver_acct.balance += claimed_tip;
+                            let _ = state.save_account(&solver_acct);
+
+                            let mut tip_data = Vec::with_capacity(48);
+                            tip_data.extend_from_slice(&solver);
+                            tip_data.extend_from_slice(&claimed_tip.to_le_bytes());
+                            events.push(Event {
+                                emitter: *sender,
+                                topic: b"solver_tip".to_vec(),
+                                data: tip_data,
+                            });
+                        }
+                    }
+                    Err(_) => {} // sender depleted, skip tip
+                }
+            }
+
+            events.push(Event {
+                emitter: *sender,
+                topic: b"intent_fulfilled".to_vec(),
+                data: intent_id.to_le_bytes().to_vec(),
+            });
+
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+        }
+        _ => err(&format!("unknown intent method: {method}")),
+    }
 }
 
 // ── Paymaster Registry ────────────────────────────────────────

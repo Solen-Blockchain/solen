@@ -571,27 +571,39 @@ impl BlockExecutor {
             .get_account(&op.sender)?
             .ok_or_else(|| ExecutionError::AccountNotFound(format!("{:?}", &op.sender[..4])))?;
 
-        // Verify signature against one of the account's auth methods.
-        let msg = self.operation_signing_message(op);
-        let sig_valid = account.auth_methods.iter().any(|method| {
-            verify_auth(method, &msg, &op.signature)
-        });
+        // System-authorized intent operations (signature = [0xFF]) skip signature checks.
+        // These are created by the block proposer for intent fulfillment.
+        let is_intent_op = op.signature == [0xFF]
+            && op.actions.len() == 1
+            && matches!(&op.actions[0], Action::Call { target, method, .. }
+                if *target == solen_types::system::INTENT_ADDRESS && method == "fulfill");
 
-        if !sig_valid {
-            return Err(ExecutionError::InvalidSignature);
-        }
+        let matched_session = if is_intent_op {
+            // Skip signature and session key checks for intent operations.
+            None
+        } else {
+            // Verify signature against one of the account's auth methods.
+            let msg = self.operation_signing_message(op);
+            let sig_valid = account.auth_methods.iter().any(|method| {
+                verify_auth(method, &msg, &op.signature)
+            });
 
-        // If signed by a session key, enforce its restrictions.
-        let matched_session = account.auth_methods.iter().find(|method| {
-            if let AuthMethod::Session { session_key, .. } = method {
-                if op.signature.len() == 64 {
-                    let mut sig = [0u8; 64];
-                    sig.copy_from_slice(&op.signature);
-                    return solen_crypto::verify(session_key, &msg, &sig).is_ok();
-                }
+            if !sig_valid {
+                return Err(ExecutionError::InvalidSignature);
             }
-            false
-        });
+
+            // If signed by a session key, enforce its restrictions.
+            account.auth_methods.iter().find(|method| {
+                if let AuthMethod::Session { session_key, .. } = method {
+                    if op.signature.len() == 64 {
+                        let mut sig = [0u8; 64];
+                        sig.copy_from_slice(&op.signature);
+                        return solen_crypto::verify(session_key, &msg, &sig).is_ok();
+                    }
+                }
+                false
+            })
+        };
 
         if let Some(AuthMethod::Session {
             expires_at,
@@ -654,8 +666,10 @@ impl BlockExecutor {
             }
         }
 
-        // Consume nonce.
-        state.consume_nonce(&op.sender, op.nonce)?;
+        // Consume nonce (skip for intent-authorized ops).
+        if !is_intent_op {
+            state.consume_nonce(&op.sender, op.nonce)?;
+        }
 
         Ok(())
     }

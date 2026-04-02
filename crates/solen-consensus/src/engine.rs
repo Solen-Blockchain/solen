@@ -262,18 +262,56 @@ impl ConsensusEngine {
             debug!(expired, height = current_h, "expired intents");
         }
 
-        // Collect intent solutions to execute after the main block.
+        // Solve pending intents and include as system operations in the block.
         let pending = self.intent_pool.pending_intents();
-        let solver = DirectTransferSolver { id: self.config.validator_id };
-        let mut intent_solutions: Vec<(u64, solen_intents::types::Solution)> = Vec::new();
+        if !pending.is_empty() {
+            let solver = DirectTransferSolver { id: self.config.validator_id };
 
-        for intent in &pending {
-            let solution = self.intent_pool.select_best_solution(intent.id)
-                .ok()
-                .or_else(|| solver.solve(intent));
+            for intent in &pending {
+                let solution = self.intent_pool.select_best_solution(intent.id)
+                    .ok()
+                    .or_else(|| solver.solve(intent));
 
-            if let Some(sol) = solution {
-                intent_solutions.push((intent.id, sol));
+                if let Some(sol) = solution {
+                    // Build a system call operation: sender calls INTENT_ADDRESS.fulfill(...)
+                    // Args: intent_id[8] + solver[32] + claimed_tip[16] + num_transfers[4] + (to[32]+amount[16])*N
+                    let mut args = Vec::new();
+                    args.extend_from_slice(&intent.id.to_le_bytes()); // intent_id[8]
+                    args.extend_from_slice(&sol.solver);              // solver[32]
+                    args.extend_from_slice(&sol.claimed_tip.to_le_bytes()); // claimed_tip[16]
+
+                    let mut transfer_count: u32 = 0;
+                    let count_pos = args.len();
+                    args.extend_from_slice(&0u32.to_le_bytes()); // placeholder
+
+                    for op in &sol.operations {
+                        for action in &op.actions {
+                            if let solen_types::transaction::Action::Transfer { to, amount } = action {
+                                args.extend_from_slice(to);
+                                args.extend_from_slice(&amount.to_le_bytes());
+                                transfer_count += 1;
+                            }
+                        }
+                    }
+
+                    // Patch transfer count.
+                    args[count_pos..count_pos+4].copy_from_slice(&transfer_count.to_le_bytes());
+
+                    ops.push(solen_types::transaction::UserOperation {
+                        sender: intent.sender,
+                        nonce: 0, // system ops use nonce 0
+                        actions: vec![solen_types::transaction::Action::Call {
+                            target: solen_types::system::INTENT_ADDRESS,
+                            method: "fulfill".to_string(),
+                            args,
+                        }],
+                        max_fee: intent.max_fee,
+                        signature: vec![0xFF], // marker for system-authorized intent ops
+                    });
+
+                    let _ = self.intent_pool.fulfill(intent.id);
+                    info!(intent_id = intent.id, "intent solution included in block");
+                }
             }
         }
 
@@ -295,119 +333,7 @@ impl ConsensusEngine {
             self.executor.execute_block_with_height(store.as_mut(), &ops, height)
         };
 
-        // Execute intent solutions as direct state changes (system-level).
-        if !intent_solutions.is_empty() {
-            let mut store = self.store.write().unwrap();
-
-            for (intent_id, sol) in &intent_solutions {
-                let intent = match pending.iter().find(|i| i.id == *intent_id) {
-                    Some(i) => i,
-                    None => continue,
-                };
-
-                let mut success = true;
-                let mut intent_events = Vec::new();
-
-                for op in &sol.operations {
-                    for action in &op.actions {
-                        if let solen_types::transaction::Action::Transfer { to, amount } = action {
-                            let mut state = solen_execution::state::StateManager::new(store.as_mut());
-                            match state.require_account(&intent.sender) {
-                                Ok(mut sender_acct) => {
-                                    if sender_acct.balance < *amount {
-                                        warn!(intent_id, "intent: insufficient balance");
-                                        success = false;
-                                        break;
-                                    }
-                                    sender_acct.balance -= *amount;
-                                    let _ = state.save_account(&sender_acct);
-
-                                    // Credit recipient (create if needed).
-                                    let mut recipient = state.get_account(to)
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or_else(|| solen_types::account::Account {
-                                        id: *to,
-                                        code_hash: [0u8; 32],
-                                        auth_methods: vec![],
-                                        nonce: 0,
-                                        balance: 0,
-                                    });
-                                    recipient.balance += *amount;
-                                    let _ = state.save_account(&recipient);
-
-                                    // Emit transfer event.
-                                    let mut data = Vec::with_capacity(48);
-                                    data.extend_from_slice(to);
-                                    data.extend_from_slice(&amount.to_le_bytes());
-                                    intent_events.push(solen_execution::receipt::Event {
-                                        emitter: intent.sender,
-                                        topic: b"transfer".to_vec(),
-                                        data,
-                                    });
-                                }
-                                Err(e) => {
-                                    warn!(intent_id, error = %e, "intent: sender not found");
-                                    success = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if !success { break; }
-                }
-
-                if success {
-                    // Pay solver tip.
-                    if sol.claimed_tip > 0 {
-                        let mut state = solen_execution::state::StateManager::new(store.as_mut());
-                        if let Ok(mut sender_acct) = state.require_account(&intent.sender) {
-                            if sender_acct.balance >= sol.claimed_tip {
-                                sender_acct.balance -= sol.claimed_tip;
-                                let _ = state.save_account(&sender_acct);
-                                let mut solver_acct = state.get_account(&sol.solver)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| solen_types::account::Account {
-                                    id: sol.solver,
-                                    code_hash: [0u8; 32],
-                                    auth_methods: vec![],
-                                    nonce: 0,
-                                    balance: 0,
-                                });
-                                solver_acct.balance += sol.claimed_tip;
-                                let _ = state.save_account(&solver_acct);
-                            }
-                        }
-                    }
-
-                    let _ = self.intent_pool.fulfill(*intent_id);
-
-                    intent_events.push(solen_execution::receipt::Event {
-                        emitter: intent.sender,
-                        topic: b"intent_fulfilled".to_vec(),
-                        data: intent_id.to_le_bytes().to_vec(),
-                    });
-
-                    result.receipts.push(solen_execution::receipt::ExecutionReceipt {
-                        sender: intent.sender,
-                        nonce: 0,
-                        success: true,
-                        gas_used: 100,
-                        error: None,
-                        events: intent_events.clone(),
-                    });
-
-                    info!(intent_id, "intent fulfilled via solver");
-                }
-
-                intent_events.clear();
-            }
-
-            // Recompute state root after intent execution.
-            result.state_root = store.state_root();
-            store.commit_root();
-        }
+        // (Intent solutions are now included as operations above — executed by the executor.)
 
         let epoch = {
             let em = self.epoch_manager.read().unwrap();

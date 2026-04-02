@@ -328,12 +328,10 @@ impl ConsensusEngine {
         };
 
         // Execute block with height so the executor handles epoch rewards deterministically.
-        let mut result = {
+        let result = {
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_with_height(store.as_mut(), &ops, height)
         };
-
-        // (Intent solutions are now included as operations above — executed by the executor.)
 
         let epoch = {
             let em = self.epoch_manager.read().unwrap();

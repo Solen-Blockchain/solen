@@ -106,9 +106,10 @@ struct Cli {
     #[arg(long)]
     no_p2p: bool,
 
-    /// Archive mode: disable block pruning, keep all history.
+    /// Prune mode: delete old blocks to save disk space.
+    /// Default is archive mode (keep all history).
     #[arg(long)]
-    archive: bool,
+    prune: bool,
 
     /// Use in-memory storage instead of RocksDB.
     #[arg(long)]
@@ -259,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
         max_ops_per_block: 100,
         validator_id,
         chain_id: genesis.chain_id,
-        archive: cli.archive,
+        prune: cli.prune,
     };
 
     let mempool = Mempool::new(10_000);

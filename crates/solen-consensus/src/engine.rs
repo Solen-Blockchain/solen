@@ -262,34 +262,18 @@ impl ConsensusEngine {
             debug!(expired, height = current_h, "expired intents");
         }
 
-        // Solve pending intents and include solution operations in the block.
+        // Collect intent solutions to execute after the main block.
         let pending = self.intent_pool.pending_intents();
-        if !pending.is_empty() {
-            let solver = DirectTransferSolver { id: self.config.validator_id };
-            let mut fulfilled_ids = Vec::new();
+        let solver = DirectTransferSolver { id: self.config.validator_id };
+        let mut intent_solutions: Vec<(u64, solen_intents::types::Solution)> = Vec::new();
 
-            for intent in &pending {
-                // Check if there's already an external solution submitted.
-                let solution = self.intent_pool.select_best_solution(intent.id)
-                    .ok()
-                    .or_else(|| solver.solve(intent));
+        for intent in &pending {
+            let solution = self.intent_pool.select_best_solution(intent.id)
+                .ok()
+                .or_else(|| solver.solve(intent));
 
-                if let Some(sol) = solution {
-                    for op in &sol.operations {
-                        ops.push(op.clone());
-                    }
-                    fulfilled_ids.push(intent.id);
-                    info!(
-                        intent_id = intent.id,
-                        ops = sol.operations.len(),
-                        "intent solved and included in block"
-                    );
-                }
-            }
-
-            // Mark intents as fulfilled after including their operations.
-            for id in fulfilled_ids {
-                let _ = self.intent_pool.fulfill(id);
+            if let Some(sol) = solution {
+                intent_solutions.push((intent.id, sol));
             }
         }
 
@@ -306,10 +290,124 @@ impl ConsensusEngine {
         };
 
         // Execute block with height so the executor handles epoch rewards deterministically.
-        let result = {
+        let mut result = {
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_with_height(store.as_mut(), &ops, height)
         };
+
+        // Execute intent solutions as direct state changes (system-level).
+        if !intent_solutions.is_empty() {
+            let mut store = self.store.write().unwrap();
+
+            for (intent_id, sol) in &intent_solutions {
+                let intent = match pending.iter().find(|i| i.id == *intent_id) {
+                    Some(i) => i,
+                    None => continue,
+                };
+
+                let mut success = true;
+                let mut intent_events = Vec::new();
+
+                for op in &sol.operations {
+                    for action in &op.actions {
+                        if let solen_types::transaction::Action::Transfer { to, amount } = action {
+                            let mut state = solen_execution::state::StateManager::new(store.as_mut());
+                            match state.require_account(&intent.sender) {
+                                Ok(mut sender_acct) => {
+                                    if sender_acct.balance < *amount {
+                                        warn!(intent_id, "intent: insufficient balance");
+                                        success = false;
+                                        break;
+                                    }
+                                    sender_acct.balance -= *amount;
+                                    let _ = state.save_account(&sender_acct);
+
+                                    // Credit recipient (create if needed).
+                                    let mut recipient = state.get_account(to)
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_else(|| solen_types::account::Account {
+                                        id: *to,
+                                        code_hash: [0u8; 32],
+                                        auth_methods: vec![],
+                                        nonce: 0,
+                                        balance: 0,
+                                    });
+                                    recipient.balance += *amount;
+                                    let _ = state.save_account(&recipient);
+
+                                    // Emit transfer event.
+                                    let mut data = Vec::with_capacity(48);
+                                    data.extend_from_slice(to);
+                                    data.extend_from_slice(&amount.to_le_bytes());
+                                    intent_events.push(solen_execution::receipt::Event {
+                                        emitter: intent.sender,
+                                        topic: b"transfer".to_vec(),
+                                        data,
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!(intent_id, error = %e, "intent: sender not found");
+                                    success = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !success { break; }
+                }
+
+                if success {
+                    // Pay solver tip.
+                    if sol.claimed_tip > 0 {
+                        let mut state = solen_execution::state::StateManager::new(store.as_mut());
+                        if let Ok(mut sender_acct) = state.require_account(&intent.sender) {
+                            if sender_acct.balance >= sol.claimed_tip {
+                                sender_acct.balance -= sol.claimed_tip;
+                                let _ = state.save_account(&sender_acct);
+                                let mut solver_acct = state.get_account(&sol.solver)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| solen_types::account::Account {
+                                    id: sol.solver,
+                                    code_hash: [0u8; 32],
+                                    auth_methods: vec![],
+                                    nonce: 0,
+                                    balance: 0,
+                                });
+                                solver_acct.balance += sol.claimed_tip;
+                                let _ = state.save_account(&solver_acct);
+                            }
+                        }
+                    }
+
+                    let _ = self.intent_pool.fulfill(*intent_id);
+
+                    intent_events.push(solen_execution::receipt::Event {
+                        emitter: intent.sender,
+                        topic: b"intent_fulfilled".to_vec(),
+                        data: intent_id.to_le_bytes().to_vec(),
+                    });
+
+                    result.receipts.push(solen_execution::receipt::ExecutionReceipt {
+                        sender: intent.sender,
+                        nonce: 0,
+                        success: true,
+                        gas_used: 100,
+                        error: None,
+                        events: intent_events.clone(),
+                    });
+
+                    info!(intent_id, "intent fulfilled via solver");
+                }
+
+                intent_events.clear();
+            }
+
+            // Recompute state root after intent execution.
+            result.state_root = store.state_root();
+            store.commit_root();
+        }
 
         let epoch = {
             let em = self.epoch_manager.read().unwrap();

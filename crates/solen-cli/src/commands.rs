@@ -652,11 +652,19 @@ pub fn cmd_key_generate(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    let key = wallet::generate_key(name)?;
+    let mut key = wallet::generate_key(name)?;
     println!("Generated key '{}'", name);
     println!("  Account ID:  {}", key.account_id_hex);
     println!("  Public key:  {}", key.public_key_hex);
-    println!("  Seed:        {} (SAVE THIS!)", key.seed_hex);
+
+    if wallet::is_locked(&ks) {
+        // Wallet is locked — encrypt the new key's seed before storing.
+        let password = wallet::prompt_password("Wallet is locked. Enter password to add key: ")?;
+        wallet::encrypt_new_key(&ks, &mut key, &password)?;
+        println!("  Seed encrypted (wallet is locked)");
+    } else {
+        println!("  Seed:        {} (SAVE THIS!)", key.seed_hex.as_deref().unwrap_or(""));
+    }
 
     ks.keys.insert(name.to_string(), key);
     wallet::save_keystore(&ks)?;
@@ -668,10 +676,16 @@ pub fn cmd_key_generate(name: &str) -> Result<()> {
 pub fn cmd_key_import(name: &str, seed_hex: &str) -> Result<()> {
     let mut ks = wallet::load_keystore()?;
 
-    let key = wallet::import_key(name, seed_hex)?;
+    let mut key = wallet::import_key(name, seed_hex)?;
     println!("Imported key '{}'", name);
     println!("  Account ID: {}", key.account_id_hex);
     println!("  Public key: {}", key.public_key_hex);
+
+    if wallet::is_locked(&ks) {
+        let password = wallet::prompt_password("Wallet is locked. Enter password to add key: ")?;
+        wallet::encrypt_new_key(&ks, &mut key, &password)?;
+        println!("  Seed encrypted (wallet is locked)");
+    }
 
     ks.keys.insert(name.to_string(), key);
     wallet::save_keystore(&ks)?;
@@ -687,6 +701,13 @@ pub fn cmd_key_list() -> Result<()> {
         return Ok(());
     }
 
+    if wallet::is_locked(&ks) {
+        println!("Wallet status: LOCKED");
+    } else {
+        println!("Wallet status: unlocked");
+    }
+    println!();
+
     println!("{:<12} {:<20} {}", "NAME", "ACCOUNT ID", "PUBLIC KEY");
     println!("{}", "─".repeat(70));
 
@@ -701,6 +722,66 @@ pub fn cmd_key_list() -> Result<()> {
             &key.public_key_hex[..16],
         );
     }
+
+    Ok(())
+}
+
+// ── Wallet Lock / Unlock ───────────────────────────────────────
+
+pub fn cmd_key_lock() -> Result<()> {
+    let mut ks = wallet::load_keystore()?;
+
+    if wallet::is_locked(&ks) {
+        println!("Wallet is already locked.");
+        return Ok(());
+    }
+
+    if ks.keys.is_empty() {
+        println!("No keys to lock. Generate one first with: solen key generate <name>");
+        return Ok(());
+    }
+
+    let password = wallet::prompt_new_password()?;
+    wallet::lock_keystore(&mut ks, &password)?;
+    wallet::save_keystore(&ks)?;
+
+    println!("Wallet locked. {} key(s) encrypted.", ks.keys.len());
+    println!("You will be prompted for your password when signing transactions.");
+
+    Ok(())
+}
+
+pub fn cmd_key_unlock() -> Result<()> {
+    let mut ks = wallet::load_keystore()?;
+
+    if !wallet::is_locked(&ks) {
+        println!("Wallet is not locked.");
+        return Ok(());
+    }
+
+    let password = wallet::prompt_password("Enter wallet password: ")?;
+    wallet::unlock_keystore(&mut ks, &password)?;
+    wallet::save_keystore(&ks)?;
+
+    println!("Wallet unlocked. Seeds are now stored in plaintext.");
+
+    Ok(())
+}
+
+pub fn cmd_key_change_password() -> Result<()> {
+    let mut ks = wallet::load_keystore()?;
+
+    if !wallet::is_locked(&ks) {
+        println!("Wallet is not locked. Use 'solen key lock' first.");
+        return Ok(());
+    }
+
+    let old_password = wallet::prompt_password("Current password: ")?;
+    let new_password = wallet::prompt_new_password()?;
+    wallet::change_password(&mut ks, &old_password, &new_password)?;
+    wallet::save_keystore(&ks)?;
+
+    println!("Password changed successfully.");
 
     Ok(())
 }

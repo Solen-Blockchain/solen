@@ -11,6 +11,9 @@
 //!   solen key generate <name>             Generate a new keypair
 //!   solen key import <name> <seed-hex>    Import a keypair from seed
 //!   solen key list                        List stored keys
+//!   solen key lock                        Lock wallet with a password
+//!   solen key unlock                      Unlock wallet (remove password)
+//!   solen key change-password             Change wallet password
 
 mod commands;
 mod rpc;
@@ -262,6 +265,12 @@ enum KeyAction {
     },
     /// List all stored keys
     List,
+    /// Lock the wallet with a password (encrypts all seeds)
+    Lock,
+    /// Unlock the wallet (decrypts all seeds, removes password)
+    Unlock,
+    /// Change the wallet password
+    ChangePassword,
 }
 
 #[tokio::main]
@@ -346,6 +355,9 @@ async fn main() -> anyhow::Result<()> {
             KeyAction::Generate { name } => commands::cmd_key_generate(&name)?,
             KeyAction::Import { name, seed } => commands::cmd_key_import(&name, &seed)?,
             KeyAction::List => commands::cmd_key_list()?,
+            KeyAction::Lock => commands::cmd_key_lock()?,
+            KeyAction::Unlock => commands::cmd_key_unlock()?,
+            KeyAction::ChangePassword => commands::cmd_key_change_password()?,
         },
     }
 

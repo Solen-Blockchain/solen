@@ -19,3 +19,7 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+rpassword = { workspace = true }
+rand = "0.8"

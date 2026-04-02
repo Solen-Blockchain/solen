@@ -560,14 +560,25 @@ impl BlockExecutor {
                         "auth_methods cannot be empty".into(),
                     )));
                 }
-                // Validate threshold auth methods.
+                // Validate auth methods.
                 for method in auth_methods {
-                    if let AuthMethod::Threshold { signers, threshold } = method {
-                        if *threshold == 0 || *threshold as usize > signers.len() {
-                            return Err(ExecutionError::State(StateError::AccountNotFound(
-                                format!("invalid threshold: {} of {} signers", threshold, signers.len()),
-                            )));
+                    match method {
+                        AuthMethod::Threshold { signers, threshold } => {
+                            if *threshold == 0 || *threshold as usize > signers.len() {
+                                return Err(ExecutionError::State(StateError::AccountNotFound(
+                                    format!("invalid threshold: {} of {} signers", threshold, signers.len()),
+                                )));
+                            }
                         }
+                        AuthMethod::Guardian { guardian_id } => {
+                            // Verify guardian account exists.
+                            if state.get_account(guardian_id)?.is_none() {
+                                return Err(ExecutionError::State(StateError::AccountNotFound(
+                                    format!("guardian account does not exist: {:?}", &guardian_id[..4]),
+                                )));
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 let mut account = state.require_account(sender)?;

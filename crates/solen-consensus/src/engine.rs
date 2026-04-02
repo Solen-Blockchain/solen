@@ -1128,24 +1128,39 @@ impl ConsensusEngine {
 
 /// Hash a block header to get the block hash.
 pub fn block_hash(header: &BlockHeader) -> Hash {
-    let serialized = serde_json::to_vec(header).unwrap_or_default();
-    blake3_hash(&serialized)
+    match serde_json::to_vec(header) {
+        Ok(data) => blake3_hash(&data),
+        Err(e) => {
+            warn!(error = %e, "block header serialization failed — using height-based hash");
+            blake3_hash(&header.height.to_le_bytes())
+        }
+    }
 }
 
 fn compute_tx_root(ops: &[solen_types::transaction::UserOperation]) -> Hash {
     if ops.is_empty() {
         return [0u8; 32];
     }
-    let serialized = serde_json::to_vec(ops).unwrap_or_default();
-    blake3_hash(&serialized)
+    match serde_json::to_vec(ops) {
+        Ok(data) => blake3_hash(&data),
+        Err(e) => {
+            warn!(error = %e, "tx serialization failed — using op count hash");
+            blake3_hash(&ops.len().to_le_bytes())
+        }
+    }
 }
 
 fn compute_receipts_root(result: &BlockResult) -> Hash {
     if result.receipts.is_empty() {
         return [0u8; 32];
     }
-    let serialized = serde_json::to_vec(&result.receipts).unwrap_or_default();
-    blake3_hash(&serialized)
+    match serde_json::to_vec(&result.receipts) {
+        Ok(data) => blake3_hash(&data),
+        Err(e) => {
+            warn!(error = %e, "receipts serialization failed — using count hash");
+            blake3_hash(&result.receipts.len().to_le_bytes())
+        }
+    }
 }
 
 fn now_ms() -> u64 {

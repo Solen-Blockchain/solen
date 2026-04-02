@@ -66,12 +66,15 @@ solen/
 │   ├── solen-p2p/               # libp2p gossipsub networking
 │   ├── solen-rpc/               # JSON-RPC server (jsonrpsee)
 │   ├── solen-indexer/           # Event indexer + explorer REST API
+│   ├── solen-cli/               # CLI tool (key management, transactions, staking, governance)
+│   ├── solen-faucet/            # Testnet faucet server
+│   ├── solen-intents/           # Intent pool, solver interface, constraint types
 │   └── solen-node/              # Node binary (ties everything together)
 ├── sdks/
 │   ├── wallet-sdk-rs/           # Rust wallet SDK
 │   └── wallet-sdk-ts/           # TypeScript wallet SDK
 ├── tools/
-│   ├── explorer/                # Next.js block explorer (frontend)
+│   ├── submit-batch/            # Rollup batch submission tool
 │   └── devnet/                  # Local devnet launcher
 ├── fuzz/                        # Fuzz targets (executor, VM, tx decode)
 ├── specs/                       # Protocol specifications
@@ -118,7 +121,7 @@ This starts a single-validator devnet with:
 - P2P on port `50333`
 - RocksDB persistence at `data/devnet`
 - 2-second block times
-- Three genesis accounts (faucet with 1B tokens, alice with 10K, bob with 5K)
+- Three genesis accounts (faucet, alice with 1M SOLEN, bob with 500K SOLEN)
 
 ### Network Environments
 
@@ -158,6 +161,8 @@ Options:
     --no-p2p                       Disable P2P networking
     --in-memory                    Use in-memory storage (no persistence)
     --explorer-port <PORT>         Explorer API port (0 to disable)
+    --genesis <PATH>               Path to genesis.json config file
+    --prune                        Enable block pruning (default: archive mode)
 ```
 
 ### Multi-Node Devnet
@@ -188,8 +193,19 @@ All methods use standard JSON-RPC 2.0 over HTTP POST to the RPC port.
 | `solen_getAccount` | `account_id` (hex) | Full account info (balance, nonce, code_hash) |
 | `solen_getBlock` | `height` (u64) | Block header and execution summary |
 | `solen_getLatestBlock` | — | Latest finalized block |
+| `solen_getValidators` | — | Active validator set with stakes |
 | `solen_submitOperation` | `UserOperation` | Submit a signed operation to the mempool |
 | `solen_simulateOperation` | `UserOperation` | Dry-run without state changes |
+| `solen_checkSponsorship` | `UserOperation` | Check if a paymaster will sponsor |
+| `solen_getStakingInfo` | `account_id` (hex) | Delegations and pending undelegations |
+| `solen_getVestingInfo` | `account_id` (hex) | Vesting schedule and claimable amount |
+| `solen_getGovernanceProposals` | — | All governance proposals |
+| `solen_submitIntent` | `IntentRequest` | Submit an intent for solver resolution |
+| `solen_getPendingIntents` | `limit?` | Get pending intents available for solvers |
+| `solen_submitSolution` | `SolutionRequest` | Submit a solver's solution for an intent |
+| `solen_getRollupStatus` | `rollup_id` (u64) | Rollup registration and latest state root |
+| `solen_getRollupBatches` | `rollup_id`, `limit?` | Verified batch history for a rollup |
+| `solen_submitBatch` | `BatchSubmitRequest` | Submit a rollup batch commitment |
 
 **Example:**
 
@@ -208,10 +224,23 @@ Available on the explorer port (default `9955`).
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/status` | Indexing status (height, block/tx/event counts) |
-| `GET /api/blocks?limit=N` | Recent blocks |
+| `GET /api/blocks?limit=N&offset=N` | Recent blocks |
 | `GET /api/blocks/{height}` | Block by height |
-| `GET /api/accounts/{id}/txs?limit=N` | Account transaction history |
-| `GET /api/events?limit=N` | Recent events |
+| `GET /api/blocks/{height}/txs` | Transactions in a block |
+| `GET /api/tx/{height}/{index}` | Transaction by block height and index |
+| `GET /api/txs?limit=N&offset=N` | Recent transactions |
+| `GET /api/accounts/{id}/txs?limit=N&offset=N` | Account transaction history |
+| `GET /api/events?limit=N&offset=N` | Recent events |
+| `GET /api/validators` | Validator set with stakes and commission |
+| `GET /api/validators/stats` | Proposer statistics and uptime |
+| `GET /api/accounts/{id}/tokens` | Token contracts held by an account |
+| `GET /api/contracts` | All deployed contracts |
+| `GET /api/contracts/{id}/holders` | Token holders for a contract |
+| `GET /api/contracts/{hash}/source` | Published/verified contract source |
+| `GET /api/rollups` | Registered rollups |
+| `GET /api/rollups/{id}` | Rollup detail with batch count |
+| `GET /api/rollups/{id}/batches` | Verified batch history |
+| `GET /api/intents?limit=N` | Recently fulfilled intents |
 
 ---
 
@@ -274,7 +303,7 @@ Each block has a configurable base fee per gas unit. After an operation executes
 
 ### Testing
 
-- **Unit tests:** 76 tests across all crates
+- **Unit tests:** 155 tests across all crates (including 6 rollup e2e tests)
 - **Property-based tests:** Supply conservation, nonce monotonicity, state root determinism, no negative balances (via proptest)
 - **Fuzz targets:** Executor, WASM VM, and transaction deserialization
 
@@ -293,6 +322,47 @@ cargo fuzz run fuzz_tx_decode -- -max_total_time=300
 Validators are slashed for:
 - **Double signing** — 10% stake penalty + jailing
 - **Downtime** — 1% penalty after 50 consecutive missed blocks
+
+---
+
+## CLI
+
+The `solen` CLI interacts with the network from the command line. Keys are stored locally in `~/.solen/keys.json` with optional password encryption (Argon2id + AES-256-GCM).
+
+```bash
+cargo build -p solen-cli
+
+# Key management
+solen key generate alice
+solen key import bob <seed-hex>
+solen key list
+solen key lock          # encrypt with password
+solen key unlock        # decrypt
+
+# Queries
+solen status
+solen balance alice
+solen account alice
+solen block 100
+solen validators
+
+# Transactions
+solen transfer alice bob 100
+solen stake alice <validator> 1000
+solen unstake alice <validator> 500
+
+# Governance
+solen propose-block-time alice 4000 "Reduce block time"
+solen vote alice 0 --yes --weight 1000
+solen finalize-proposal alice 0
+solen execute-proposal alice 0
+
+# Rollups
+solen register-rollup alice 1 "My Rollup" --proof-type mock
+
+# Connect to testnet
+solen --rpc https://testnet-rpc.solenchain.io --chain-id 9000 balance alice
+```
 
 ---
 
@@ -343,12 +413,12 @@ const result = await alice.submit(op);
 |--------|-------|
 | Rust crates | 17 |
 | TypeScript packages | 2 |
-| Rust source lines | ~18,000 |
-| Test functions | 135 |
+| Rust source lines | ~21,000 |
+| Test functions | 155 |
 | Property tests | 4 (hundreds of cases each) |
 | Fuzz targets | 3 |
-| RPC methods | 7 |
-| Explorer endpoints | 5 |
+| RPC methods | 19 |
+| Explorer endpoints | 18 |
 | Transfer TPS | ~14,000 |
 | Contract call TPS | ~10,000 |
 

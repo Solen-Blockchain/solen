@@ -27,10 +27,10 @@ impl SmartAccountBuilder {
         self.with_ed25519_owner(kp.public_key())
     }
 
-    /// Add a passkey auth method.
-    pub fn with_passkey(mut self, credential_id: Vec<u8>) -> Self {
+    /// Add a passkey auth method (P-256/secp256r1).
+    pub fn with_passkey(mut self, credential_id: Vec<u8>, public_key_x: [u8; 32], public_key_y: [u8; 32]) -> Self {
         self.auth_methods
-            .push(AuthMethod::Passkey { credential_id });
+            .push(AuthMethod::Passkey { credential_id, public_key_x, public_key_y });
         self
     }
 

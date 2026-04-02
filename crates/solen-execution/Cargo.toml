@@ -18,6 +18,8 @@ borsh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = { workspace = true }
+p256 = { workspace = true }
+sha2 = { workspace = true }
 
 [[bench]]
 name = "tps"

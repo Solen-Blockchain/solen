@@ -196,6 +196,18 @@ impl<'a> StateManager<'a> {
         Ok(())
     }
 
+    /// Read the current block height from chain metadata.
+    pub fn current_height(&self) -> Option<u64> {
+        match self.store.get(b"__chain_meta__") {
+            Ok(Some(data)) if data.len() >= 8 => {
+                let mut h = [0u8; 8];
+                h.copy_from_slice(&data[..8]);
+                Some(u64::from_le_bytes(h))
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the current state root from the underlying store.
     pub fn state_root(&self) -> Hash {
         self.store.state_root()

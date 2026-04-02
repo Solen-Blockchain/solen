@@ -60,8 +60,144 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
             }
             valid_count >= *threshold
         }
-        _ => false,
+        AuthMethod::Passkey { public_key_x, public_key_y, .. } => {
+            verify_passkey(public_key_x, public_key_y, msg, signature)
+        }
+        AuthMethod::Session { session_key, .. } => {
+            // Session keys use Ed25519 signatures. Restriction checks
+            // (expiry, spending, targets, methods) are done in execute_operation.
+            if signature.len() != 64 {
+                return false;
+            }
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(signature);
+            solen_crypto::verify(session_key, msg, &sig).is_ok()
+        }
+        AuthMethod::Guardian { .. } => false, // Guardians don't sign transactions.
     }
+}
+
+/// Verify a WebAuthn/Passkey P-256 (secp256r1) ECDSA signature.
+///
+/// Signature format:
+///   auth_data_len[2 LE] + authenticatorData[N] + client_data_json_len[2 LE] + clientDataJSON[M] + r[32] + s[32]
+///
+/// Verification:
+///   1. Extract challenge from clientDataJSON, verify it matches base64url(msg)
+///   2. Compute signed_data = authenticatorData || SHA-256(clientDataJSON)
+///   3. Verify P-256 ECDSA signature over SHA-256(signed_data)
+fn verify_passkey(pk_x: &[u8; 32], pk_y: &[u8; 32], msg: &[u8], signature: &[u8]) -> bool {
+    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    use p256::EncodedPoint;
+    use sha2::{Digest, Sha256};
+
+    // Parse: auth_data_len[2] + auth_data + client_data_len[2] + client_data + r[32] + s[32]
+    if signature.len() < 68 {
+        return false; // minimum: 2 + 0 + 2 + 0 + 32 + 32
+    }
+
+    let auth_data_len = u16::from_le_bytes([signature[0], signature[1]]) as usize;
+    if signature.len() < 2 + auth_data_len + 2 + 64 {
+        return false;
+    }
+    let auth_data = &signature[2..2 + auth_data_len];
+
+    let cd_offset = 2 + auth_data_len;
+    let client_data_len = u16::from_le_bytes([signature[cd_offset], signature[cd_offset + 1]]) as usize;
+    let sig_start = cd_offset + 2 + client_data_len;
+    if signature.len() < sig_start + 64 {
+        return false;
+    }
+    let client_data_json = &signature[cd_offset + 2..sig_start];
+
+    let mut r_bytes = [0u8; 32];
+    let mut s_bytes = [0u8; 32];
+    r_bytes.copy_from_slice(&signature[sig_start..sig_start + 32]);
+    s_bytes.copy_from_slice(&signature[sig_start + 32..sig_start + 64]);
+
+    // 1. Verify challenge in clientDataJSON matches base64url(msg).
+    // Parse clientDataJSON to extract challenge field.
+    let client_data_str = match std::str::from_utf8(client_data_json) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Extract challenge value (simple JSON parsing — look for "challenge":"...")
+    let challenge_value = match extract_json_string(client_data_str, "challenge") {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // The challenge should be base64url-encoded signing message.
+    let expected_challenge = base64url_encode(msg);
+    if challenge_value != expected_challenge {
+        return false;
+    }
+
+    // 2. Verify authenticatorData flags (UP bit must be set).
+    if auth_data.len() < 37 {
+        return false;
+    }
+    let flags = auth_data[32];
+    if flags & 0x01 == 0 {
+        return false; // User Present flag not set.
+    }
+
+    // 3. Compute signed data = authenticatorData || SHA-256(clientDataJSON)
+    let client_data_hash = Sha256::digest(client_data_json);
+    let mut signed_data = Vec::with_capacity(auth_data.len() + 32);
+    signed_data.extend_from_slice(auth_data);
+    signed_data.extend_from_slice(&client_data_hash);
+
+    // 4. Reconstruct P-256 public key and verify.
+    let point = EncodedPoint::from_affine_coordinates(pk_x.into(), pk_y.into(), false);
+    let verifying_key = match VerifyingKey::from_encoded_point(&point) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+
+    let ecdsa_sig = match Signature::from_scalars(r_bytes, s_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // P-256 ECDSA verify: the p256 crate internally hashes signed_data with SHA-256.
+    verifying_key.verify(&signed_data, &ecdsa_sig).is_ok()
+}
+
+/// Extract a string value from a JSON object (simple parser, no dependencies).
+fn extract_json_string<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("\"{}\"", key);
+    let key_pos = json.find(&pattern)?;
+    let after_key = &json[key_pos + pattern.len()..];
+    // Skip whitespace and colon
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let after_ws = after_colon.trim_start();
+    // Expect opening quote
+    let after_quote = after_ws.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(&after_quote[..end])
+}
+
+/// Base64url encoding without padding (RFC 4648 §5).
+fn base64url_encode(data: &[u8]) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut result = String::with_capacity((data.len() * 4 + 2) / 3);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARSET[((n >> 18) & 0x3F) as usize] as char);
+        result.push(CHARSET[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARSET[((n >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            result.push(CHARSET[(n & 0x3F) as usize] as char);
+        }
+    }
+    result
 }
 
 #[derive(Debug, Error)]
@@ -443,6 +579,79 @@ impl BlockExecutor {
 
         if !sig_valid {
             return Err(ExecutionError::InvalidSignature);
+        }
+
+        // If signed by a session key, enforce its restrictions.
+        let matched_session = account.auth_methods.iter().find(|method| {
+            if let AuthMethod::Session { session_key, .. } = method {
+                if op.signature.len() == 64 {
+                    let mut sig = [0u8; 64];
+                    sig.copy_from_slice(&op.signature);
+                    return solen_crypto::verify(session_key, &msg, &sig).is_ok();
+                }
+            }
+            false
+        });
+
+        if let Some(AuthMethod::Session {
+            expires_at,
+            spending_limit,
+            allowed_targets,
+            allowed_methods,
+            ..
+        }) = matched_session
+        {
+            // Check expiry (read current block height from chain meta).
+            let current_height = state.current_height().unwrap_or(0);
+            if current_height > *expires_at {
+                return Err(ExecutionError::State(StateError::AccountNotFound(
+                    "session key expired".into(),
+                )));
+            }
+
+            // Check spending limit.
+            if *spending_limit > 0 {
+                let total_spend: u128 = op.actions.iter().map(|a| match a {
+                    Action::Transfer { amount, .. } => *amount,
+                    _ => 0,
+                }).sum();
+                if total_spend > *spending_limit {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(
+                        format!("session spending limit exceeded: {} > {}", total_spend, spending_limit),
+                    )));
+                }
+            }
+
+            // Check allowed targets.
+            if !allowed_targets.is_empty() {
+                for action in &op.actions {
+                    let target = match action {
+                        Action::Call { target, .. } => Some(target),
+                        Action::Transfer { to, .. } => Some(to),
+                        _ => None,
+                    };
+                    if let Some(t) = target {
+                        if !allowed_targets.contains(t) {
+                            return Err(ExecutionError::State(StateError::AccountNotFound(
+                                "session key not authorized for this target".into(),
+                            )));
+                        }
+                    }
+                }
+            }
+
+            // Check allowed methods.
+            if !allowed_methods.is_empty() {
+                for action in &op.actions {
+                    if let Action::Call { method, .. } = action {
+                        if !allowed_methods.contains(method) {
+                            return Err(ExecutionError::State(StateError::AccountNotFound(
+                                format!("session key not authorized for method: {}", method),
+                            )));
+                        }
+                    }
+                }
+            }
         }
 
         // Consume nonce.

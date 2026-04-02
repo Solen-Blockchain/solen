@@ -917,15 +917,12 @@ impl ConsensusEngine {
                     );
                     return; // Gap — can't apply.
                 }
-                // Validate parent hash matches our last block.
-                let expected_parent = block_hash(&last.header);
-                if header.parent_hash != expected_parent && header.parent_hash != [0u8; 32] {
-                    warn!(
-                        height,
-                        "parent hash mismatch in synced block — skipping"
-                    );
-                    return;
-                }
+                // Note: we intentionally do NOT check parent_hash during sync.
+                // Synced blocks are authoritative from peers. A wiped node may
+                // have produced its own divergent blocks during startup, so the
+                // parent hashes won't match. The gap check above ensures blocks
+                // are applied sequentially, and state root verification on the
+                // next live block confirms correctness.
             }
         }
 

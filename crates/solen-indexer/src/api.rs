@@ -479,8 +479,30 @@ async fn get_rollup(
         Some(r) => r.clone(),
         None => return Json(None),
     };
-    let total_batches = store.get_rollup_batch_count(rollup_id);
-    let latest_batch = store.get_rollup_batches(rollup_id, 1).first().cloned().cloned();
+    // Check indexed batches first, then fall back to proof registry.
+    let mut total_batches = store.get_rollup_batch_count(rollup_id);
+    let mut latest_batch = store.get_rollup_batches(rollup_id, 1).first().cloned().cloned();
+    drop(store);
+
+    if total_batches == 0 {
+        if let Some(engine) = &state.engine {
+            let registry_arc = engine.proof_registry();
+            let reg = registry_arc.read().unwrap();
+            total_batches = reg.batch_count(rollup_id);
+            if let Some(b) = reg.get_verified_batches(rollup_id, 1).first() {
+                latest_batch = Some(IndexedBatch {
+                    rollup_id: b.rollup_id,
+                    batch_index: b.batch_index,
+                    state_root: hex_encode(&b.state_root),
+                    data_hash: hex_encode(&b.data_hash),
+                    verified: true,
+                    block_height: 0,
+                    tx_index: 0,
+                });
+            }
+        }
+    }
+
     Json(Some(RollupDetailResponse {
         rollup,
         total_batches,
@@ -493,14 +515,37 @@ async fn get_rollup_batches(
     Path(rollup_id): Path<u64>,
     Query(params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedBatch>> {
+    // First check the indexed store (from on-chain events).
     let store = state.store.read().unwrap();
-    Json(
-        store
-            .get_rollup_batches(rollup_id, params.limit)
+    let indexed = store.get_rollup_batches(rollup_id, params.limit);
+    if !indexed.is_empty() {
+        return Json(indexed.into_iter().cloned().collect());
+    }
+    drop(store);
+
+    // Fall back to the engine's proof registry (for batches submitted via RPC).
+    if let Some(engine) = &state.engine {
+        let registry_arc = engine.proof_registry();
+        let reg = registry_arc.read().unwrap();
+        let batches: Vec<IndexedBatch> = reg
+            .get_verified_batches(rollup_id, params.limit)
             .into_iter()
-            .cloned()
-            .collect(),
-    )
+            .map(|b| IndexedBatch {
+                rollup_id: b.rollup_id,
+                batch_index: b.batch_index,
+                state_root: hex_encode(&b.state_root),
+                data_hash: hex_encode(&b.data_hash),
+                verified: true,
+                block_height: 0,
+                tx_index: 0,
+            })
+            .collect();
+        if !batches.is_empty() {
+            return Json(batches);
+        }
+    }
+
+    Json(vec![])
 }
 
 pub async fn start_explorer_api(

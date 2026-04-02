@@ -22,6 +22,7 @@ members = [
     "crates/solen-indexer",
     "crates/solen-node",
     "sdks/wallet-sdk-rs",
+    "tools/submit-batch",
 ]
 
 [workspace.package]

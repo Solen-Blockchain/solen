@@ -70,6 +70,8 @@ pub struct ProofVerifierRegistry {
     /// Rollup ID -> (pre_state_root, verifier backend)
     rollups: HashMap<RollupId, RollupVerifierState>,
     verifiers: HashMap<String, Arc<dyn ProofVerifierBackend>>,
+    /// All verified batches, ordered by submission time.
+    verified_batches: Vec<VerifiedBatch>,
 }
 
 struct RollupVerifierState {
@@ -77,11 +79,22 @@ struct RollupVerifierState {
     last_verified_state_root: [u8; 32],
 }
 
+/// A verified batch record.
+#[derive(Debug, Clone)]
+pub struct VerifiedBatch {
+    pub rollup_id: RollupId,
+    pub batch_index: u64,
+    pub state_root: [u8; 32],
+    pub data_hash: [u8; 32],
+    pub pre_state_root: [u8; 32],
+}
+
 impl ProofVerifierRegistry {
     pub fn new() -> Self {
         Self {
             rollups: HashMap::new(),
             verifiers: HashMap::new(),
+            verified_batches: Vec::new(),
         }
     }
 
@@ -137,6 +150,15 @@ impl ProofVerifierRegistry {
             .map_err(|e| ProofError::VerifierError(e))?;
 
         if valid {
+            // Record the verified batch.
+            self.verified_batches.push(VerifiedBatch {
+                rollup_id: commitment.rollup_id,
+                batch_index: commitment.batch_index,
+                state_root: commitment.state_root,
+                data_hash: commitment.data_hash,
+                pre_state_root: pre_state,
+            });
+
             // Update the verified state root.
             if let Some(r) = self.rollups.get_mut(&commitment.rollup_id) {
                 r.last_verified_state_root = commitment.state_root;
@@ -154,6 +176,21 @@ impl ProofVerifierRegistry {
     /// Get the last verified state root for a rollup.
     pub fn last_state_root(&self, rollup_id: RollupId) -> Option<[u8; 32]> {
         self.rollups.get(&rollup_id).map(|r| r.last_verified_state_root)
+    }
+
+    /// Get verified batches for a rollup, newest first.
+    pub fn get_verified_batches(&self, rollup_id: RollupId, limit: usize) -> Vec<&VerifiedBatch> {
+        self.verified_batches
+            .iter()
+            .rev()
+            .filter(|b| b.rollup_id == rollup_id)
+            .take(limit)
+            .collect()
+    }
+
+    /// Get total number of verified batches for a rollup.
+    pub fn batch_count(&self, rollup_id: RollupId) -> usize {
+        self.verified_batches.iter().filter(|b| b.rollup_id == rollup_id).count()
     }
 }
 

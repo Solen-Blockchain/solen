@@ -341,14 +341,14 @@ impl GenesisConfig {
                 AccountAllocation {
                     name: "alice".into(),
                     id_hex: None,
-                    balance: 10_000,
+                    balance: 1_000_000 * 100_000_000, // 1M SOLEN
                     public_key_hex: None,
                     seed_hex: Some("0a".repeat(32)),
                 },
                 AccountAllocation {
                     name: "bob".into(),
                     id_hex: None,
-                    balance: 5_000,
+                    balance: 500_000 * 100_000_000, // 500K SOLEN
                     public_key_hex: None,
                     seed_hex: Some("0b".repeat(32)),
                 },
@@ -356,7 +356,7 @@ impl GenesisConfig {
             faucet: Some(FaucetConfig {
                 account_name: "faucet".into(),
                 seed_hex: "2a".repeat(32),
-                drip_amount: 10_000,
+                drip_amount: 100_000 * 100_000_000, // 100K SOLEN per drip
                 cooldown_secs: 60,
             }),
             team_vesting: vec![],

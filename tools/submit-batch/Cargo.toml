@@ -1,0 +1,13 @@
+[package]
+name = "submit-batch"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "submit-batch"
+path = "main.rs"
+
+[dependencies]
+solen-crypto = { path = "../../crates/solen-crypto" }
+solen-rollup-kit = { path = "../../crates/solen-rollup-kit" }
+serde_json = "1"

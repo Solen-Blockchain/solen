@@ -212,6 +212,16 @@ pub struct BatchSubmitResult {
     pub error: Option<String>,
 }
 
+/// Verified batch info returned by the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedBatchInfo {
+    pub rollup_id: u64,
+    pub batch_index: u64,
+    pub state_root: String,
+    pub data_hash: String,
+    pub pre_state_root: String,
+}
+
 #[rpc(server)]
 pub trait SolenApi {
     #[method(name = "solen_getBalance")]
@@ -271,6 +281,10 @@ pub trait SolenApi {
     /// Submit a rollup batch commitment for verification.
     #[method(name = "solen_submitBatch")]
     fn submit_batch(&self, batch: BatchSubmitRequest) -> RpcResult<BatchSubmitResult>;
+
+    /// Get verified batches for a rollup.
+    #[method(name = "solen_getRollupBatches")]
+    fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>>;
 }
 
 /// Implementation of the Solen RPC API.
@@ -804,11 +818,17 @@ impl SolenApiServer for SolenRpc {
         let last_state_root = registry.last_state_root(rollup_id);
 
         if last_state_root.is_some() {
+            let batch_count = registry.batch_count(rollup_id);
+            let last_batch_index = if batch_count > 0 {
+                registry.get_verified_batches(rollup_id, 1).first().map(|b| b.batch_index)
+            } else {
+                None
+            };
             return Ok(RollupStatusInfo {
                 rollup_id,
                 registered: true,
                 last_verified_state_root: last_state_root.map(|r| hex_encode(&r)),
-                last_batch_index: None,
+                last_batch_index,
             });
         }
         drop(registry);
@@ -886,6 +906,22 @@ impl SolenApiServer for SolenRpc {
                 error: Some(e.to_string()),
             }),
         }
+    }
+
+    fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>> {
+        let registry = self.engine.proof_registry();
+        let registry = registry.read().map_err(|e| internal_error(e.to_string()))?;
+        let batches = registry.get_verified_batches(rollup_id, limit.unwrap_or(50));
+        Ok(batches
+            .into_iter()
+            .map(|b| VerifiedBatchInfo {
+                rollup_id: b.rollup_id,
+                batch_index: b.batch_index,
+                state_root: hex_encode(&b.state_root),
+                data_hash: hex_encode(&b.data_hash),
+                pre_state_root: hex_encode(&b.pre_state_root),
+            })
+            .collect())
     }
 }
 

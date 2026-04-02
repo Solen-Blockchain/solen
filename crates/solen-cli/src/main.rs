@@ -136,6 +136,12 @@ enum Commands {
         amount: String,
     },
 
+    /// Withdraw matured unstaked tokens
+    WithdrawStake {
+        /// Your key name
+        from: String,
+    },
+
     /// Transfer tokens between accounts
     Transfer {
         /// Sender key name (must exist in keystore)
@@ -311,6 +317,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Unstake { from, validator, amount } => {
             let base = parse_solen_amount(&amount)?;
             commands::cmd_unstake(&rpc, &from, &validator, base, cli.chain_id).await?
+        }
+        Commands::WithdrawStake { from } => {
+            commands::cmd_withdraw_stake(&rpc, &from, cli.chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
             let base = parse_solen_amount(&amount)?;

@@ -206,7 +206,7 @@ fn execute_staking_call(
             }
         }
         "undelegate" => {
-            // args: validator_id[32] + amount[16] + current_epoch[8]
+            // args: validator_id[32] + amount[16] (epoch read from chain meta)
             let validator = match read_account_id(args, 0) {
                 Some(v) => v,
                 None => return err("invalid args"),
@@ -215,9 +215,27 @@ fn execute_staking_call(
                 Some(a) => a,
                 None => return err("invalid args"),
             };
-            let epoch = read_u64(args, 48).unwrap_or(0);
+            let current_epoch = read_current_epoch(store);
 
-            match staking.undelegate(*sender, validator, amount, epoch) {
+            // Auto-withdraw any previously matured undelegations first.
+            let auto_withdrawn = staking.withdraw_undelegated(*sender, current_epoch);
+            if auto_withdrawn > 0 {
+                let mut state = StateManager::new(store);
+                if let Ok(mut acct) = state.require_account(sender) {
+                    acct.balance = acct.balance.saturating_add(auto_withdrawn);
+                    let _ = state.save_account(&acct);
+                }
+                drop(state);
+                staking = StakingContract::load(store);
+
+                events.push(Event {
+                    emitter: STAKING_ADDRESS,
+                    topic: b"withdraw".to_vec(),
+                    data: auto_withdrawn.to_le_bytes().to_vec(),
+                });
+            }
+
+            match staking.undelegate(*sender, validator, amount, current_epoch) {
                 Ok(()) => {
                     let mut data = Vec::with_capacity(48);
                     data.extend_from_slice(&validator);
@@ -233,8 +251,8 @@ fn execute_staking_call(
             }
         }
         "withdraw" => {
-            let epoch = read_u64(args, 0).unwrap_or(0);
-            let withdrawn = staking.withdraw_undelegated(*sender, epoch);
+            let current_epoch = read_current_epoch(store);
+            let withdrawn = staking.withdraw_undelegated(*sender, current_epoch);
 
             if withdrawn > 0 {
                 // Credit sender balance.

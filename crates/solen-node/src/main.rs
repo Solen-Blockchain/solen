@@ -240,14 +240,34 @@ async fn main() -> anyhow::Result<()> {
         // verify they agree on the state root before downloading a snapshot.
         info!("empty store — attempting snapshot sync from seed nodes...");
 
-        let seed_rpc_urls: Vec<String> = cli.bootstrap.iter().map(|addr| {
-            let ip = addr.split('/').find(|s| s.contains('.')).unwrap_or("127.0.0.1");
+        // Build RPC URLs from bootstrap peers.
+        // For testnet/mainnet, try both the public endpoint AND individual peer IPs.
+        let seed_rpc_urls: Vec<String> = {
+            let mut urls = std::collections::HashSet::new();
+            // Add the public RPC endpoint.
             match net {
-                Network::Testnet => "https://testnet-rpc.solenchain.io".to_string(),
-                Network::Mainnet => "https://rpc.solenchain.io".to_string(),
-                _ => format!("http://{}:{}", ip, rpc_port),
+                Network::Testnet => { urls.insert("https://testnet-rpc.solenchain.io".to_string()); }
+                Network::Mainnet => { urls.insert("https://rpc.solenchain.io".to_string()); }
+                _ => {}
             }
-        }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            // Also try individual peer IPs (extract from multiaddr).
+            for addr in &cli.bootstrap {
+                let ip = addr.split('/').find(|s| {
+                    // Match IPv4 addresses, not DNS names.
+                    s.split('.').count() == 4 && s.split('.').all(|p| p.parse::<u8>().is_ok())
+                });
+                if let Some(ip) = ip {
+                    let peer_rpc_port = match net {
+                        Network::Testnet => 19944,
+                        Network::Mainnet => 9944,
+                        _ => rpc_port,
+                    };
+                    urls.insert(format!("http://{}:{}", ip, peer_rpc_port));
+                }
+            }
+            urls.into_iter().collect()
+        };
+        info!(urls = ?seed_rpc_urls, "snapshot seed RPC URLs");
 
         // Step 1: Query chain status from all seeds to get consensus on state root.
         let status_body = serde_json::json!({
@@ -299,7 +319,9 @@ async fn main() -> anyhow::Result<()> {
                 .map(|(r, c)| (r.to_string(), *c))
                 .unwrap_or_default();
 
-            let need_consensus = if matches!(net, Network::Devnet) { 1 } else { 2 };
+            // Require 2+ agreeing seeds when multiple are available.
+            // Fall back to 1 if only 1 unique URL was reachable.
+            let need_consensus = if matches!(net, Network::Devnet) || state_roots.len() <= 1 { 1 } else { 2 };
 
             if count >= need_consensus {
                 info!(

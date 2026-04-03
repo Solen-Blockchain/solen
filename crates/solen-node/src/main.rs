@@ -918,6 +918,12 @@ async fn main() -> anyhow::Result<()> {
             let already_pending = engine_clone.has_pending_block(next_height);
             let stalled_for = last_finalized_at.elapsed();
 
+            // Only propose if:
+            // 1. Single validator mode (always produce), OR
+            // 2. We're the designated proposer and no block pending, OR
+            // 3. We're the backup proposer AND no block pending from any source.
+            //    The `already_pending` check prevents competing blocks at the same
+            //    height, which causes attestation hash mismatches.
             let should_propose = engine_clone.active_validator_count() <= 1
                 || (engine_clone.is_next_proposer() && !already_pending)
                 || (!already_pending && engine_clone.is_backup_proposer(stalled_for));

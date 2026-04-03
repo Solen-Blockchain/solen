@@ -445,11 +445,16 @@ impl ConsensusEngine {
 
     /// Check if this node should act as backup proposer.
     ///
-    /// Follows Tendermint's round-based approach: only ONE backup proposer
-    /// is active at a time. After 3x block_time, the next validator in
-    /// rotation becomes the backup. After another 2x block_time, the next
-    /// one takes over, and so on. At any given moment, exactly one
-    /// validator should be producing.
+    /// When the designated proposer is offline, backup proposers take over
+    /// in deterministic order. The first backup (next in round-robin after
+    /// the designated proposer) waits 3x block_time. Subsequent backups
+    /// wait an additional 2x block_time each.
+    ///
+    /// To prevent multiple validators from proposing competing blocks at
+    /// the same height (which causes attestation hash mismatches), we also
+    /// check if we've already received a pending block at this height from
+    /// another validator. If so, we don't propose — we wait for that block
+    /// to either reach quorum or timeout.
     pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
         let min_wait = std::time::Duration::from_millis(self.config.block_time_ms * 3);
         if stalled_for < min_wait {
@@ -463,16 +468,25 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Determine which backup "round" we're in.
-        // Round 1 = first backup, round 2 = second backup, etc.
+        // Find the designated proposer's position.
+        let designated_idx = (next_height as usize) % active.len();
+
+        // Compute backup order: skip the designated proposer, then iterate
+        // through remaining validators in order.
         let elapsed_past_min = stalled_for.as_millis() as u64 - min_wait.as_millis() as u64;
         let round_interval_ms = (self.config.block_time_ms * 2).max(4000);
-        let round = (elapsed_past_min / round_interval_ms) + 1;
+        let round = (elapsed_past_min / round_interval_ms) as usize;
 
-        // Only the validator at this SPECIFIC round position should propose.
-        // Previous round validators should NOT still be proposing.
-        let idx = ((next_height as usize) + round as usize) % active.len();
-        active[idx].id == self.config.validator_id
+        // The backup at position `round` after the designated proposer.
+        // Round 0 = first backup (designated + 1), round 1 = second backup, etc.
+        let backup_idx = (designated_idx + 1 + round) % active.len();
+
+        // Don't wrap back to the designated proposer.
+        if backup_idx == designated_idx {
+            return false;
+        }
+
+        active[backup_idx].id == self.config.validator_id
     }
 
     /// Accept a block proposed by another validator.

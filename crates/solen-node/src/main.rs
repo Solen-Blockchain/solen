@@ -486,6 +486,31 @@ async fn main() -> anyhow::Result<()> {
     let mempool = Mempool::new(10_000);
     let engine = Arc::new(ConsensusEngine::with_validators(config, store, mempool, validator_set));
 
+    // Reconcile in-memory validator set with on-chain staking state.
+    // After a restart, the in-memory set is from genesis and doesn't know
+    // about slashing/jailing that happened on-chain while this node was offline.
+    {
+        use solen_system_contracts::staking::StakingContract;
+        let store_lock = engine.store();
+        let store_guard = store_lock.read().unwrap();
+        let staking = StakingContract::load(&**store_guard);
+        drop(store_guard);
+        let vs_lock = engine.validator_set();
+        let mut vs = vs_lock.write().unwrap();
+        for on_chain in &staking.validators {
+            if let Some(v) = vs.get_mut(&on_chain.id) {
+                v.stake = on_chain.self_stake.saturating_add(on_chain.total_delegated);
+                if !on_chain.is_active {
+                    v.status = solen_consensus::validator::ValidatorStatus::Jailed;
+                    info!(
+                        validator = hex(&on_chain.id),
+                        "validator is jailed on-chain — marking inactive in consensus set"
+                    );
+                }
+            }
+        }
+    }
+
     // Syncing flag: start in sync mode for multi-validator networks to prevent
     // producing blocks before we've caught up with the network.
     let is_multi = engine.active_validator_count() > 1;

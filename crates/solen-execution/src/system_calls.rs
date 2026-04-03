@@ -301,9 +301,26 @@ fn execute_staking_call(
             let penalty_bps = read_u64(args, 32).unwrap_or(100); // default 1%
 
             if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
+                // Skip if already slashed (prevents duplicate slash txs from
+                // multiple proposers all applying penalties).
+                if !val.is_active {
+                    return err("validator already inactive");
+                }
                 let penalty = val.self_stake.saturating_mul(penalty_bps as u128) / 10_000;
                 val.self_stake = val.self_stake.saturating_sub(penalty);
                 val.is_active = false;
+
+                // Send slashed funds to treasury (can be restored via governance).
+                if penalty > 0 {
+                    staking.save(store);
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut treasury) = state.require_account(&TREASURY_ADDRESS) {
+                        treasury.balance = treasury.balance.saturating_add(penalty);
+                        let _ = state.save_account(&treasury);
+                    }
+                    // Reload staking after state mutation.
+                    staking = StakingContract::load(store);
+                }
 
                 let mut data = Vec::with_capacity(48);
                 data.extend_from_slice(&offender);

@@ -196,30 +196,37 @@ async fn main() -> anyhow::Result<()> {
         create_persistent_store(&data_dir)?
     };
 
-    // --- Validator key ---
+    // --- Node identity ---
+    // If --validator-seed is provided, use it (validator node).
+    // Otherwise, generate a random identity (non-validator / RPC node).
+    // For devnet with a single validator, fall back to the genesis validator key.
     let (validator_kp, validator_seed) = if let Some(hex) = &cli.validator_seed {
         let bytes = hex_decode(hex)?;
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&bytes);
         (Keypair::from_seed(&seed), seed)
-    } else if let Some(v) = genesis.validators.first() {
-        if let Some(seed_hex) = &v.seed_hex {
-            let seed = hex_decode(seed_hex)?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&seed);
-            (Keypair::from_seed(&arr), arr)
+    } else if matches!(net, Network::Devnet) {
+        // Devnet: use first genesis validator for convenience (single-validator mode).
+        if let Some(v) = genesis.validators.first() {
+            if let Some(seed_hex) = &v.seed_hex {
+                let seed = hex_decode(seed_hex)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&seed);
+                (Keypair::from_seed(&arr), arr)
+            } else {
+                let seed = rand_seed();
+                (Keypair::from_seed(&seed), seed)
+            }
         } else {
-            anyhow::bail!(
-                "no --validator-seed provided and genesis validator '{}' has no seed_hex. \
-                 On mainnet, you must provide --validator-seed.",
-                v.name
-            );
+            let seed = rand_seed();
+            (Keypair::from_seed(&seed), seed)
         }
     } else {
-        anyhow::bail!(
-            "no validators in genesis config and no --validator-seed provided. \
-             Cannot start without a validator identity."
-        );
+        // Testnet/Mainnet without --validator-seed: generate random identity.
+        // This node will participate in P2P but not produce blocks.
+        let seed = rand_seed();
+        info!("no --validator-seed provided — running as non-validator node");
+        (Keypair::from_seed(&seed), seed)
     };
     let validator_id = validator_kp.public_key();
 
@@ -743,9 +750,19 @@ async fn main() -> anyhow::Result<()> {
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
         if engine_clone.active_validator_count() > 1 {
             let wait = if engine_clone.height() == 0 { 30 } else { 10 };
-            info!(seconds = wait, "waiting for P2P mesh to form before block production...");
+            info!(seconds = wait, "waiting for P2P mesh to form...");
             tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
-            info!("starting block production");
+
+            let is_validator = {
+                let vs = engine_clone.validator_set();
+                let vs = vs.read().unwrap();
+                vs.all().iter().any(|v| v.id == engine_clone.validator_id())
+            };
+            if is_validator {
+                info!("starting block production (active validator)");
+            } else {
+                info!("starting consensus listener (non-validator node)");
+            }
         }
 
         // Poll frequently but enforce block_time between proposals.
@@ -885,6 +902,19 @@ fn attestation_payload(height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
     payload.extend_from_slice(&height.to_le_bytes());
     payload.extend_from_slice(block_hash);
     payload
+}
+
+fn rand_seed() -> [u8; 32] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let pid = std::process::id();
+    let mut input = Vec::new();
+    input.extend_from_slice(&nanos.to_le_bytes());
+    input.extend_from_slice(&pid.to_le_bytes());
+    // Add some additional entropy from the stack pointer.
+    let stack_var: u64 = 0;
+    input.extend_from_slice(&((&stack_var as *const u64) as u64).to_le_bytes());
+    solen_crypto::blake3_hash(&input)
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

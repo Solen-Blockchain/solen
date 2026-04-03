@@ -259,26 +259,13 @@ impl<'a> StateManager<'a> {
         contract_id: &AccountId,
     ) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>, StateError> {
         let prefix = contract_storage_prefix(contract_id);
+        let entries = self.store.scan_prefix(&prefix)?;
+        let prefix_len = prefix.len();
         let mut map = std::collections::HashMap::new();
-        // Scan all keys with the contract prefix.
-        // For MemoryStore this works via iteration; for production
-        // we'd use a prefix scan. For now, we use a simple approach
-        // by loading known keys from the contract's storage manifest.
-        // TODO: implement proper prefix iteration on StateStore trait.
-        //
-        // For now, contracts track their own keys via a manifest key.
-        let manifest_key = contract_storage_key(contract_id, b"__keys__");
-        if let Some(manifest_data) = self.store.get(&manifest_key)? {
-            let keys: Vec<Vec<u8>> = serde_json::from_slice(&manifest_data)
-                .unwrap_or_default();
-            for key in keys {
-                let store_key = contract_storage_key(contract_id, &key);
-                if let Some(val) = self.store.get(&store_key)? {
-                    map.insert(key, val);
-                }
-            }
+        for (full_key, val) in entries {
+            let local_key = full_key[prefix_len..].to_vec();
+            map.insert(local_key, val);
         }
-        let _ = prefix; // used for future prefix scan
         Ok(map)
     }
 

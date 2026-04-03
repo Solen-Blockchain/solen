@@ -51,4 +51,7 @@ pub trait StateStore: Send + Sync {
     fn delete_prefix(&mut self, _prefix: &[u8]) -> Result<usize, StorageError> {
         Ok(0)
     }
+
+    /// Iterate all key-value pairs whose keys start with the given prefix.
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
 }

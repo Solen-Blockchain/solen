@@ -87,6 +87,16 @@ impl StateStore for RocksStore {
         self.db.iterator(IteratorMode::Start).count()
     }
 
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(self
+            .db
+            .prefix_iterator(prefix)
+            .filter_map(|item| item.ok())
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect())
+    }
+
     fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
         let keys_to_delete: Vec<Vec<u8>> = self
             .db

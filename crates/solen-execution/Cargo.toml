@@ -25,6 +25,13 @@ sha2 = { workspace = true }
 name = "tps"
 harness = false
 
+[[bench]]
+name = "rollback_bench"
+harness = false
+
 [dev-dependencies]
 proptest = { workspace = true }
 wat = "1"
+rand = "0.8"
+p256 = { workspace = true }
+sha2 = { workspace = true }

@@ -104,6 +104,18 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                 }
             }
 
+            // Track slash events: add slashed validator and treasury as related accounts.
+            if event.topic == "slashed" && event.data.len() >= 64 {
+                let slashed_validator = event.data[..64].to_string();
+                if !related_accounts.contains(&slashed_validator) {
+                    related_accounts.push(slashed_validator);
+                }
+                let treasury = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff04".to_string();
+                if !related_accounts.contains(&treasury) {
+                    related_accounts.push(treasury);
+                }
+            }
+
             // Track contract deployments.
             if event.topic == "deploy" && event.data.len() >= 64 {
                 let contract_id = &event.data[..64];

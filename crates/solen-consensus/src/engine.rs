@@ -1193,11 +1193,22 @@ impl ConsensusEngine {
                 .map(|sv| sv.id)
                 .collect();
 
-            // Add new validators.
+            // Add new validators and reactivate unjailed ones.
             for sv in &staking.validators {
                 if !sv.is_active { continue; }
-                let exists = vs.all().iter().any(|v| v.id == sv.id);
-                if !exists {
+                if let Some(v) = vs.get_mut(&sv.id) {
+                    // Update stake and reactivate if unjailed on-chain.
+                    v.stake = sv.total_stake();
+                    if !v.is_active() {
+                        v.status = crate::validator::ValidatorStatus::Active;
+                        v.missed_blocks = 0;
+                        tracing::info!(
+                            validator = ?&sv.id[..4],
+                            stake = sv.total_stake(),
+                            "validator reactivated (unjailed)"
+                        );
+                    }
+                } else {
                     let new_info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
                     vs.add(new_info);
                     tracing::info!(

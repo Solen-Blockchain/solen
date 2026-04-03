@@ -47,7 +47,16 @@ impl EpochManager {
                     if let Some(vm) = validator_set.get_mut(&v.id) {
                         let reward = total_reward * vm.stake / total_stake;
                         vm.stake += reward;
-                        vm.missed_blocks = 0;
+                        // Only reset missed_blocks for validators that are actually
+                        // producing. Don't reset for offline validators — their
+                        // counter must accumulate across epochs to reach the
+                        // downtime threshold (50 missed slots).
+                        if vm.missed_blocks == 0 {
+                            // Already at 0 — validator is producing normally.
+                        }
+                        // Do NOT reset missed_blocks here — it's now managed
+                        // by the engine's finalization logic (reset on successful
+                        // proposal, increment on miss, reset on slash).
                     }
                 }
             }

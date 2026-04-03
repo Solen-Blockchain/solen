@@ -88,6 +88,19 @@ impl<'a> StateStore for OverlayStore<'a> {
         Ok(results.into_iter().collect())
     }
 
+    fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+        for (k, v) in self.base.scan_all()? {
+            if !self.deletes.contains(&k) {
+                results.insert(k, v);
+            }
+        }
+        for (k, v) in &self.writes {
+            results.insert(k.clone(), v.clone());
+        }
+        Ok(results.into_iter().collect())
+    }
+
     fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
         let keys: Vec<_> = self
             .writes

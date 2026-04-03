@@ -126,6 +126,11 @@ struct Cli {
     /// Generate a genesis.json file for the selected network and exit.
     #[arg(long)]
     init_genesis: bool,
+
+    /// Bootstrap from a state snapshot URL or file path.
+    /// Downloads and restores the snapshot, then syncs forward from that height.
+    #[arg(long)]
+    snapshot: Option<String>,
 }
 
 #[tokio::main]
@@ -218,10 +223,117 @@ async fn main() -> anyhow::Result<()> {
     };
     let validator_id = validator_kp.public_key();
 
+    // --- Restore from snapshot (explicit or auto from seeds) ---
+    let mut snapshot_height: Option<u64> = None;
+    let snapshot_source: Option<String> = if cli.snapshot.is_some() {
+        cli.snapshot.clone()
+    } else if store.is_empty() && !cli.bootstrap.is_empty() {
+        // Auto-discover snapshot from seed nodes.
+        info!("empty store — attempting snapshot sync from seed nodes...");
+        let mut found = None;
+        for addr in &cli.bootstrap {
+            // Try to derive an RPC URL from the bootstrap multiaddr.
+            // Bootstrap addrs look like /ip4/1.2.3.4/tcp/40333/p2p/...
+            // The RPC port is typically P2P port - 20389 (testnet: 40333 -> 19944).
+            let ip = addr.split('/').find(|s| s.contains('.')).unwrap_or("127.0.0.1");
+            let rpc_port = rpc_port; // Use our own configured RPC port as a guess for seed.
+            // For testnet seeds, try the public RPC endpoint.
+            let rpc_url = match net {
+                Network::Testnet => "https://testnet-rpc.solenchain.io".to_string(),
+                Network::Mainnet => "https://rpc.solenchain.io".to_string(),
+                _ => format!("http://{}:{}", ip, rpc_port),
+            };
+            let snapshot_url = format!(
+                "{}",
+                rpc_url
+            );
+            info!(url = %snapshot_url, "trying snapshot from seed...");
+
+            // Make an RPC call to get the snapshot.
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "solen_getSnapshot",
+                "params": []
+            });
+            match reqwest::blocking::Client::new()
+                .post(&snapshot_url)
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(text) = resp.text() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if json["result"]["data"].is_string() && json["result"]["height"].as_u64().unwrap_or(0) > 0 {
+                                info!(
+                                    height = json["result"]["height"].as_u64().unwrap_or(0),
+                                    "snapshot available from seed"
+                                );
+                                // Write to temp file.
+                                let b64 = json["result"]["data"].as_str().unwrap();
+                                match base64_decode(b64) {
+                                    Ok(data) => {
+                                        let tmp = format!("{}/snapshot.bin", data_dir);
+                                        if std::fs::write(&tmp, &data).is_ok() {
+                                            found = Some(tmp);
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => { info!(error = %e, "snapshot decode failed, trying next seed"); }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => { info!("seed not reachable, trying next..."); }
+            }
+        }
+        found
+    } else {
+        None
+    };
+
+    if let Some(ref snapshot_source) = snapshot_source {
+        if store.is_empty() {
+            info!(source = %snapshot_source, "loading state snapshot...");
+            let snapshot_data = if snapshot_source.starts_with("http://") || snapshot_source.starts_with("https://") {
+                // Download snapshot from RPC endpoint.
+                let body = reqwest::blocking::get(snapshot_source)
+                    .map_err(|e| anyhow::anyhow!("snapshot download failed: {e}"))?
+                    .text()
+                    .map_err(|e| anyhow::anyhow!("snapshot read failed: {e}"))?;
+                // Response is JSON with base64-encoded data field.
+                let json: serde_json::Value = serde_json::from_str(&body)?;
+                let b64 = json["result"]["data"].as_str()
+                    .ok_or_else(|| anyhow::anyhow!("snapshot response missing data field"))?;
+                base64_decode(b64)?
+            } else {
+                // Load from file.
+                std::fs::read(snapshot_source)
+                    .map_err(|e| anyhow::anyhow!("snapshot file read failed: {e}"))?
+            };
+
+            let meta = solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data)
+                .map_err(|e| anyhow::anyhow!("snapshot restore failed: {e}"))?;
+
+            info!(
+                height = meta.height,
+                epoch = meta.epoch,
+                entries = meta.entry_count,
+                state_root = hex(&meta.state_root),
+                "snapshot restored — will sync forward from this height"
+            );
+            snapshot_height = Some(meta.height);
+        } else {
+            info!("store already has data — skipping snapshot restore");
+        }
+    }
+
     // --- Apply genesis if store is empty ---
     if store.is_empty() {
         genesis.apply(store.as_mut())?;
-    } else {
+    } else if snapshot_height.is_none() {
         info!(state_root = hex(&store.state_root()), "loaded existing state");
     }
 
@@ -781,4 +893,39 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(Into::into))
         .collect()
+}
+
+fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
+    const TABLE: [u8; 128] = {
+        let mut t = [0xFF; 128];
+        let mut i = 0u8;
+        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
+        i = 0;
+        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
+        i = 0;
+        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+
+    let input = input.trim_end_matches('=');
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+
+    for &b in input.as_bytes() {
+        if b > 127 || TABLE[b as usize] == 0xFF {
+            anyhow::bail!("invalid base64 character: {}", b as char);
+        }
+        buf = (buf << 6) | TABLE[b as usize] as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+
+    Ok(output)
 }

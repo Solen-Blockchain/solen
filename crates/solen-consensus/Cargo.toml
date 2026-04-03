@@ -19,3 +19,4 @@ thiserror = { workspace = true }
 borsh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+flate2 = "1"

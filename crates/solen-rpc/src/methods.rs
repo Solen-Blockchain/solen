@@ -229,6 +229,19 @@ pub struct BatchSubmitResult {
     pub error: Option<String>,
 }
 
+/// State snapshot info for fast sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub height: u64,
+    pub epoch: u64,
+    pub state_root: String,
+    pub entries: u64,
+    pub compressed_bytes: usize,
+    pub uncompressed_bytes: usize,
+    /// Base64-encoded compressed snapshot data.
+    pub data: String,
+}
+
 /// Verified batch info returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedBatchInfo {
@@ -310,21 +323,97 @@ pub trait SolenApi {
     /// Get verified batches for a rollup.
     #[method(name = "solen_getRollupBatches")]
     fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>>;
+
+    /// Get a compressed state snapshot for fast sync.
+    #[method(name = "solen_getSnapshot")]
+    fn get_snapshot(&self) -> RpcResult<SnapshotInfo>;
+}
+
+/// Cached snapshot to avoid regenerating on every request.
+struct CachedSnapshot {
+    height: u64,
+    info: SnapshotInfo,
 }
 
 /// Implementation of the Solen RPC API.
 pub struct SolenRpc {
     engine: Arc<ConsensusEngine>,
+    snapshot_cache: Arc<std::sync::Mutex<Option<CachedSnapshot>>>,
 }
+
+/// Minimum blocks between snapshot regenerations.
+const SNAPSHOT_CACHE_INTERVAL: u64 = 500;
 
 impl SolenRpc {
     pub fn new(engine: Arc<ConsensusEngine>) -> Self {
-        Self { engine }
+        let cache = Arc::new(std::sync::Mutex::new(None));
+
+        // Pre-warm snapshot cache in background after the node settles.
+        let engine_bg = engine.clone();
+        let cache_bg = cache.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+
+            let height = engine_bg.height();
+            if height == 0 { return; }
+
+            tracing::info!(height, "pre-warming snapshot cache...");
+
+            let (store_snapshot, epoch) = {
+                let store = engine_bg.store();
+                let store = store.read().unwrap();
+                let snap = store.snapshot();
+                let chain = engine_bg.chain();
+                let chain = chain.read().unwrap();
+                let epoch = chain.last().map(|b| b.header.epoch).unwrap_or(0);
+                (snap, epoch)
+            };
+
+            match solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch) {
+                Ok(data) => {
+                    if let Ok(meta) = solen_consensus::snapshot::read_snapshot_meta(&data) {
+                        let entries = store_snapshot.len() as u64;
+                        let compressed_bytes = data.len() - 56;
+                        let b64 = base64_encode(&data);
+                        let info = SnapshotInfo {
+                            height,
+                            epoch,
+                            state_root: hex_encode(&meta.state_root),
+                            entries,
+                            compressed_bytes,
+                            uncompressed_bytes: meta.uncompressed_size,
+                            data: b64,
+                        };
+                        *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info });
+                        tracing::info!(height, "snapshot cache warmed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "snapshot pre-warm failed"),
+            }
+        });
+
+        Self { engine, snapshot_cache: cache }
     }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 { result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char); } else { result.push('='); }
+        if chunk.len() > 2 { result.push(CHARS[(triple & 0x3F) as usize] as char); } else { result.push('='); }
+    }
+    result
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
@@ -978,6 +1067,64 @@ impl SolenApiServer for SolenRpc {
                 error: Some(e.to_string()),
             }),
         }
+    }
+
+    fn get_snapshot(&self) -> RpcResult<SnapshotInfo> {
+        let height = self.engine.height();
+
+        // Return cached snapshot if it's recent enough.
+        {
+            let cache = self.snapshot_cache.lock().unwrap();
+            if let Some(ref cached) = *cache {
+                if height.saturating_sub(cached.height) < SNAPSHOT_CACHE_INTERVAL {
+                    return Ok(cached.info.clone());
+                }
+            }
+        }
+
+        // Generate a fresh snapshot.
+        // Take a CoW snapshot of the store so we don't hold the write lock
+        // during the expensive scan + compress. Block production continues.
+        let (store_snapshot, epoch) = {
+            let store = self.engine.store();
+            let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+            let snap = store.snapshot();
+            let epoch = {
+                let chain = self.engine.chain();
+                let chain = chain.read().map_err(|e| internal_error(e.to_string()))?;
+                chain.last().map(|b| b.header.epoch).unwrap_or(0)
+            };
+            (snap, epoch)
+            // store read lock released here
+        };
+
+        let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
+            .map_err(|e| internal_error(e.to_string()))?;
+
+        let meta = solen_consensus::snapshot::read_snapshot_meta(&data)
+            .map_err(|e| internal_error(e.to_string()))?;
+
+        let entries = store_snapshot.len() as u64;
+        let compressed_bytes = data.len() - 56;
+        let b64 = base64_encode(&data);
+
+        let info = SnapshotInfo {
+            height,
+            epoch,
+            state_root: hex_encode(&meta.state_root),
+            entries,
+            compressed_bytes,
+            uncompressed_bytes: meta.uncompressed_size,
+            data: b64,
+        };
+
+        // Cache it.
+        {
+            let mut cache = self.snapshot_cache.lock().unwrap();
+            *cache = Some(CachedSnapshot { height, info: info.clone() });
+        }
+
+        Ok(info)
     }
 
     fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>> {

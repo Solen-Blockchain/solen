@@ -207,12 +207,12 @@ impl ConsensusEngine {
         self.store.clone()
     }
 
-    pub fn mempool(&self) -> &Mempool {
-        &self.mempool
-    }
-
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
         self.chain.clone()
+    }
+
+    pub fn mempool(&self) -> &Mempool {
+        &self.mempool
     }
 
     pub fn validator_set(&self) -> Arc<RwLock<ValidatorSet>> {

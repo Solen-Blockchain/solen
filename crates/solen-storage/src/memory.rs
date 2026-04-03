@@ -148,6 +148,10 @@ impl StateStore for MemoryStore {
             .collect())
     }
 
+    fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(self.data.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
     fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
         let keys_to_delete: Vec<Vec<u8>> = self
             .data

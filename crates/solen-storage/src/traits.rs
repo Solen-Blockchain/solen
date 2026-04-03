@@ -54,4 +54,7 @@ pub trait StateStore: Send + Sync {
 
     /// Iterate all key-value pairs whose keys start with the given prefix.
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+
+    /// Iterate all key-value pairs in the store.
+    fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
 }

@@ -12,4 +12,5 @@ pub mod engine;
 pub mod epoch;
 pub mod mempool;
 pub mod slashing;
+pub mod snapshot;
 pub mod validator;

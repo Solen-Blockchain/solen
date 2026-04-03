@@ -5,10 +5,13 @@
 //! - Fee-based priority ordering (higher max_fee first)
 //! - Configurable max size
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use solen_types::transaction::UserOperation;
+
+/// Maximum pending operations per sender to prevent single-sender spam.
+const MAX_OPS_PER_SENDER: usize = 16;
 
 /// A mempool entry wrapping a UserOperation with ordering by fee (descending).
 #[derive(Clone, Debug)]
@@ -56,6 +59,7 @@ pub struct Mempool {
 struct MempoolInner {
     entries: BTreeSet<MempoolEntry>,
     seen: HashSet<DedupKey>,
+    sender_counts: HashMap<[u8; 32], usize>,
 }
 
 impl Mempool {
@@ -64,6 +68,7 @@ impl Mempool {
             inner: Arc::new(Mutex::new(MempoolInner {
                 entries: BTreeSet::new(),
                 seen: HashSet::new(),
+                sender_counts: HashMap::new(),
             })),
             max_size,
         }
@@ -87,13 +92,21 @@ impl Mempool {
             return false;
         }
 
+        // Per-sender limit to prevent single-sender spam.
+        let sender_count = pool.sender_counts.get(&op.sender).copied().unwrap_or(0);
+        if sender_count >= MAX_OPS_PER_SENDER {
+            return false;
+        }
+
         let key: DedupKey = (op.sender, op.nonce);
         if pool.seen.contains(&key) {
             return false; // Duplicate sender+nonce.
         }
 
+        let sender = op.sender;
         pool.seen.insert(key);
         pool.entries.insert(MempoolEntry { op });
+        *pool.sender_counts.entry(sender).or_insert(0) += 1;
         true
     }
 
@@ -106,6 +119,12 @@ impl Mempool {
         for _ in 0..n {
             if let Some(entry) = pool.entries.pop_first() {
                 pool.seen.remove(&(entry.op.sender, entry.op.nonce));
+                if let Some(count) = pool.sender_counts.get_mut(&entry.op.sender) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        pool.sender_counts.remove(&entry.op.sender);
+                    }
+                }
                 ops.push(entry.op);
             }
         }

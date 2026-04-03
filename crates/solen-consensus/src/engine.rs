@@ -121,6 +121,8 @@ pub struct ConsensusEngine {
     intent_pool: Arc<IntentPool>,
     /// Rollup proof verification registry.
     proof_registry: Arc<RwLock<ProofVerifierRegistry>>,
+    /// Trusted checkpoints for long-range attack protection.
+    trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
 }
 
 impl ConsensusEngine {
@@ -196,6 +198,11 @@ impl ConsensusEngine {
                 reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
                 Arc::new(RwLock::new(reg))
             },
+            trusted_checkpoints: match chain_id {
+                1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
+                9000 => crate::checkpoint::TrustedCheckpoints::testnet(),
+                _ => crate::checkpoint::TrustedCheckpoints::devnet(),
+            },
         }
     }
 
@@ -264,14 +271,30 @@ impl ConsensusEngine {
         }
 
         // Solve pending intents and include as system operations in the block.
+        // MEV protection: prefer external solver solutions. The block proposer's
+        // built-in solver is only used as a fallback after the intent has been
+        // pending for at least 2 blocks (giving external solvers priority).
         let pending = self.intent_pool.pending_intents();
         if !pending.is_empty() {
             let solver = DirectTransferSolver { id: self.config.validator_id };
+            let current_height = self.height();
 
             for intent in &pending {
-                let solution = self.intent_pool.select_best_solution(intent.id)
-                    .ok()
-                    .or_else(|| solver.solve(intent));
+                // Prefer externally-submitted solutions.
+                let external_solution = self.intent_pool.select_best_solution(intent.id).ok();
+
+                let solution = if external_solution.is_some() {
+                    external_solution
+                } else {
+                    // Only use built-in solver if intent has been pending for > 2 blocks.
+                    // This gives external solvers a fair window to submit solutions.
+                    let blocks_pending = current_height.saturating_sub(intent.expiry_height.saturating_sub(500));
+                    if blocks_pending >= 2 {
+                        solver.solve(intent)
+                    } else {
+                        None // Skip — wait for external solvers.
+                    }
+                };
 
                 if let Some(sol) = solution {
                     // Build a system call operation: sender calls INTENT_ADDRESS.fulfill(...)
@@ -491,6 +514,18 @@ impl ConsensusEngine {
             debug!(
                 height = header.height,
                 "parent hash mismatch — rejecting block, waiting for sync"
+            );
+            return false;
+        }
+
+        // Validate against trusted checkpoints (long-range attack protection).
+        let bh = block_hash(header);
+        if let Some(expected) = self.trusted_checkpoints.validate(header.height, &bh) {
+            warn!(
+                height = header.height,
+                expected = ?&expected[..4],
+                got = ?&bh[..4],
+                "block violates trusted checkpoint — rejecting (possible long-range attack)"
             );
             return false;
         }

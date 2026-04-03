@@ -78,7 +78,7 @@ impl NetworkService {
     ) -> Result<
         (
             NetworkHandle,
-            mpsc::UnboundedReceiver<NetworkMessage>,
+            mpsc::Receiver<NetworkMessage>,
             tokio::task::JoinHandle<()>,
         ),
         NetworkError,
@@ -204,13 +204,18 @@ impl NetworkService {
         }
 
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<NetworkMessage>();
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<NetworkMessage>();
+        // Bounded inbound channel — backpressure if processing can't keep up.
+        let (inbound_tx, inbound_rx) = mpsc::channel::<NetworkMessage>(4096);
 
         let handle = NetworkHandle { outbound_tx };
 
         let bootstrap_addrs = config.bootstrap_peers.clone();
 
         let task = tokio::spawn(async move {
+            // Per-peer rate limiting: track message counts per peer per window.
+            let mut peer_msg_counts: std::collections::HashMap<libp2p::PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
+            const MAX_MSGS_PER_PEER_PER_SEC: u64 = 50;
+
             // Periodically run Kademlia bootstrap and redial if needed.
             let mut maintenance_interval = tokio::time::interval(Duration::from_secs(10));
             maintenance_interval.tick().await; // skip first immediate tick
@@ -234,6 +239,9 @@ impl NetworkService {
                         if connected > 0 {
                             debug!(connected, "peer connections active");
                         }
+
+                        // Clean up stale rate-limit entries.
+                        peer_msg_counts.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(30));
                     }
                     // Handle outbound messages.
                     Some(msg) = outbound_rx.recv() => {
@@ -248,10 +256,26 @@ impl NetworkService {
                     event = swarm.select_next_some() => {
                         match event {
                             SwarmEvent::Behaviour(SolenBehaviourEvent::Gossipsub(
-                                gossipsub::Event::Message { message, .. },
+                                gossipsub::Event::Message { message, propagation_source, .. },
                             )) => {
+                                // Per-peer rate limiting.
+                                let entry = peer_msg_counts.entry(propagation_source).or_insert((0, std::time::Instant::now()));
+                                if entry.1.elapsed() > Duration::from_secs(1) {
+                                    // Reset window.
+                                    *entry = (1, std::time::Instant::now());
+                                } else {
+                                    entry.0 += 1;
+                                    if entry.0 > MAX_MSGS_PER_PEER_PER_SEC {
+                                        debug!(peer = %propagation_source, count = entry.0, "rate-limited peer — dropping message");
+                                        continue;
+                                    }
+                                }
+
                                 if let Ok(msg) = NetworkMessage::decode(&message.data) {
-                                    let _ = inbound_tx.send(msg);
+                                    // Use try_send to apply backpressure if the inbound channel is full.
+                                    if inbound_tx.try_send(msg).is_err() {
+                                        debug!("inbound channel full — dropping message");
+                                    }
                                 }
                             }
                             SwarmEvent::Behaviour(SolenBehaviourEvent::Mdns(

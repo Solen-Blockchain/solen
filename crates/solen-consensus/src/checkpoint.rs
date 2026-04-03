@@ -92,6 +92,64 @@ impl CheckpointStore {
 
 use serde_json;
 
+/// Hardcoded trusted checkpoints — verified block hashes at known heights.
+/// Nodes reject any chain that doesn't pass through these checkpoints.
+/// This prevents long-range attacks where an attacker builds an alternate
+/// chain from genesis using old validator keys.
+///
+/// Add new entries periodically as the chain progresses.
+pub struct TrustedCheckpoints {
+    entries: Vec<(u64, Hash)>, // (height, block_hash)
+}
+
+impl TrustedCheckpoints {
+    /// Testnet trusted checkpoints.
+    pub fn testnet() -> Self {
+        Self {
+            entries: vec![
+                // Add checkpoints as chain progresses:
+                // (10_000, hex_to_hash("abcd...")),
+            ],
+        }
+    }
+
+    /// Mainnet trusted checkpoints.
+    pub fn mainnet() -> Self {
+        Self {
+            entries: vec![
+                // Populated before mainnet launch.
+            ],
+        }
+    }
+
+    /// Devnet has no checkpoints (resets frequently).
+    pub fn devnet() -> Self {
+        Self { entries: vec![] }
+    }
+
+    /// Check if a block at a given height violates a trusted checkpoint.
+    /// Returns `Some(expected_hash)` if the height matches a checkpoint
+    /// but the hash doesn't match (indicating an invalid chain).
+    pub fn validate(&self, height: u64, block_hash: &Hash) -> Option<Hash> {
+        for (cp_height, cp_hash) in &self.entries {
+            if height == *cp_height && block_hash != cp_hash {
+                return Some(*cp_hash);
+            }
+        }
+        None
+    }
+
+    /// Get the highest checkpoint height.
+    pub fn highest(&self) -> Option<u64> {
+        self.entries.last().map(|(h, _)| *h)
+    }
+
+    /// Check if we have any checkpoints.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

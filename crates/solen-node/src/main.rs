@@ -494,6 +494,10 @@ async fn main() -> anyhow::Result<()> {
     // Track the highest known network height (from StatusAnnounce messages).
     let network_height = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+    // Wrap validator keypair in Arc so it can be shared between P2P handler
+    // and consensus loop (both need it for signing attestations).
+    let attestation_kp = Arc::new(validator_kp);
+
     // --- P2P networking ---
     let net_handle = if !cli.no_p2p {
         let bootstrap_peers: Vec<_> = cli
@@ -519,7 +523,6 @@ async fn main() -> anyhow::Result<()> {
         let net_height_for_p2p = network_height.clone();
         let peer_heights_for_p2p = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
         let peer_heights_for_status = peer_heights_for_p2p.clone();
-        let attestation_kp = Arc::new(validator_kp);
         let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
             while let Some(msg) = inbound_rx.recv().await {
@@ -845,6 +848,7 @@ async fn main() -> anyhow::Result<()> {
 
     let engine_clone = engine.clone();
     let net_for_blocks = net_handle.clone();
+    let att_kp_for_consensus = attestation_kp.clone();
     let syncing_for_consensus = syncing.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
@@ -958,11 +962,28 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ref handle) = net_for_blocks {
                     let gas = produced.finalized.as_ref().map(|b| b.result.gas_used).unwrap_or(0);
                     let tx_count = produced.operations.len();
+                    let header_for_att = produced.header.clone();
                     handle.broadcast(NetworkMessage::NewBlock {
                         header: produced.header,
                         operations: produced.operations,
                         tx_count,
                         gas_used: gas,
+                    });
+
+                    // Broadcast our own attestation for the block we just proposed.
+                    // Without this, non-proposer validators only see attestations
+                    // from each other, missing the proposer's vote. When one validator
+                    // is offline (e.g. 3 of 4 online), this means non-proposers only
+                    // collect 2/4 = 50% of stake — below the 2/3 quorum threshold —
+                    // causing every backup-proposed block to force-finalize.
+                    let bh = solen_consensus::engine::block_hash(&header_for_att);
+                    let att_payload = attestation_payload(header_for_att.height, &bh);
+                    let att_sig = att_kp_for_consensus.sign(&att_payload);
+                    handle.broadcast(NetworkMessage::Attestation {
+                        validator_id: engine_clone.validator_id(),
+                        block_height: header_for_att.height,
+                        block_hash: bh,
+                        signature: att_sig.to_vec(),
                     });
                 }
             }

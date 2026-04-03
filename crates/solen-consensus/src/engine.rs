@@ -709,12 +709,21 @@ impl ConsensusEngine {
             if exec_result.state_root != pb.header.state_root {
                 warn!(
                     height,
+                    proposer = ?&pb.header.proposer[..4],
                     ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
                     "state root mismatch on finalization — proposer may be byzantine"
                 );
-                // Still finalize (quorum agreed), but log the divergence.
-                // In production, this would trigger a slash.
+                // Generate slashing evidence for invalid state root.
+                let evidence = crate::slashing::SlashingEvidence {
+                    offender: pb.header.proposer,
+                    reason: crate::slashing::SlashingReason::InvalidStateRoot {
+                        height,
+                        expected: exec_result.state_root,
+                        got: pb.header.state_root,
+                    },
+                };
+                self.process_slashing(&evidence);
             }
 
             exec_result
@@ -883,6 +892,35 @@ impl ConsensusEngine {
             pool_remaining = pool_balance.saturating_sub(actual_reward),
             "epoch rewards distributed from staking pool"
         );
+    }
+
+    /// Process slashing evidence — penalize the validator's stake.
+    fn process_slashing(&self, evidence: &crate::slashing::SlashingEvidence) {
+        let penalty_bps = evidence.reason.penalty_bps();
+        let mut vs = self.validator_set.write().unwrap();
+
+        if let Some(v) = vs.get_mut(&evidence.offender) {
+            let penalty = v.stake * (penalty_bps as u128) / 10_000;
+            v.stake = v.stake.saturating_sub(penalty);
+
+            match &evidence.reason {
+                crate::slashing::SlashingReason::DoubleSign { .. }
+                | crate::slashing::SlashingReason::InvalidStateRoot { .. } => {
+                    v.status = crate::validator::ValidatorStatus::Jailed;
+                }
+                crate::slashing::SlashingReason::Downtime { .. } => {}
+            }
+
+            // Reset missed_blocks to prevent double-slash within same epoch.
+            v.missed_blocks = 0;
+
+            warn!(
+                validator = ?&evidence.offender[..4],
+                penalty,
+                reason = ?evidence.reason,
+                "validator slashed"
+            );
+        }
     }
 
     /// Persist a finalized block and update chain metadata atomically.
@@ -1086,11 +1124,16 @@ impl ConsensusEngine {
             let store = self.store.read().unwrap();
             let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
 
+            // Build the set of active staking validators.
+            let active_ids: std::collections::HashSet<_> = staking.validators
+                .iter()
+                .filter(|sv| sv.is_active)
+                .map(|sv| sv.id)
+                .collect();
+
+            // Add new validators.
             for sv in &staking.validators {
-                if !sv.is_active {
-                    continue;
-                }
-                // Only add NEW validators — don't modify existing ones.
+                if !sv.is_active { continue; }
                 let exists = vs.all().iter().any(|v| v.id == sv.id);
                 if !exists {
                     let new_info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
@@ -1101,6 +1144,19 @@ impl ConsensusEngine {
                         "new validator joined consensus set"
                     );
                 }
+            }
+
+            // Remove validators that exited from staking.
+            let to_remove: Vec<_> = vs.all().iter()
+                .filter(|v| !active_ids.contains(&v.id))
+                .map(|v| v.id)
+                .collect();
+            for id in &to_remove {
+                vs.remove(id);
+                tracing::info!(
+                    validator = ?&id[..4],
+                    "validator removed from consensus set (exited staking)"
+                );
             }
         }
     }

@@ -89,13 +89,30 @@ impl NetworkMessage {
         }
     }
 
+    /// Maximum decompressed message size (16 MB). Prevents decompression bombs.
+    const MAX_DECOMPRESSED_SIZE: usize = 16 * 1024 * 1024;
+
     /// Deserialize from gossip bytes (supports both compressed and raw JSON).
     pub fn decode(data: &[u8]) -> Result<Self, serde_json::Error> {
         if data.first() == Some(&0x01) {
-            // Compressed format.
+            // Compressed format — decompress with size limit.
             let mut decoder = flate2::read::DeflateDecoder::new(&data[1..]);
             let mut json = Vec::new();
-            if std::io::Read::read_to_end(&mut decoder, &mut json).is_ok() {
+            // Read in chunks to enforce size limit.
+            let mut buf = [0u8; 8192];
+            loop {
+                match std::io::Read::read(&mut decoder, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        json.extend_from_slice(&buf[..n]);
+                        if json.len() > Self::MAX_DECOMPRESSED_SIZE {
+                            return Err(serde_json::from_str::<()>("").unwrap_err()); // size exceeded
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !json.is_empty() {
                 return serde_json::from_slice(&json);
             }
         }

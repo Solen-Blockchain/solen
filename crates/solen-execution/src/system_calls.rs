@@ -609,7 +609,17 @@ fn execute_governance_call(
 
     match result {
         Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
-        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+        Err(e) => {
+            // Refund proposal deposit on failure.
+            if is_proposal {
+                let mut state = StateManager::new(store);
+                if let Ok(mut acct) = state.require_account(sender) {
+                    acct.balance = acct.balance.saturating_add(PROPOSAL_DEPOSIT);
+                    let _ = state.save_account(&acct);
+                }
+            }
+            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) }
+        }
     }
 }
 
@@ -641,8 +651,8 @@ fn execute_bridge_call(
             // Deduct from sender.
             let mut state = StateManager::new(store);
             if let Ok(mut acct) = state.require_account(sender) {
-                if acct.balance < amount {
-                    return err("insufficient balance for deposit");
+                if acct.balance < amount + MIN_FEE_RESERVE {
+                    return err("insufficient balance for deposit (need fee reserve)");
                 }
                 acct.balance -= amount;
                 let _ = state.save_account(&acct);

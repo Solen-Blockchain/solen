@@ -17,14 +17,21 @@ pub enum SlashingReason {
     },
     /// Missed too many consecutive blocks.
     Downtime { missed_blocks: u64 },
+    /// Proposed a block with an invalid state root.
+    InvalidStateRoot {
+        height: u64,
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
 }
 
 impl SlashingReason {
     /// Penalty in basis points (out of 10_000).
     pub fn penalty_bps(&self) -> u64 {
         match self {
-            SlashingReason::DoubleSign { .. } => 1000, // 10% slash
-            SlashingReason::Downtime { .. } => 100,    // 1% slash
+            SlashingReason::DoubleSign { .. } => 1000,        // 10% slash
+            SlashingReason::Downtime { .. } => 100,           // 1% slash
+            SlashingReason::InvalidStateRoot { .. } => 500,   // 5% slash
         }
     }
 }

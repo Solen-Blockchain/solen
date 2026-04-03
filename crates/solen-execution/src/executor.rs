@@ -445,11 +445,11 @@ impl BlockExecutor {
         let max_possible_fee = 0u128; // No upfront reservation.
         drop(state);
 
-        // Execute each action. For multi-action operations, save the sender's
-        // account state before execution so we can roll back on failure.
-        let pre_state = if op.actions.len() > 1 {
-            let state = StateManager::new(store);
-            state.get_account(&op.sender).ok().flatten()
+        // Execute each action. For multi-action operations, take a full store
+        // snapshot so ALL state changes (including system contracts) can be rolled
+        // back if any action fails.
+        let store_snapshot = if op.actions.len() > 1 {
+            Some(store.snapshot())
         } else {
             None
         };
@@ -482,24 +482,26 @@ impl BlockExecutor {
             }
         }
 
-        // If any action failed, roll back the sender's balance and refund reserved fee.
+        // If any action failed, roll back ALL state changes from this operation.
         if let Some(err) = action_failed {
-            if let Some(mut original) = pre_state {
-                // Restore original balance but consume the actual gas fee.
+            if let Some(snapshot) = store_snapshot {
+                // Restore entire store to pre-execution state.
+                // Re-apply only the sender's nonce increment and fee deduction.
+                let all_entries = snapshot.scan_all().unwrap_or_default();
+                for (k, v) in &all_entries {
+                    let _ = store.put(k, v);
+                }
+                // Deduct gas fee from the restored state.
                 let actual_fee = self.fee_config.calculate_fee(gas_used);
-                original.balance = original.balance.saturating_sub(actual_fee);
-                let mut state = StateManager::new(store);
-                let _ = state.save_account(&original);
-            } else if max_possible_fee > 0 {
-                // Refund reserved fee minus actual gas.
-                let actual_fee = self.fee_config.calculate_fee(gas_used);
-                let refund = max_possible_fee.saturating_sub(actual_fee);
-                let mut state = StateManager::new(store);
-                if let Ok(Some(mut acct)) = state.get_account(&op.sender) {
-                    acct.balance = acct.balance.saturating_add(refund);
-                    let _ = state.save_account(&acct);
+                if actual_fee > 0 {
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(&op.sender) {
+                        acct.balance = acct.balance.saturating_sub(actual_fee);
+                        let _ = state.save_account(&acct);
+                    }
                 }
             }
+            events.clear(); // Clear events from failed actions.
             warn!(sender = ?op.sender[..4], error = %err, "action execution failed");
             return ExecutionReceipt {
                 sender: op.sender,
@@ -621,10 +623,30 @@ impl BlockExecutor {
                 )));
             }
 
-            // Check spending limit.
+            // Check spending limit — counts all balance-affecting actions,
+            // including system contract calls (staking, bridge deposits, etc.).
             if *spending_limit > 0 {
                 let total_spend: u128 = op.actions.iter().map(|a| match a {
                     Action::Transfer { amount, .. } => *amount,
+                    Action::Call { target, args, .. } => {
+                        // System calls that deduct balance: delegate, deposit, register_rollup, etc.
+                        // The amount is typically encoded in args as u128 at a known offset.
+                        if solen_types::system::is_system_contract(target) && args.len() >= 48 {
+                            // Most system calls: args contain amount at offset 32 as u128 LE.
+                            // (staking: validator[32] + amount[16], bridge deposit: rollup_id[8] + amount[16])
+                            let amount_offset = if target == &solen_types::system::BRIDGE_ADDRESS { 8 } else { 32 };
+                            if args.len() >= amount_offset + 16 {
+                                let mut buf = [0u8; 16];
+                                buf.copy_from_slice(&args[amount_offset..amount_offset + 16]);
+                                u128::from_le_bytes(buf)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    Action::Deploy { .. } => 0,
                     _ => 0,
                 }).sum();
                 if total_spend > *spending_limit {

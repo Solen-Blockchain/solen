@@ -35,8 +35,9 @@ impl RocksStore {
     /// Returns a read-only RocksStore backed by the checkpoint.
     /// The checkpoint directory is cleaned up when the returned store is dropped.
     pub fn checkpoint(&self) -> Result<CheckpointStore, StorageError> {
-        let dir = std::env::temp_dir().join(format!("solen-checkpoint-{}", std::process::id()));
-        // Remove stale checkpoint if it exists.
+        static CHECKPOINT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = CHECKPOINT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("solen-checkpoint-{}-{}", std::process::id(), id));
         let _ = std::fs::remove_dir_all(&dir);
 
         let cp = Checkpoint::new(&self.db)

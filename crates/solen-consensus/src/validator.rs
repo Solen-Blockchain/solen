@@ -102,6 +102,11 @@ impl ValidatorSet {
         self.validators.push(info);
     }
 
+    /// Remove a validator from the set entirely (e.g., exited from staking).
+    pub fn remove(&mut self, id: &ValidatorId) {
+        self.validators.retain(|v| v.id != *id);
+    }
+
     /// Jail a validator (remove from active set).
     pub fn jail(&mut self, id: &ValidatorId) -> bool {
         if let Some(v) = self.get_mut(id) {

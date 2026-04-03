@@ -200,6 +200,17 @@ fn base64url_encode(data: &[u8]) -> String {
     result
 }
 
+/// Check if an operation is system-authorized (signature = [0xFF]).
+/// These are injected by the block proposer and bypass signature verification.
+/// Currently used for: intent fulfillment and on-chain slashing.
+fn is_system_authorized(op: &UserOperation) -> bool {
+    op.signature == [0xFF]
+        && op.actions.len() == 1
+        && matches!(&op.actions[0], Action::Call { target, method, .. }
+            if (solen_types::system::is_system_contract(target))
+                && (method == "fulfill" || method == "slash"))
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("state error: {0}")]
@@ -347,6 +358,10 @@ impl BlockExecutor {
             .par_iter()
             .zip(pre.par_iter())
             .map(|(op, (msg, auth))| {
+                // System-authorized ops (intent fulfillment, slashing) bypass signature checks.
+                if is_system_authorized(op) {
+                    return true;
+                }
                 let auth_methods = match auth {
                     Some(methods) => methods,
                     None => return false,
@@ -589,14 +604,11 @@ impl BlockExecutor {
             .get_account(&op.sender)?
             .ok_or_else(|| ExecutionError::AccountNotFound(format!("{:?}", &op.sender[..4])))?;
 
-        // System-authorized intent operations (signature = [0xFF]) skip signature checks.
-        // These are created by the block proposer for intent fulfillment.
-        let is_intent_op = op.signature == [0xFF]
-            && op.actions.len() == 1
-            && matches!(&op.actions[0], Action::Call { target, method, .. }
-                if *target == solen_types::system::INTENT_ADDRESS && method == "fulfill");
+        // System-authorized operations (signature = [0xFF]) skip signature checks.
+        // These are created by the block proposer for intent fulfillment and slashing.
+        let is_system_op = is_system_authorized(op);
 
-        let matched_session = if is_intent_op {
+        let matched_session = if is_system_op {
             // Skip signature and session key checks for intent operations.
             None
         } else {
@@ -704,8 +716,8 @@ impl BlockExecutor {
             }
         }
 
-        // Consume nonce (skip for intent-authorized ops).
-        if !is_intent_op {
+        // Consume nonce (skip for system-authorized ops).
+        if !is_system_op {
             state.consume_nonce(&op.sender, op.nonce)?;
         }
 

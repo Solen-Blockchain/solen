@@ -800,7 +800,19 @@ fn execute_bridge_call(
                     });
                     Ok(())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => {
+                    // Refund deposit on registration failure.
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(deposit);
+                        let _ = state.save_account(&acct);
+                    }
+                    if let Ok(mut bridge_acct) = state.require_account(&BRIDGE_ADDRESS) {
+                        bridge_acct.balance = bridge_acct.balance.saturating_sub(deposit);
+                        let _ = state.save_account(&bridge_acct);
+                    }
+                    Err(e.to_string())
+                }
             }
         }
         _ => Err(format!("unknown bridge method: {method}")),

@@ -92,7 +92,7 @@ impl StateStore for CheckpointStore {
                 Ok(kv) => kv,
                 Err(_) => continue, // Skip corrupted entries.
             };
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"slash/") {
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();
@@ -166,7 +166,7 @@ impl StateStore for RocksStore {
             // Exclude non-execution keys from the state root.
             // Block storage and chain metadata differ across validators
             // based on timing, which would cause false state divergence.
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"slash/") {
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();
@@ -237,21 +237,34 @@ impl StateStore for RocksStore {
     }
 }
 
-/// Compute a binary Merkle root from leaf hashes (same algorithm as MemoryStore).
+/// Iterative Merkle root — MUST match MemoryStore's algorithm exactly.
+/// Pairwise bottom-up hashing with odd-leaf promotion.
 fn merkle_root(leaves: &[Hash]) -> Hash {
-    match leaves.len() {
-        0 => [0u8; 32],
-        1 => leaves[0],
-        n => {
-            let mid = n / 2;
-            let left = merkle_root(&leaves[..mid]);
-            let right = merkle_root(&leaves[mid..]);
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&left);
-            hasher.update(&right);
-            *hasher.finalize().as_bytes()
-        }
+    if leaves.is_empty() {
+        return [0u8; 32];
     }
+    if leaves.len() == 1 {
+        return leaves[0];
+    }
+
+    let mut current: Vec<Hash> = leaves.to_vec();
+    while current.len() > 1 {
+        let mut next = Vec::with_capacity((current.len() + 1) / 2);
+        let mut i = 0;
+        while i + 1 < current.len() {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&current[i]);
+            hasher.update(&current[i + 1]);
+            next.push(*hasher.finalize().as_bytes());
+            i += 2;
+        }
+        if i < current.len() {
+            next.push(current[i]); // Odd leaf promoted.
+        }
+        current = next;
+    }
+
+    current[0]
 }
 
 #[cfg(test)]

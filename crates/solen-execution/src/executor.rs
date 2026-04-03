@@ -491,6 +491,11 @@ impl BlockExecutor {
                 for (k, v) in &all_entries {
                     let _ = store.put(k, v);
                 }
+                // Re-apply nonce increment (was consumed before execution, then rolled back).
+                {
+                    let mut state = StateManager::new(store);
+                    let _ = state.consume_nonce(&op.sender, op.nonce);
+                }
                 // Deduct gas fee from the restored state.
                 let actual_fee = self.fee_config.calculate_fee(gas_used);
                 if actual_fee > 0 {

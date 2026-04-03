@@ -179,7 +179,10 @@ impl StateStore for MemoryStore {
 /// (when blocks are persisted, when chain meta is updated) and would
 /// cause false state divergence.
 fn is_non_state_key(key: &[u8]) -> bool {
-    key.starts_with(b"block/") || key.starts_with(b"__chain_meta__") || key.starts_with(b"slash/")
+    key.starts_with(b"block/")
+        || key.starts_with(b"__chain_meta__")
+        || key.starts_with(b"__chain_id__")
+        || key.starts_with(b"slash/")
 }
 
 fn hash_leaf(key: &[u8], value: &[u8]) -> Hash {

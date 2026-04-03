@@ -411,6 +411,30 @@ impl StakingContract {
         Ok(())
     }
 
+    /// Reactivate a jailed/slashed validator. The validator must still meet the
+    /// minimum stake requirement. Caller must be the validator itself.
+    pub fn unjail(&mut self, validator_id: &ValidatorId) -> Result<(), StakingError> {
+        let val = self
+            .validators
+            .iter_mut()
+            .find(|v| v.id == *validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+
+        if val.is_active {
+            return Ok(()); // Already active, nothing to do.
+        }
+
+        if val.self_stake < MIN_VALIDATOR_STAKE {
+            return Err(StakingError::InsufficientStake {
+                need: MIN_VALIDATOR_STAKE,
+                have: val.self_stake,
+            });
+        }
+
+        val.is_active = true;
+        Ok(())
+    }
+
     /// Request key rotation for a validator. The new key takes effect at next epoch.
     /// Must be called by the current validator key (verified at the system call level).
     pub fn rotate_key(

@@ -291,6 +291,20 @@ fn execute_staking_call(
             }
             Ok(())
         }
+        "unjail" => {
+            // No args — sender is the validator requesting reactivation.
+            match staking.unjail(sender) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: STAKING_ADDRESS,
+                        topic: b"unjailed".to_vec(),
+                        data: sender.to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
         "rotate_key" => {
             // args: new_key[32]
             let new_key = match read_account_id(args, 0) {

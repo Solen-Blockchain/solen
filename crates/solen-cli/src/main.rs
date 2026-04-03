@@ -142,6 +142,12 @@ enum Commands {
         from: String,
     },
 
+    /// Reactivate a jailed validator after downtime slash
+    Unjail {
+        /// Your validator key name
+        from: String,
+    },
+
     /// Transfer tokens between accounts
     Transfer {
         /// Sender key name (must exist in keystore)
@@ -320,6 +326,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::WithdrawStake { from } => {
             commands::cmd_withdraw_stake(&rpc, &from, cli.chain_id).await?
+        }
+        Commands::Unjail { from } => {
+            commands::cmd_unjail(&rpc, &from, cli.chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
             let base = parse_solen_amount(&amount)?;

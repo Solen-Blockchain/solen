@@ -947,6 +947,7 @@ impl ConsensusEngine {
                 &evidence.reason,
                 crate::slashing::SlashingReason::DoubleSign { .. }
                 | crate::slashing::SlashingReason::InvalidStateRoot { .. }
+                | crate::slashing::SlashingReason::Downtime { .. }
             );
 
             if should_jail {

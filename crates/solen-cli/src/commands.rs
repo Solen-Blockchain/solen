@@ -458,6 +458,43 @@ pub async fn cmd_withdraw_stake(rpc: &RpcClient, from: &str, chain_id: u64) -> R
     Ok(())
 }
 
+pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    let sender_hex = hex_encode(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let staking_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x01;
+        t
+    };
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: info.nonce,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "unjail".to_string(),
+            args: vec![],
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Unjail submitted. Validator will be reactivated at the next epoch.");
+    } else {
+        println!("Rejected: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 // ── Balance ─────────────────────────────────────────────────────
 
 pub async fn cmd_balance(rpc: &RpcClient, account: &str) -> Result<()> {

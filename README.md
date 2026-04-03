@@ -414,13 +414,40 @@ const result = await alice.submit(op);
 | Rust crates | 17 |
 | TypeScript packages | 2 |
 | Rust source lines | ~21,000 |
-| Test functions | 155 |
+| Test functions | 198 |
 | Property tests | 4 (hundreds of cases each) |
 | Fuzz targets | 3 |
-| RPC methods | 19 |
+| RPC methods | 20 |
 | Explorer endpoints | 18 |
-| Transfer TPS | ~14,000 |
+| Transfer TPS | ~15,000 |
 | Contract call TPS | ~10,000 |
+
+---
+
+## Test Results
+
+```
+198 passed, 0 failed
+
+solen-consensus          30 tests  (engine, validator, slashing, epoch, mempool, checkpoint, snapshot)
+  adversarial_tests       6 tests  (double-sign, [0xFF] rejection, validator sync, per-sender limit)
+solen-execution          22 tests  (executor, state, fees, proof verification)
+  property_tests          4 tests  (supply conservation, nonce monotonicity, state root, no negative balance)
+  security_tests          5 tests  (withdraw idempotent, multi-action rollback, nonce replay, balance wrapping)
+solen-vm                  5 tests  (WASM execution, gas metering, caching)
+  sandbox_tests           8 tests  (malformed WASM, negative lengths, bounded return data, fuel metering)
+solen-system-contracts   30 tests  (staking, bridge, governance, guardian, vesting, treasury)
+solen-storage            18 tests  (memory store, rocks store, merkle root, snapshot)
+  determinism_tests       9 tests  (cross-backend root identity, non-state key filtering, scan correctness)
+solen-crypto              4 tests  (Ed25519 sign/verify, deterministic keys)
+solen-p2p                 2 tests  (message encoding roundtrip)
+  message_tests           5 tests  (decompression bomb, malformed messages, empty input)
+solen-rollup-kit         15 tests  (sequencer, batch, prover, messenger, relayer)
+  rollup_e2e              6 tests  (full lifecycle, invalid proof, stale state, multi-rollup, large batch)
+solen-intents             6 tests  (pool submit/fulfill, solution selection, expiry)
+  pool_security_tests     6 tests  (solution cap, fulfilled rejection, pool bounds, cancel-by-sender)
+solen-wallet-sdk         17 tests  (account builder, auth, policy, recovery, sponsorship, transaction)
+```
 
 ---
 

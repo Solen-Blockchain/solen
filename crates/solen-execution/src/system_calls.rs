@@ -191,7 +191,6 @@ fn execute_staking_call(
             let current_epoch = read_current_epoch(store);
             match staking.delegate_at_epoch(*sender, validator, amount, current_epoch) {
                 Ok(()) => {
-                    // Data: validator[32] + amount[16 LE]
                     let mut data = Vec::with_capacity(48);
                     data.extend_from_slice(&validator);
                     data.extend_from_slice(&amount.to_le_bytes());
@@ -202,7 +201,15 @@ fn execute_staking_call(
                     });
                     Ok(())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => {
+                    // Refund on delegation failure.
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(amount);
+                        let _ = state.save_account(&acct);
+                    }
+                    Err(e.to_string())
+                }
             }
         }
         "undelegate" => {
@@ -653,7 +660,15 @@ fn execute_bridge_call(
                     });
                     Ok(())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => {
+                    // Refund on deposit failure.
+                    let mut state = StateManager::new(store);
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(amount);
+                        let _ = state.save_account(&acct);
+                    }
+                    Err(e.to_string())
+                }
             }
         }
         "register_vault" => {

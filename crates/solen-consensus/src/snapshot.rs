@@ -184,6 +184,14 @@ pub fn restore_snapshot(
         loaded += 1;
     }
 
+    // Verify all entries were loaded — reject truncated snapshots.
+    if loaded < entry_count {
+        return Err(SnapshotError::Invalid(format!(
+            "truncated snapshot: expected {} entries, loaded {}",
+            entry_count, loaded
+        )));
+    }
+
     store.commit_root();
 
     // Verify state root.

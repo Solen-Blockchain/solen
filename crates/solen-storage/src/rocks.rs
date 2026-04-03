@@ -87,7 +87,10 @@ impl StateStore for CheckpointStore {
     fn state_root(&self) -> Hash {
         let mut leaves: Vec<Hash> = Vec::new();
         for item in self.db.iterator(IteratorMode::Start) {
-            let (k, v) = item.unwrap();
+            let (k, v) = match item {
+                Ok(kv) => kv,
+                Err(_) => continue, // Skip corrupted entries.
+            };
             if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"slash/") {
                 continue;
             }
@@ -155,7 +158,10 @@ impl StateStore for RocksStore {
 
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
-            let (k, v) = item.unwrap();
+            let (k, v) = match item {
+                Ok(kv) => kv,
+                Err(_) => continue,
+            };
             // Exclude non-execution keys from the state root.
             // Block storage and chain metadata differ across validators
             // based on timing, which would cause false state divergence.

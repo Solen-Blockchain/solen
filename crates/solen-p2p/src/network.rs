@@ -265,7 +265,7 @@ impl NetworkService {
                                     *entry = (1, std::time::Instant::now());
                                 } else {
                                     entry.0 += 1;
-                                    if entry.0 > MAX_MSGS_PER_PEER_PER_SEC {
+                                    if entry.0 >= MAX_MSGS_PER_PEER_PER_SEC {
                                         debug!(peer = %propagation_source, count = entry.0, "rate-limited peer — dropping message");
                                         continue;
                                     }

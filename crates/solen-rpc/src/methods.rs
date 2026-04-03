@@ -882,7 +882,7 @@ impl SolenApiServer for SolenRpc {
     fn get_pending_intents(&self, limit: Option<usize>) -> RpcResult<Vec<IntentInfo>> {
         let pool = self.engine.intent_pool();
         let pending = pool.pending_intents();
-        let limit = limit.unwrap_or(50);
+        let limit = limit.unwrap_or(50).min(500);
 
         let intents: Vec<IntentInfo> = pending.into_iter().take(limit).map(|i| {
             IntentInfo {
@@ -1169,7 +1169,7 @@ impl SolenApiServer for SolenRpc {
     fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>> {
         let registry = self.engine.proof_registry();
         let registry = registry.read().map_err(|e| internal_error(e.to_string()))?;
-        let batches = registry.get_verified_batches(rollup_id, limit.unwrap_or(50));
+        let batches = registry.get_verified_batches(rollup_id, limit.unwrap_or(50).min(500));
         Ok(batches
             .into_iter()
             .map(|b| VerifiedBatchInfo {

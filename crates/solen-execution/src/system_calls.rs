@@ -275,6 +275,29 @@ fn execute_staking_call(
             }
             Ok(())
         }
+        "rotate_key" => {
+            // args: new_key[32]
+            let new_key = match read_account_id(args, 0) {
+                Some(k) => k,
+                None => return err("invalid args: need new_key[32]"),
+            };
+            let current_epoch = read_current_epoch(store);
+
+            match staking.rotate_key(sender, new_key, current_epoch) {
+                Ok(()) => {
+                    let mut data = Vec::with_capacity(64);
+                    data.extend_from_slice(sender);
+                    data.extend_from_slice(&new_key);
+                    events.push(Event {
+                        emitter: STAKING_ADDRESS,
+                        topic: b"key_rotation_requested".to_vec(),
+                        data,
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
         _ => Err(format!("unknown staking method: {method}")),
     };
 

@@ -224,6 +224,16 @@ fn register_host_functions_typed(
                     return -1;
                 }
 
+                // Charge fuel for storage read.
+                let read_cost = crate::metering::storage_read_fuel(key.len());
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < read_cost {
+                        return -1; // Out of fuel.
+                    }
+                    let _ = caller.set_fuel(remaining - read_cost);
+                }
+
                 let val = caller.data().ctx.storage.get(&key).cloned();
                 match val {
                     Some(val) => {
@@ -255,6 +265,17 @@ fn register_host_functions_typed(
                 let mut val = vec![0u8; val_len as usize];
                 if !safe_read(&caller, &memory, key_ptr as usize, &mut key) { return; }
                 if !safe_read(&caller, &memory, val_ptr as usize, &mut val) { return; }
+
+                // Charge fuel for storage write (discourages state bloat).
+                let write_cost = crate::metering::storage_write_fuel(key.len(), val.len());
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < write_cost {
+                        return; // Out of fuel — write rejected.
+                    }
+                    let _ = caller.set_fuel(remaining - write_cost);
+                }
+
                 caller.data_mut().ctx.storage.insert(key, val);
             },
         )

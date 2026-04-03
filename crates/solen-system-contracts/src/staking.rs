@@ -40,6 +40,10 @@ pub enum StakingError {
     GenesisLocked { unlock_epoch: u64, current_epoch: u64 },
     #[error("cannot deregister: would drop below minimum validator count ({min})")]
     BelowMinValidators { min: usize },
+    #[error("key rotation already pending")]
+    RotationAlreadyPending,
+    #[error("new key already in use by another validator")]
+    KeyAlreadyInUse,
 }
 
 /// A delegation from an account to a validator.
@@ -87,6 +91,12 @@ pub struct StakingValidator {
     /// Genesis validators: 0 (always eligible). Others: epoch they joined + 1.
     #[serde(default)]
     pub eligible_from_epoch: u64,
+    /// Pending key rotation: new validator ID to switch to at next epoch.
+    #[serde(default)]
+    pub pending_new_key: Option<ValidatorId>,
+    /// Epoch at which the key rotation takes effect.
+    #[serde(default)]
+    pub key_rotation_epoch: u64,
 }
 
 fn default_commission() -> u64 {
@@ -137,6 +147,8 @@ impl StakingContract {
             genesis_lock_until: 0,
             commission_rate_bps: DEFAULT_COMMISSION_BPS,
             eligible_from_epoch: u64::MAX, // not eligible until epoch is set
+            pending_new_key: None,
+            key_rotation_epoch: 0,
         });
         Ok(())
     }
@@ -167,6 +179,8 @@ impl StakingContract {
             genesis_lock_until: 0,
             commission_rate_bps: DEFAULT_COMMISSION_BPS,
             eligible_from_epoch: current_epoch + 1, // eligible starting next epoch
+            pending_new_key: None,
+            key_rotation_epoch: 0,
         });
         Ok(())
     }
@@ -191,6 +205,8 @@ impl StakingContract {
             genesis_lock_until: GENESIS_LOCK_EPOCHS,
             commission_rate_bps: DEFAULT_COMMISSION_BPS,
             eligible_from_epoch: 0, // genesis validators always eligible
+            pending_new_key: None,
+            key_rotation_epoch: 0,
         });
         Ok(())
     }
@@ -393,6 +409,70 @@ impl StakingContract {
             .ok_or(StakingError::ValidatorNotFound)?;
         val.commission_rate_bps = commission_bps.min(10_000); // cap at 100%
         Ok(())
+    }
+
+    /// Request key rotation for a validator. The new key takes effect at next epoch.
+    /// Must be called by the current validator key (verified at the system call level).
+    pub fn rotate_key(
+        &mut self,
+        validator_id: &ValidatorId,
+        new_key: ValidatorId,
+        current_epoch: u64,
+    ) -> Result<(), StakingError> {
+        // Check new key isn't already in use.
+        if self.validators.iter().any(|v| v.id == new_key) {
+            return Err(StakingError::KeyAlreadyInUse);
+        }
+
+        let val = self
+            .validators
+            .iter_mut()
+            .find(|v| v.id == *validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+
+        if val.pending_new_key.is_some() {
+            return Err(StakingError::RotationAlreadyPending);
+        }
+
+        val.pending_new_key = Some(new_key);
+        val.key_rotation_epoch = current_epoch + 1;
+        Ok(())
+    }
+
+    /// Apply all pending key rotations that have reached their effective epoch.
+    /// Call this at each epoch boundary.
+    pub fn apply_pending_rotations(&mut self, current_epoch: u64) -> Vec<(ValidatorId, ValidatorId)> {
+        let mut rotated = Vec::new();
+
+        for val in &mut self.validators {
+            if let Some(new_key) = val.pending_new_key.take() {
+                if current_epoch >= val.key_rotation_epoch {
+                    let old_key = val.id;
+                    val.id = new_key;
+                    val.key_rotation_epoch = 0;
+                    rotated.push((old_key, new_key));
+                } else {
+                    // Not yet — put it back.
+                    val.pending_new_key = Some(new_key);
+                }
+            }
+        }
+
+        // Update delegation records to point to the new key.
+        for (old_key, new_key) in &rotated {
+            for d in &mut self.delegations {
+                if d.validator == *old_key {
+                    d.validator = *new_key;
+                }
+            }
+            for u in &mut self.undelegations {
+                if u.validator == *old_key {
+                    u.validator = *new_key;
+                }
+            }
+        }
+
+        rotated
     }
 
     /// Get all delegations for a specific validator.

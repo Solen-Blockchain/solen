@@ -13,6 +13,10 @@ pub const DEFAULT_CHALLENGE_WINDOW: u64 = 100;
 /// Default withdrawal delay in blocks.
 pub const DEFAULT_WITHDRAWAL_DELAY: u64 = 50;
 
+/// Required bond to dispute a withdrawal (100 SOLEN in base units).
+/// Slashed if the dispute is invalid (withdrawal was legitimate).
+pub const DISPUTE_BOND: u128 = 100 * 100_000_000;
+
 #[derive(Debug, Error)]
 pub enum BridgeError {
     #[error("vault not found for rollup {0}")]
@@ -50,6 +54,12 @@ pub struct PendingWithdrawal {
     pub finalize_after_block: u64,
     pub proof_hash: Hash,
     pub status: WithdrawalStatus,
+    /// Who disputed this withdrawal (if disputed). Bond is held until resolved.
+    #[serde(default)]
+    pub disputer: Option<AccountId>,
+    /// Bond amount held by the disputer.
+    #[serde(default)]
+    pub dispute_bond: u128,
 }
 
 /// A bridge vault for a single rollup.
@@ -197,13 +207,21 @@ impl BridgeContract {
             finalize_after_block: finalize_after,
             proof_hash,
             status: WithdrawalStatus::Pending,
+            disputer: None,
+            dispute_bond: 0,
         });
 
         Ok(id)
     }
 
-    /// Dispute a pending withdrawal (e.g., fraud proof submitted).
-    pub fn dispute_withdrawal(&mut self, withdrawal_id: u64) -> Result<(), BridgeError> {
+    /// Dispute a pending withdrawal. Requires a bond (DISPUTE_BOND) which is
+    /// slashed if the dispute is invalid (withdrawal finalized after resolution).
+    /// Returns the required bond amount.
+    pub fn dispute_withdrawal(
+        &mut self,
+        withdrawal_id: u64,
+        disputer: AccountId,
+    ) -> Result<u128, BridgeError> {
         let w = self
             .pending_withdrawals
             .iter_mut()
@@ -215,7 +233,45 @@ impl BridgeContract {
         }
 
         w.status = WithdrawalStatus::Disputed;
-        Ok(())
+        w.disputer = Some(disputer);
+        w.dispute_bond = DISPUTE_BOND;
+        Ok(DISPUTE_BOND)
+    }
+
+    /// Resolve a dispute. If `valid_dispute` is true, the withdrawal stays blocked
+    /// and the disputer gets their bond back. If false, the withdrawal can proceed
+    /// and the disputer's bond is slashed (returned to the vault).
+    pub fn resolve_dispute(
+        &mut self,
+        withdrawal_id: u64,
+        valid_dispute: bool,
+    ) -> Result<(Option<AccountId>, u128), BridgeError> {
+        let w = self
+            .pending_withdrawals
+            .iter_mut()
+            .find(|w| w.id == withdrawal_id)
+            .ok_or(BridgeError::WithdrawalNotFound)?;
+
+        if w.status != WithdrawalStatus::Disputed {
+            return Err(BridgeError::WithdrawalNotFound);
+        }
+
+        let disputer = w.disputer.take();
+        let bond = w.dispute_bond;
+        w.dispute_bond = 0;
+
+        if valid_dispute {
+            // Dispute was valid — withdrawal stays blocked, disputer gets bond back.
+            Ok((disputer, bond))
+        } else {
+            // Dispute was invalid — withdrawal can be finalized, bond slashed.
+            w.status = WithdrawalStatus::Pending;
+            // Bond goes to the vault as compensation.
+            if let Some(vault) = self.vaults.iter_mut().find(|v| v.rollup_id == w.rollup_id) {
+                vault.balance = vault.balance.saturating_add(bond);
+            }
+            Ok((None, 0)) // No refund to disputer.
+        }
     }
 
     /// Finalize a withdrawal after the challenge period.
@@ -338,13 +394,27 @@ mod tests {
             .initiate_withdrawal(1, aid(1), 2_000, 10, [0; 32])
             .unwrap();
 
-        bridge.dispute_withdrawal(wid).unwrap();
+        let bond = bridge.dispute_withdrawal(wid, aid(99)).unwrap();
+        assert_eq!(bond, DISPUTE_BOND);
 
         let err = bridge.finalize_withdrawal(wid, 999).unwrap_err();
         assert!(matches!(err, BridgeError::WithdrawalDisputed));
 
         // Vault balance unchanged.
         assert_eq!(bridge.get_vault(1).unwrap().balance, 5_000);
+
+        // Resolve dispute as invalid — withdrawal should be re-enabled.
+        let (refund, amount) = bridge.resolve_dispute(wid, false).unwrap();
+        assert!(refund.is_none()); // disputer loses bond
+        assert_eq!(amount, 0);
+
+        // Vault got the bond.
+        assert_eq!(bridge.get_vault(1).unwrap().balance, 5_000 + DISPUTE_BOND);
+
+        // Now withdrawal can finalize.
+        let (recipient, amt) = bridge.finalize_withdrawal(wid, 999).unwrap();
+        assert_eq!(recipient, aid(1));
+        assert_eq!(amt, 2_000);
     }
 
     #[test]

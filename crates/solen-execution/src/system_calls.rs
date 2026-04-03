@@ -220,12 +220,17 @@ fn execute_staking_call(
             // Auto-withdraw any previously matured undelegations first.
             let auto_withdrawn = staking.withdraw_undelegated(*sender, current_epoch);
             if auto_withdrawn > 0 {
+                // Save staking state first (undelegations removed).
+                staking.save(store);
+
                 let mut state = StateManager::new(store);
                 if let Ok(mut acct) = state.require_account(sender) {
                     acct.balance = acct.balance.saturating_add(auto_withdrawn);
                     let _ = state.save_account(&acct);
                 }
                 drop(state);
+
+                // Reload after state changes.
                 staking = StakingContract::load(store);
 
                 events.push(Event {
@@ -255,7 +260,10 @@ fn execute_staking_call(
             let withdrawn = staking.withdraw_undelegated(*sender, current_epoch);
 
             if withdrawn > 0 {
-                // Credit sender balance.
+                // Save staking state FIRST (with undelegations removed),
+                // then credit sender balance.
+                staking.save(store);
+
                 let mut state = StateManager::new(store);
                 if let Ok(mut acct) = state.require_account(sender) {
                     acct.balance = acct.balance.saturating_add(withdrawn);
@@ -265,6 +273,7 @@ fn execute_staking_call(
                 }
                 drop(state);
 
+                // Reload after state changes.
                 staking = StakingContract::load(store);
 
                 events.push(Event {

@@ -728,16 +728,12 @@ impl ConsensusEngine {
                     theirs = ?&pb.header.state_root[..4],
                     "state root mismatch on finalization — proposer may be byzantine"
                 );
-                // Generate slashing evidence for invalid state root.
-                let evidence = crate::slashing::SlashingEvidence {
-                    offender: pb.header.proposer,
-                    reason: crate::slashing::SlashingReason::InvalidStateRoot {
-                        height,
-                        expected: exec_result.state_root,
-                        got: pb.header.state_root,
-                    },
-                };
-                self.process_slashing(&evidence);
+                // Log the evidence but do NOT apply slashing here.
+                // Slashing modifies the staking contract in the store, which
+                // would cause state divergence — other nodes that don't detect
+                // the mismatch won't apply the slash, so their next block starts
+                // from different state. Slashing must be applied deterministically
+                // through on-chain evidence submission, not as a finalization side-effect.
             }
 
             exec_result
@@ -933,8 +929,13 @@ impl ConsensusEngine {
         );
     }
 
-    /// Process slashing evidence — penalize the validator's stake.
-    /// Updates both the in-memory validator set AND the persistent staking contract.
+    /// Process slashing evidence — penalize the validator in the in-memory set only.
+    ///
+    /// IMPORTANT: This does NOT modify the persistent store. Slashing must not
+    /// modify the store during finalization because it's nondeterministic —
+    /// different nodes may detect different slashing conditions, causing state
+    /// root divergence. Store-level slashing should be applied through
+    /// deterministic on-chain transactions (future: slashing evidence submission).
     fn process_slashing(&self, evidence: &crate::slashing::SlashingEvidence) {
         let penalty_bps = evidence.reason.penalty_bps();
         let mut vs = self.validator_set.write().unwrap();
@@ -943,16 +944,7 @@ impl ConsensusEngine {
             let penalty = v.stake * (penalty_bps as u128) / 10_000;
             v.stake = v.stake.saturating_sub(penalty);
 
-            let should_jail = matches!(
-                &evidence.reason,
-                crate::slashing::SlashingReason::DoubleSign { .. }
-                | crate::slashing::SlashingReason::InvalidStateRoot { .. }
-                | crate::slashing::SlashingReason::Downtime { .. }
-            );
-
-            if should_jail {
-                v.status = crate::validator::ValidatorStatus::Jailed;
-            }
+            v.status = crate::validator::ValidatorStatus::Jailed;
 
             // Reset missed_blocks to prevent double-slash within same epoch.
             v.missed_blocks = 0;
@@ -961,22 +953,8 @@ impl ConsensusEngine {
                 validator = ?&evidence.offender[..4],
                 penalty,
                 reason = ?evidence.reason,
-                "validator slashed"
+                "validator slashed (in-memory only — persisted at next epoch)"
             );
-
-            // Persist slashing to the staking contract so it survives restarts.
-            drop(vs); // Release validator set lock before acquiring store lock.
-            {
-                let mut store = self.store.write().unwrap();
-                let mut staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
-                if let Some(sv) = staking.validators.iter_mut().find(|sv| sv.id == evidence.offender) {
-                    sv.self_stake = sv.self_stake.saturating_sub(penalty);
-                    if should_jail {
-                        sv.is_active = false;
-                    }
-                }
-                staking.save(store.as_mut());
-            }
         }
     }
 

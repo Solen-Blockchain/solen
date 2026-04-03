@@ -609,7 +609,13 @@ impl SolenApiServer for SolenRpc {
 
         // Build input: method\0args
         let args_bytes = match &args {
-            Some(hex) => hex_decode(hex)?,
+            Some(hex) => {
+                let decoded = hex_decode(hex)?;
+                if decoded.len() > 1_000_000 {
+                    return Err(ErrorObjectOwned::owned(-32602, "args too large (max 1MB)", None::<()>));
+                }
+                decoded
+            }
             None => vec![],
         };
         let mut input = method.as_bytes().to_vec();
@@ -839,6 +845,9 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_intent(&self, req: IntentRequest) -> RpcResult<IntentSubmitResult> {
+        if req.constraints.len() > 100 {
+            return Err(ErrorObjectOwned::owned(-32602, "too many constraints (max 100)", None::<()>));
+        }
         let sender = parse_account_id(&req.sender)?;
         let signature = hex_decode(&req.signature)?;
         let max_fee: u128 = req.max_fee.parse().map_err(|_| {
@@ -1054,6 +1063,9 @@ impl SolenApiServer for SolenRpc {
         let state_root = parse_hash(&req.state_root)?;
         let data_hash = parse_hash(&req.data_hash)?;
         let proof = hex_decode(&req.proof)?;
+        if proof.len() > 1_000_000 {
+            return Err(ErrorObjectOwned::owned(-32602, "proof too large (max 1MB)", None::<()>));
+        }
 
         let commitment = BatchCommitment {
             rollup_id: req.rollup_id,

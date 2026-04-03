@@ -71,11 +71,15 @@ impl IntentPool {
         drop(intents);
 
         let mut solutions = self.solutions.lock().unwrap();
-        solutions
-            .entry(solution.intent_id)
-            .or_default()
-            .push(solution);
+        let entry = solutions.entry(solution.intent_id).or_default();
 
+        // Cap solutions per intent to prevent memory exhaustion.
+        const MAX_SOLUTIONS_PER_INTENT: usize = 50;
+        if entry.len() >= MAX_SOLUTIONS_PER_INTENT {
+            return Err(PoolError::Full);
+        }
+
+        entry.push(solution);
         Ok(())
     }
 

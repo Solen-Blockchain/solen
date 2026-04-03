@@ -295,12 +295,11 @@ fn resolve_account(input: &str) -> String {
     if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
         return clean.to_string();
     }
-    // Treat as a name.
-    let mut id = [0u8; 32];
-    let bytes = input.as_bytes();
-    let len = bytes.len().min(32);
-    id[..len].copy_from_slice(&bytes[..len]);
-    hex_encode(&id)
+    // Treat as a name — hash to deterministic account ID.
+    // Uses blake3 to prevent different name variants from mapping
+    // to the same account (which would bypass rate limiting).
+    let hash = blake3_hash(input.as_bytes());
+    hex_encode(&hash)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

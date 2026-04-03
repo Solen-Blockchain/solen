@@ -291,6 +291,34 @@ fn execute_staking_call(
             }
             Ok(())
         }
+        "slash" => {
+            // System-authorized slashing. Args: offender[32] + penalty_bps[8]
+            // Only accepted from [0xFF]-signed system operations (block proposer).
+            let offender = match read_account_id(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need offender[32] + penalty_bps[8]"),
+            };
+            let penalty_bps = read_u64(args, 32).unwrap_or(100); // default 1%
+
+            if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
+                let penalty = val.self_stake.saturating_mul(penalty_bps as u128) / 10_000;
+                val.self_stake = val.self_stake.saturating_sub(penalty);
+                val.is_active = false;
+
+                let mut data = Vec::with_capacity(48);
+                data.extend_from_slice(&offender);
+                data.extend_from_slice(&penalty.to_le_bytes());
+                events.push(Event {
+                    emitter: STAKING_ADDRESS,
+                    topic: b"slashed".to_vec(),
+                    data,
+                });
+
+                Ok(())
+            } else {
+                Err("validator not found".to_string())
+            }
+        }
         "unjail" => {
             // No args — sender is the validator requesting reactivation.
             match staking.unjail(sender) {

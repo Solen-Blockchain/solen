@@ -121,6 +121,8 @@ pub struct ConsensusEngine {
     intent_pool: Arc<IntentPool>,
     /// Rollup proof verification registry.
     proof_registry: Arc<RwLock<ProofVerifierRegistry>>,
+    /// Queued slashing evidence to include in the next block.
+    pending_slashing: Arc<std::sync::Mutex<Vec<crate::slashing::SlashingEvidence>>>,
     /// Trusted checkpoints for long-range attack protection.
     trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
 }
@@ -198,6 +200,7 @@ impl ConsensusEngine {
                 reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
                 Arc::new(RwLock::new(reg))
             },
+            pending_slashing: Arc::new(std::sync::Mutex::new(Vec::new())),
             trusted_checkpoints: match chain_id {
                 1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
                 9000 => crate::checkpoint::TrustedCheckpoints::testnet(),
@@ -262,6 +265,30 @@ impl ConsensusEngine {
     /// whether it was immediately finalized (single-validator mode).
     pub fn produce_block(&self) -> ProducedBlock {
         let mut ops = self.mempool.drain(self.config.max_ops_per_block);
+
+        // Include queued slashing evidence as deterministic system operations.
+        {
+            let mut queue = self.pending_slashing.lock().unwrap();
+            for evidence in queue.drain(..) {
+                let penalty_bps = evidence.reason.penalty_bps();
+                // Build args: offender[32] + penalty_bps[8]
+                let mut args = Vec::with_capacity(40);
+                args.extend_from_slice(&evidence.offender);
+                args.extend_from_slice(&penalty_bps.to_le_bytes());
+
+                ops.push(solen_types::transaction::UserOperation {
+                    sender: self.config.validator_id,
+                    nonce: 0,
+                    actions: vec![solen_types::transaction::Action::Call {
+                        target: solen_types::system::STAKING_ADDRESS,
+                        method: "slash".to_string(),
+                        args,
+                    }],
+                    max_fee: 0,
+                    signature: vec![0xFF], // system-authorized
+                });
+            }
+        }
 
         // Expire intents past current height.
         let current_h = self.height();
@@ -929,32 +956,32 @@ impl ConsensusEngine {
         );
     }
 
-    /// Process slashing evidence — penalize the validator in the in-memory set only.
-    ///
-    /// IMPORTANT: This does NOT modify the persistent store. Slashing must not
-    /// modify the store during finalization because it's nondeterministic —
-    /// different nodes may detect different slashing conditions, causing state
-    /// root divergence. Store-level slashing should be applied through
-    /// deterministic on-chain transactions (future: slashing evidence submission).
+    /// Queue slashing evidence to be included in the next block as a
+    /// deterministic system operation. All validators will execute the
+    /// slash identically as part of block execution.
     fn process_slashing(&self, evidence: &crate::slashing::SlashingEvidence) {
-        let penalty_bps = evidence.reason.penalty_bps();
-        let mut vs = self.validator_set.write().unwrap();
+        // Update in-memory set immediately (affects local proposer rotation).
+        {
+            let penalty_bps = evidence.reason.penalty_bps();
+            let mut vs = self.validator_set.write().unwrap();
+            if let Some(v) = vs.get_mut(&evidence.offender) {
+                let penalty = v.stake * (penalty_bps as u128) / 10_000;
+                v.stake = v.stake.saturating_sub(penalty);
+                v.status = crate::validator::ValidatorStatus::Jailed;
+                v.missed_blocks = 0;
+            }
+        }
 
-        if let Some(v) = vs.get_mut(&evidence.offender) {
-            let penalty = v.stake * (penalty_bps as u128) / 10_000;
-            v.stake = v.stake.saturating_sub(penalty);
-
-            v.status = crate::validator::ValidatorStatus::Jailed;
-
-            // Reset missed_blocks to prevent double-slash within same epoch.
-            v.missed_blocks = 0;
-
+        // Queue for deterministic on-chain execution in the next block.
+        let mut queue = self.pending_slashing.lock().unwrap();
+        // Dedup: don't queue the same offender twice.
+        if !queue.iter().any(|e| e.offender == evidence.offender) {
             warn!(
                 validator = ?&evidence.offender[..4],
-                penalty,
                 reason = ?evidence.reason,
-                "validator slashed (in-memory only — persisted at next epoch)"
+                "slashing evidence queued for next block"
             );
+            queue.push(evidence.clone());
         }
     }
 

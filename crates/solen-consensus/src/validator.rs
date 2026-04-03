@@ -50,9 +50,12 @@ impl ValidatorSet {
         &self.validators
     }
 
-    /// Get only active validators.
+    /// Get only active validators, sorted by ID for deterministic ordering.
+    /// All nodes must agree on proposer selection, so ordering must be identical.
     pub fn active(&self) -> Vec<&ValidatorInfo> {
-        self.validators.iter().filter(|v| v.is_active()).collect()
+        let mut active: Vec<_> = self.validators.iter().filter(|v| v.is_active()).collect();
+        active.sort_by_key(|v| v.id);
+        active
     }
 
     /// Total active stake.

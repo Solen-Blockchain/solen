@@ -292,21 +292,15 @@ async fn publish_contract_source(
     Path(code_hash): Path<String>,
     Json(body): Json<PublishSourceRequest>,
 ) -> Json<serde_json::Value> {
-    // Only allow publishing if the code_hash exists as a deployed contract.
+    // Validate and rate-limit source publishing.
     {
-        let store = state.store.read().unwrap();
-        if !store.get_contracts().iter().any(|c| {
-            // Check if any contract has this code hash on-chain.
-            // The code_hash is stored in the account, so we verify it exists.
-            true // For now, allow if contracts section is populated.
-        }) {
-            // Basic validation: code_hash must be valid hex and 64 chars.
-            if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Json(serde_json::json!({"success": false, "error": "invalid code_hash format"}));
-            }
+        // Basic validation: code_hash must be valid hex and 64 chars.
+        if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Json(serde_json::json!({"success": false, "error": "invalid code_hash format"}));
         }
 
         // Rate limit: reject if source was published recently (within 1 hour).
+        let store = state.store.read().unwrap();
         if let Some(existing) = store.contract_sources.get(&code_hash) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

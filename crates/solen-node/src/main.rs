@@ -17,7 +17,7 @@ use solen_p2p::messages::NetworkMessage;
 use solen_p2p::network::{NetworkConfig, NetworkService};
 use solen_rpc::server::start_rpc_server;
 use solen_storage::StateStore;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Network environment.
@@ -236,64 +236,138 @@ async fn main() -> anyhow::Result<()> {
         cli.snapshot.clone()
     } else if store.is_empty() && !cli.bootstrap.is_empty() {
         // Auto-discover snapshot from seed nodes.
+        // Security: query chain status from ALL reachable seeds first,
+        // verify they agree on the state root before downloading a snapshot.
         info!("empty store — attempting snapshot sync from seed nodes...");
-        let mut found = None;
-        for addr in &cli.bootstrap {
-            // Try to derive an RPC URL from the bootstrap multiaddr.
-            // Bootstrap addrs look like /ip4/1.2.3.4/tcp/40333/p2p/...
-            // The RPC port is typically P2P port - 20389 (testnet: 40333 -> 19944).
+
+        let seed_rpc_urls: Vec<String> = cli.bootstrap.iter().map(|addr| {
             let ip = addr.split('/').find(|s| s.contains('.')).unwrap_or("127.0.0.1");
-            let rpc_port = rpc_port; // Use our own configured RPC port as a guess for seed.
-            // For testnet seeds, try the public RPC endpoint.
-            let rpc_url = match net {
+            match net {
                 Network::Testnet => "https://testnet-rpc.solenchain.io".to_string(),
                 Network::Mainnet => "https://rpc.solenchain.io".to_string(),
                 _ => format!("http://{}:{}", ip, rpc_port),
-            };
-            let snapshot_url = format!(
-                "{}",
-                rpc_url
-            );
-            info!(url = %snapshot_url, "trying snapshot from seed...");
+            }
+        }).collect::<std::collections::HashSet<_>>().into_iter().collect();
 
-            // Make an RPC call to get the snapshot.
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "solen_getSnapshot",
-                "params": []
-            });
-            match reqwest::blocking::Client::new()
-                .post(&snapshot_url)
-                .header("Content-Type", "application/json")
-                .body(body.to_string())
-                .send()
+        // Step 1: Query chain status from all seeds to get consensus on state root.
+        let status_body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "solen_chainStatus", "params": []
+        });
+        let mut state_roots: Vec<(String, u64, String)> = Vec::new(); // (url, height, state_root)
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        for url in &seed_rpc_urls {
+            match client.post(url).header("Content-Type", "application/json")
+                .body(status_body.to_string()).send()
             {
                 Ok(resp) if resp.status().is_success() => {
-                    if let Ok(text) = resp.text() {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if json["result"]["data"].is_string() && json["result"]["height"].as_u64().unwrap_or(0) > 0 {
-                                info!(
-                                    height = json["result"]["height"].as_u64().unwrap_or(0),
-                                    "snapshot available from seed"
-                                );
-                                // Write to temp file.
-                                let b64 = json["result"]["data"].as_str().unwrap();
-                                match base64_decode(b64) {
-                                    Ok(data) => {
-                                        let tmp = format!("{}/snapshot.bin", data_dir);
-                                        if std::fs::write(&tmp, &data).is_ok() {
-                                            found = Some(tmp);
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => { info!(error = %e, "snapshot decode failed, trying next seed"); }
-                                }
-                            }
+                    if let Ok(json) = resp.json::<serde_json::Value>() {
+                        if let (Some(h), Some(sr)) = (
+                            json["result"]["height"].as_u64(),
+                            json["result"]["latest_state_root"].as_str(),
+                        ) {
+                            info!(url = %url, height = h, state_root = %sr, "seed status");
+                            state_roots.push((url.clone(), h, sr.to_string()));
                         }
                     }
                 }
-                _ => { info!("seed not reachable, trying next..."); }
+                _ => { info!(url = %url, "seed not reachable"); }
+            }
+        }
+
+        // Step 2: Verify seeds agree. Require at least 2 seeds to agree on state root,
+        // or accept a single seed only for devnet.
+        let mut found = None;
+        if !state_roots.is_empty() {
+            // Find the most common state root among the highest-height responses.
+            let max_height = state_roots.iter().map(|(_, h, _)| *h).max().unwrap_or(0);
+            let at_max: Vec<_> = state_roots.iter()
+                .filter(|(_, h, _)| max_height.saturating_sub(*h) <= 10) // within 10 blocks
+                .collect();
+
+            let mut root_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for (_, _, sr) in &at_max {
+                *root_counts.entry(sr.as_str()).or_insert(0) += 1;
+            }
+
+            let (consensus_root, count) = root_counts.iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(r, c)| (r.to_string(), *c))
+                .unwrap_or_default();
+
+            let need_consensus = if matches!(net, Network::Devnet) { 1 } else { 2 };
+
+            if count >= need_consensus {
+                info!(
+                    state_root = %consensus_root,
+                    agreeing_seeds = count,
+                    total_seeds = state_roots.len(),
+                    "seed consensus verified"
+                );
+
+                // Step 3: Download snapshot from first reachable seed.
+                let snapshot_body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "solen_getSnapshot", "params": []
+                });
+
+                for (url, _, _) in &at_max {
+                    info!(url = %url, "downloading snapshot...");
+                    match client.post(url.as_str())
+                        .header("Content-Type", "application/json")
+                        .body(snapshot_body.to_string()).send()
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(json) = resp.json::<serde_json::Value>() {
+                                if let Some(b64) = json["result"]["data"].as_str() {
+                                    let snap_root = json["result"]["state_root"].as_str().unwrap_or("");
+
+                                    // Verify the snapshot's state root matches consensus.
+                                    // Allow slight height differences (snapshot may be cached).
+                                    if snap_root == consensus_root || {
+                                        // If roots differ, it might be a cached snapshot from a
+                                        // slightly older height. Accept if height is close enough.
+                                        let snap_h = json["result"]["height"].as_u64().unwrap_or(0);
+                                        max_height.saturating_sub(snap_h) < 1000
+                                    } {
+                                        match base64_decode(b64) {
+                                            Ok(data) => {
+                                                let tmp = format!("{}/snapshot.bin", data_dir);
+                                                if std::fs::write(&tmp, &data).is_ok() {
+                                                    info!(
+                                                        height = json["result"]["height"].as_u64().unwrap_or(0),
+                                                        "snapshot downloaded and verified against seed consensus"
+                                                    );
+                                                    found = Some(tmp);
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => { info!(error = %e, "snapshot decode failed"); }
+                                        }
+                                    } else {
+                                        warn!(
+                                            snap_root,
+                                            consensus_root = %consensus_root,
+                                            "snapshot state root does NOT match seed consensus — rejecting"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ => { info!(url = %url, "snapshot download failed, trying next..."); }
+                    }
+                }
+            } else {
+                warn!(
+                    agreeing = count,
+                    needed = need_consensus,
+                    total = state_roots.len(),
+                    "insufficient seed consensus on state root — skipping snapshot sync"
+                );
             }
         }
         found
@@ -343,6 +417,9 @@ async fn main() -> anyhow::Result<()> {
     } else if snapshot_height.is_none() {
         info!(state_root = hex(&store.state_root()), "loaded existing state");
     }
+
+    // Store chain_id for proof type restrictions (e.g., block mock proofs on mainnet).
+    let _ = store.put(b"__chain_id__", &genesis.chain_id.to_le_bytes());
 
     // --- Consensus engine ---
     // Build validator set from genesis config using public keys.

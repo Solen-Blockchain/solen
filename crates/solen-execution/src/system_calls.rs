@@ -666,6 +666,20 @@ fn execute_bridge_call(
             }
             let proof_type = String::from_utf8_lossy(&args[name_end+4..pt_end]).to_string();
 
+            // Block mock proofs on mainnet — only allow on devnet/testnet.
+            if proof_type == "mock" {
+                let chain_id = match store.get(b"__chain_id__") {
+                    Ok(Some(data)) if data.len() >= 8 => {
+                        u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]))
+                    }
+                    _ => 0,
+                };
+                // Mainnet chain_id = 1.
+                if chain_id == 1 {
+                    return err("mock proof type is not allowed on mainnet");
+                }
+            }
+
             // Parse sequencer and genesis_state_root
             let sequencer = match read_account_id(args, pt_end) {
                 Some(id) => id,

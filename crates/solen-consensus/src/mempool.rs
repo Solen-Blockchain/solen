@@ -69,8 +69,19 @@ impl Mempool {
         }
     }
 
-    /// Add an operation to the mempool. Returns false if pool is full or duplicate.
+    /// Add an operation to the mempool. Returns false if pool is full, duplicate,
+    /// or if the operation is a system-reserved intent operation.
     pub fn submit(&self, op: UserOperation) -> bool {
+        // Reject system-authorized intent operations — these are injected by the
+        // block proposer only, never accepted from external sources.
+        if op.signature == [0xFF] {
+            tracing::warn!(
+                sender = ?&op.sender[..4],
+                "rejected [0xFF] system signature from external submission"
+            );
+            return false;
+        }
+
         let mut pool = self.inner.lock().unwrap();
         if pool.entries.len() >= self.max_size {
             return false;

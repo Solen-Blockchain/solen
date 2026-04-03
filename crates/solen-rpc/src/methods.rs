@@ -504,13 +504,52 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_operation(&self, op: UserOperation) -> RpcResult<SubmitResult> {
+        // Validate nonce before accepting into mempool.
+        {
+            let store = self.engine.store();
+            let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+            let mut account_key = b"acc/".to_vec();
+            account_key.extend_from_slice(&op.sender);
+            match store.get(&account_key) {
+                Ok(Some(data)) => {
+                    if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(&data) {
+                        if op.nonce < account.nonce {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some(format!(
+                                    "nonce too low: got {}, expected >= {}",
+                                    op.nonce, account.nonce
+                                )),
+                            });
+                        }
+                        if op.nonce > account.nonce + 16 {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some(format!(
+                                    "nonce too far ahead: got {}, current is {}",
+                                    op.nonce, account.nonce
+                                )),
+                            });
+                        }
+                    }
+                }
+                Ok(None) => {
+                    return Ok(SubmitResult {
+                        accepted: false,
+                        error: Some("sender account not found".to_string()),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+
         let accepted = self.engine.mempool().submit(op);
         Ok(SubmitResult {
             accepted,
             error: if accepted {
                 None
             } else {
-                Some("mempool full".to_string())
+                Some("mempool full or duplicate".to_string())
             },
         })
     }

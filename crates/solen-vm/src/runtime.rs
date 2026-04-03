@@ -46,6 +46,25 @@ impl VmRuntime {
         })
     }
 
+    /// Validate WASM bytecode without executing it. Checks that the module
+    /// compiles and exports the required `memory` and `call` symbols.
+    pub fn validate_bytecode(&self, bytecode: &[u8]) -> Result<(), VmError> {
+        let module = Module::new(&self.engine, bytecode)
+            .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+
+        // Check required exports exist.
+        let has_memory = module.exports().any(|e| e.name() == "memory");
+        let has_call = module.exports().any(|e| e.name() == "call");
+
+        if !has_memory {
+            return Err(VmError::MissingExport("memory".into()));
+        }
+        if !has_call {
+            return Err(VmError::MissingExport("call".into()));
+        }
+        Ok(())
+    }
+
     /// Execute a contract using pre-linked instances.
     pub fn execute(
         &self,
@@ -206,6 +225,18 @@ fn safe_write(caller: &mut Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr
 fn register_host_functions_typed(
     linker: &mut Linker<StoreData>,
 ) -> Result<(), VmError> {
+    // Maximum allocation size for host function buffers (1 MB).
+    // Prevents OOM from negative i32 cast to usize or huge allocations.
+    const MAX_HOST_ALLOC: usize = 1024 * 1024;
+
+    /// Validate and convert i32 length to usize, rejecting negative or oversized values.
+    fn checked_len(len: i32) -> Option<usize> {
+        if len < 0 { return None; }
+        let n = len as usize;
+        if n > MAX_HOST_ALLOC { return None; }
+        Some(n)
+    }
+
     linker
         .func_wrap(
             "env",
@@ -215,22 +246,20 @@ fn register_host_functions_typed(
              key_len: i32,
              val_ptr: i32|
              -> i32 {
+                let klen = match checked_len(key_len) { Some(n) => n, None => return -1 };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return -1,
                 };
-                let mut key = vec![0u8; key_len as usize];
+                let mut key = vec![0u8; klen];
                 if !safe_read(&caller, &memory, key_ptr as usize, &mut key) {
                     return -1;
                 }
 
-                // Charge fuel for storage read.
                 let read_cost = crate::metering::storage_read_fuel(key.len());
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < read_cost {
-                        return -1; // Out of fuel.
-                    }
+                    if remaining < read_cost { return -1; }
                     let _ = caller.set_fuel(remaining - read_cost);
                 }
 
@@ -257,22 +286,21 @@ fn register_host_functions_typed(
              key_len: i32,
              val_ptr: i32,
              val_len: i32| {
+                let klen = match checked_len(key_len) { Some(n) => n, None => return };
+                let vlen = match checked_len(val_len) { Some(n) => n, None => return };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
-                let mut key = vec![0u8; key_len as usize];
-                let mut val = vec![0u8; val_len as usize];
+                let mut key = vec![0u8; klen];
+                let mut val = vec![0u8; vlen];
                 if !safe_read(&caller, &memory, key_ptr as usize, &mut key) { return; }
                 if !safe_read(&caller, &memory, val_ptr as usize, &mut val) { return; }
 
-                // Charge fuel for storage write (discourages state bloat).
                 let write_cost = crate::metering::storage_write_fuel(key.len(), val.len());
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < write_cost {
-                        return; // Out of fuel — write rejected.
-                    }
+                    if remaining < write_cost { return; }
                     let _ = caller.set_fuel(remaining - write_cost);
                 }
 
@@ -290,14 +318,26 @@ fn register_host_functions_typed(
              topic_len: i32,
              data_ptr: i32,
              data_len: i32| {
+                let tlen = match checked_len(topic_len) { Some(n) => n, None => return };
+                let dlen = match checked_len(data_len) { Some(n) => n, None => return };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
-                let mut topic = vec![0u8; topic_len as usize];
-                let mut data = vec![0u8; data_len as usize];
+                let mut topic = vec![0u8; tlen];
+                let mut data = vec![0u8; dlen];
                 if !safe_read(&caller, &memory, topic_ptr as usize, &mut topic) { return; }
                 if !safe_read(&caller, &memory, data_ptr as usize, &mut data) { return; }
+
+                // Charge fuel for event emission.
+                let event_cost = crate::metering::STORAGE_WRITE_BASE_FUEL
+                    + ((topic.len() + data.len()) as u64) * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < event_cost { return; }
+                    let _ = caller.set_fuel(remaining - event_cost);
+                }
+
                 caller.data_mut().ctx.events.push(HostEvent { topic, data });
             },
         )
@@ -333,12 +373,22 @@ fn register_host_functions_typed(
             "env",
             "set_return_data",
             |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| {
+                let dlen = match checked_len(len) { Some(n) => n, None => return };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
-                let mut data = vec![0u8; len as usize];
+                let mut data = vec![0u8; dlen];
                 if !safe_read(&caller, &memory, ptr as usize, &mut data) { return; }
+
+                // Charge fuel for return data.
+                let cost = crate::metering::STORAGE_READ_BASE_FUEL + (data.len() as u64) * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < cost { return; }
+                    let _ = caller.set_fuel(remaining - cost);
+                }
+
                 caller.data_mut().ctx.return_data = data;
             },
         )

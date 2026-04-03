@@ -412,7 +412,7 @@ impl BlockExecutor {
             };
         }
 
-        // Validate deploy code sizes.
+        // Validate deploy code sizes and WASM validity.
         for action in &op.actions {
             if let Action::Deploy { code, .. } = action {
                 if code.len() > MAX_CODE_SIZE {
@@ -422,6 +422,17 @@ impl BlockExecutor {
                         success: false,
                         gas_used: 0,
                         error: Some(format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE)),
+                        events: vec![],
+                    };
+                }
+                // Pre-validate WASM bytecode structure at deploy time.
+                if let Err(e) = self.vm_runtime.validate_bytecode(code) {
+                    return ExecutionReceipt {
+                        sender: op.sender,
+                        nonce: op.nonce,
+                        success: false,
+                        gas_used: 0,
+                        error: Some(format!("invalid WASM bytecode: {}", e)),
                         events: vec![],
                     };
                 }
@@ -1233,7 +1244,11 @@ mod tests {
         let (mut store, kp, alice, _bob) = setup();
         let executor = zero_fee_executor();
 
-        let code = b"contract bytecode placeholder";
+        // Minimal valid WASM module with required exports.
+        let code = wat::parse_str(r#"(module
+            (memory (export "memory") 1)
+            (func (export "call") (param i32 i32) (result i32) (i32.const 0))
+        )"#).expect("WAT parse failed");
         let salt = [42u8; 32];
 
         let mut op = UserOperation {
@@ -1259,7 +1274,7 @@ mod tests {
 
         let state = StateManager::new(&mut store);
         let deployed = state.get_account(&deployed_id).unwrap().unwrap();
-        assert_eq!(deployed.code_hash, blake3_hash(code));
+        assert_eq!(deployed.code_hash, blake3_hash(&code));
     }
 
     #[test]

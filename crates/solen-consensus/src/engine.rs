@@ -895,6 +895,7 @@ impl ConsensusEngine {
     }
 
     /// Process slashing evidence — penalize the validator's stake.
+    /// Updates both the in-memory validator set AND the persistent staking contract.
     fn process_slashing(&self, evidence: &crate::slashing::SlashingEvidence) {
         let penalty_bps = evidence.reason.penalty_bps();
         let mut vs = self.validator_set.write().unwrap();
@@ -903,12 +904,14 @@ impl ConsensusEngine {
             let penalty = v.stake * (penalty_bps as u128) / 10_000;
             v.stake = v.stake.saturating_sub(penalty);
 
-            match &evidence.reason {
+            let should_jail = matches!(
+                &evidence.reason,
                 crate::slashing::SlashingReason::DoubleSign { .. }
-                | crate::slashing::SlashingReason::InvalidStateRoot { .. } => {
-                    v.status = crate::validator::ValidatorStatus::Jailed;
-                }
-                crate::slashing::SlashingReason::Downtime { .. } => {}
+                | crate::slashing::SlashingReason::InvalidStateRoot { .. }
+            );
+
+            if should_jail {
+                v.status = crate::validator::ValidatorStatus::Jailed;
             }
 
             // Reset missed_blocks to prevent double-slash within same epoch.
@@ -920,6 +923,20 @@ impl ConsensusEngine {
                 reason = ?evidence.reason,
                 "validator slashed"
             );
+
+            // Persist slashing to the staking contract so it survives restarts.
+            drop(vs); // Release validator set lock before acquiring store lock.
+            {
+                let mut store = self.store.write().unwrap();
+                let mut staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+                if let Some(sv) = staking.validators.iter_mut().find(|sv| sv.id == evidence.offender) {
+                    sv.self_stake = sv.self_stake.saturating_sub(penalty);
+                    if should_jail {
+                        sv.is_active = false;
+                    }
+                }
+                staking.save(store.as_mut());
+            }
         }
     }
 

@@ -418,7 +418,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Store chain_id for proof type restrictions (e.g., block mock proofs on mainnet).
-    let _ = store.put(b"__chain_id__", &genesis.chain_id.to_le_bytes());
+    // Only write if not already present — avoids overwriting snapshot-restored state.
+    if store.get(b"__chain_id__").ok().flatten().is_none() {
+        let _ = store.put(b"__chain_id__", &genesis.chain_id.to_le_bytes());
+    }
 
     // --- Consensus engine ---
     // Build validator set from genesis config using public keys.

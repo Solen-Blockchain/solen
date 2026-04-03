@@ -753,6 +753,31 @@ impl ConsensusEngine {
         self.chain.write().unwrap().push(block.clone());
         self.persist_block_and_meta(&block);
 
+        // Track missed blocks for downtime slashing.
+        // If the actual proposer differs from the designated proposer,
+        // the designated one missed their slot.
+        {
+            let vs = self.validator_set.read().unwrap();
+            let designated = vs.proposer_for_height(height);
+            drop(vs);
+
+            if let Some(designated_id) = designated {
+                if designated_id != block.header.proposer {
+                    let mut vs = self.validator_set.write().unwrap();
+                    if let Some(evidence) = crate::slashing::record_missed_block(&mut vs, &designated_id) {
+                        drop(vs);
+                        self.process_slashing(&evidence);
+                    }
+                } else {
+                    // Proposer produced on time — reset missed counter.
+                    let mut vs = self.validator_set.write().unwrap();
+                    if let Some(v) = vs.get_mut(&designated_id) {
+                        v.missed_blocks = 0;
+                    }
+                }
+            }
+        }
+
         self.try_epoch_transition(height);
 
         info!(

@@ -8,3 +8,4 @@
 pub mod behaviour;
 pub mod messages;
 pub mod network;
+pub mod reputation;

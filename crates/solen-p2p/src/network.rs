@@ -58,12 +58,18 @@ impl Default for NetworkConfig {
 #[derive(Clone)]
 pub struct NetworkHandle {
     outbound_tx: mpsc::UnboundedSender<NetworkMessage>,
+    reputation_tx: mpsc::UnboundedSender<crate::reputation::ReputationEvent>,
 }
 
 impl NetworkHandle {
     /// Broadcast a message to the gossip network.
     pub fn broadcast(&self, msg: NetworkMessage) -> bool {
         self.outbound_tx.send(msg).is_ok()
+    }
+
+    /// Report a peer reputation event (valid/invalid block or attestation).
+    pub fn report_peer(&self, event: crate::reputation::ReputationEvent) {
+        let _ = self.reputation_tx.send(event);
     }
 }
 
@@ -206,8 +212,10 @@ impl NetworkService {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<NetworkMessage>();
         // Bounded inbound channel — backpressure if processing can't keep up.
         let (inbound_tx, inbound_rx) = mpsc::channel::<NetworkMessage>(4096);
+        // Reputation event channel — node reports valid/invalid peers.
+        let (reputation_tx, mut reputation_rx) = mpsc::unbounded_channel::<crate::reputation::ReputationEvent>();
 
-        let handle = NetworkHandle { outbound_tx };
+        let handle = NetworkHandle { outbound_tx, reputation_tx };
 
         let bootstrap_addrs = config.bootstrap_peers.clone();
 
@@ -221,6 +229,9 @@ impl NetworkService {
             const MAX_GLOBAL_BYTES_PER_SEC: usize = 50 * 1024 * 1024; // 50 MB/s
             let mut global_bytes_window: usize = 0;
             let mut global_bytes_reset = std::time::Instant::now();
+
+            // Peer reputation tracking — bans peers that consistently send bad data.
+            let mut peer_reputation = crate::reputation::PeerReputation::new();
 
             // Periodically run Kademlia bootstrap and redial if needed.
             let mut maintenance_interval = tokio::time::interval(Duration::from_secs(10));
@@ -249,6 +260,16 @@ impl NetworkService {
                         // Clean up stale rate-limit entries.
                         peer_msg_counts.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(30));
                     }
+                    // Process reputation events from the node.
+                    Some(event) = reputation_rx.recv() => {
+                        use crate::reputation::ReputationEvent;
+                        match event {
+                            ReputationEvent::ValidBlock(peer) => peer_reputation.record_valid_block(&peer),
+                            ReputationEvent::InvalidBlock(peer) => peer_reputation.record_invalid_block(&peer),
+                            ReputationEvent::ValidAttestation(peer) => peer_reputation.record_valid_attestation(&peer),
+                            ReputationEvent::InvalidAttestation(peer) => peer_reputation.record_invalid_attestation(&peer),
+                        }
+                    }
                     // Handle outbound messages.
                     Some(msg) = outbound_rx.recv() => {
                         let topic = IdentTopic::new(msg.topic_for_chain(cid));
@@ -264,6 +285,11 @@ impl NetworkService {
                             SwarmEvent::Behaviour(SolenBehaviourEvent::Gossipsub(
                                 gossipsub::Event::Message { message, propagation_source, .. },
                             )) => {
+                                // Check if peer is banned.
+                                if peer_reputation.is_banned(&propagation_source) {
+                                    continue; // silently drop all messages from banned peers
+                                }
+
                                 // Global inbound bytes rate limit.
                                 if global_bytes_reset.elapsed() > Duration::from_secs(1) {
                                     global_bytes_window = 0;
@@ -278,20 +304,26 @@ impl NetworkService {
                                 // Per-peer rate limiting.
                                 let entry = peer_msg_counts.entry(propagation_source).or_insert((0, std::time::Instant::now()));
                                 if entry.1.elapsed() > Duration::from_secs(1) {
-                                    // Reset window.
                                     *entry = (1, std::time::Instant::now());
                                 } else {
                                     entry.0 += 1;
                                     if entry.0 >= MAX_MSGS_PER_PEER_PER_SEC {
+                                        peer_reputation.record_rate_limited(&propagation_source);
                                         debug!(peer = %propagation_source, count = entry.0, "rate-limited peer — dropping message");
                                         continue;
                                     }
                                 }
 
-                                if let Ok(msg) = NetworkMessage::decode(&message.data) {
-                                    // Use try_send to apply backpressure if the inbound channel is full.
-                                    if inbound_tx.try_send(msg).is_err() {
-                                        debug!("inbound channel full — dropping message");
+                                match NetworkMessage::decode(&message.data) {
+                                    Ok(msg) => {
+                                        // Use try_send to apply backpressure if the inbound channel is full.
+                                        if inbound_tx.try_send(msg).is_err() {
+                                            debug!("inbound channel full — dropping message");
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Decode failure — peer sent garbage.
+                                        peer_reputation.record_decode_failure(&propagation_source);
                                     }
                                 }
                             }

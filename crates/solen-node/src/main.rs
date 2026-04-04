@@ -733,7 +733,7 @@ async fn main() -> anyhow::Result<()> {
                                     })
                                     .collect();
 
-                                tracing::info!(
+                                tracing::debug!(
                                     from = from_height,
                                     count = sync_blocks.len(),
                                     "serving sync blocks to peer"

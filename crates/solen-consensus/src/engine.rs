@@ -1423,8 +1423,14 @@ impl ConsensusEngine {
 /// Hash a block header to get the block hash.
 /// Panics if serialization fails — a block header must always be serializable.
 /// A fallback hash would create collisions between blocks at the same height.
+/// Hash a block header. The proposer_signature is excluded so that the
+/// hash is the same whether or not the block is signed — this prevents
+/// consensus breaks during rolling upgrades where some validators sign
+/// and others don't yet.
 pub fn block_hash(header: &BlockHeader) -> Hash {
-    let data = serde_json::to_vec(header)
+    let mut h = header.clone();
+    h.proposer_signature = vec![];
+    let data = serde_json::to_vec(&h)
         .expect("block header serialization must not fail");
     blake3_hash(&data)
 }

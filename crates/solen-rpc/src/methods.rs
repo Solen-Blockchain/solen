@@ -836,7 +836,7 @@ impl SolenApiServer for SolenRpc {
         let config_burn_rate = read_config_u64(store.as_ref(), b"__config_burn_rate__")
             .unwrap_or(5000); // default 50%
         let config_base_fee = read_config_u128(store.as_ref(), b"__config_base_fee__")
-            .unwrap_or(0);
+            .unwrap_or(1); // default: 1 base unit per gas
 
         Ok(ChainStatus {
             height: self.engine.height(),

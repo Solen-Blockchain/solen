@@ -621,17 +621,32 @@ impl ConsensusEngine {
 
             let pending = self.pending_blocks.read().unwrap();
             if let Some(existing) = pending.get(&header.height) {
-                if block_hash(&existing.header) != block_hash(header) {
-                    // Different block at same height. If we produced ours, keep it.
-                    // If peer produced theirs, we have a conflict.
-                    // Either way, don't replace what we have.
-                    debug!(
-                        height = header.height,
-                        "conflicting block at same height — keeping existing"
-                    );
+                let existing_hash = block_hash(&existing.header);
+                let existing_header = existing.header.clone();
+                let is_same_proposer = existing.header.proposer == header.proposer;
+                drop(pending);
+
+                if existing_hash != block_hash(header) {
+                    // Different block at same height from the same proposer = double-sign.
+                    if is_same_proposer {
+                        if let Some(evidence) = crate::slashing::check_double_sign(&existing_header, header) {
+                            warn!(
+                                height = header.height,
+                                proposer = ?&header.proposer[..4],
+                                "DOUBLE SIGN DETECTED — queuing slashing evidence"
+                            );
+                            self.process_slashing(&evidence);
+                        }
+                    } else {
+                        debug!(
+                            height = header.height,
+                            "conflicting block at same height from different proposers — keeping existing"
+                        );
+                    }
                 }
                 return false;
             }
+            drop(pending);
         }
 
         // Store as pending WITHOUT executing. Execution happens on finalization.
@@ -792,14 +807,14 @@ impl ConsensusEngine {
                     proposer = ?&pb.header.proposer[..4],
                     ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
-                    "state root mismatch on finalization — proposer may be byzantine"
+                    "state root mismatch on finalization — REJECTING block (proposer may be byzantine)"
                 );
-                // Log the evidence but do NOT apply slashing here.
-                // Slashing modifies the staking contract in the store, which
-                // would cause state divergence — other nodes that don't detect
-                // the mismatch won't apply the slash, so their next block starts
-                // from different state. Slashing must be applied deterministically
-                // through on-chain evidence submission, not as a finalization side-effect.
+                // Reject the block entirely. A state root mismatch means the
+                // proposer computed a different result than us. Finalizing it
+                // would silently fork our state from the network. The block is
+                // discarded and the chain will advance via the next proposer
+                // or force-finalization timeout.
+                return;
             }
 
             exec_result

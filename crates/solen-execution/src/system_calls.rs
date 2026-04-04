@@ -300,6 +300,13 @@ fn execute_staking_call(
             };
             let penalty_bps = read_u64(args, 32).unwrap_or(100); // default 1%
 
+            // Cap penalty to maximum allowed (10% for double-sign).
+            // Prevents a malicious proposer from draining 100% of a validator's stake.
+            const MAX_SLASH_BPS: u64 = 1000; // 10%
+            if penalty_bps > MAX_SLASH_BPS {
+                return err("slash penalty exceeds maximum (10%)");
+            }
+
             if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
                 // Skip if already slashed (prevents duplicate slash txs from
                 // multiple proposers all applying penalties).

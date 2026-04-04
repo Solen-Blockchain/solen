@@ -661,3 +661,193 @@ fn session_key_cannot_deploy() {
         "session key must NOT be able to deploy contracts"
     );
 }
+
+// ── Test #23: Session key cannot call guardian recovery ───────
+
+#[test]
+fn session_key_cannot_call_guardian() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x0A; 32]);
+    let session_kp = Keypair::from_seed(&[0x0B; 32]);
+    let owner = owner_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 1_000_000_000,
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 1_000_000_000,
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let guardian_addr = solen_types::system::GUARDIAN_ADDRESS;
+
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: guardian_addr,
+            method: "initiate_recovery".to_string(),
+            args: vec![0; 96],
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+
+    let msg = executor.operation_signing_message(&op);
+    op.signature = session_kp.sign(&msg).to_vec();
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "session key must NOT be able to call guardian recovery"
+    );
+    assert!(
+        result.receipts[0].error.as_ref().unwrap().contains("guardian"),
+        "error should mention guardian restriction"
+    );
+}
+
+// ── Test #24: Session key cannot create governance proposals ──
+
+#[test]
+fn session_key_cannot_create_proposal() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x0A; 32]);
+    let session_kp = Keypair::from_seed(&[0x0B; 32]);
+    let owner = owner_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 1_000_000_000,
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 1_000_000_000,
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let gov_addr = solen_types::system::GOVERNANCE_ADDRESS;
+
+    // Try propose_block_time
+    let mut args = Vec::new();
+    args.extend_from_slice(&3000u64.to_le_bytes()); // new_block_time_ms
+    args.extend_from_slice(b"test proposal");
+
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "propose_block_time".to_string(),
+            args,
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+
+    let msg = executor.operation_signing_message(&op);
+    op.signature = session_kp.sign(&msg).to_vec();
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "session key must NOT be able to create governance proposals"
+    );
+    assert!(
+        result.receipts[0].error.as_ref().unwrap().contains("governance"),
+        "error should mention governance restriction"
+    );
+}
+
+// ── Test #25: Flash-vote prevention (new stake not eligible) ─
+
+#[test]
+fn flash_vote_rejected_for_new_stake() {
+    let mut store = MemoryStore::new();
+    let voter_kp = Keypair::from_seed(&[0x0A; 32]);
+    let voter = voter_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: voter,
+            balance: 100_000_000_000_000, // 1M SOLEN
+            auth_methods: vec![AuthMethod::Ed25519 { public_key: voter }],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+
+    // Step 1: Register as validator (this sets eligible_from_epoch = current_epoch + 1).
+    let staking_addr = solen_types::system::STAKING_ADDRESS;
+    let stake_amount: u128 = 50_000_000_000_000; // 500K SOLEN
+    let mut register_args = Vec::new();
+    register_args.extend_from_slice(&stake_amount.to_le_bytes());
+
+    let mut op1 = UserOperation {
+        sender: voter,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "register".to_string(),
+            args: register_args,
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    sign_op(&voter_kp, &executor, &mut op1);
+
+    // Step 2: Immediately try to vote (same block).
+    let gov_addr = solen_types::system::GOVERNANCE_ADDRESS;
+    let mut vote_args = Vec::new();
+    vote_args.extend_from_slice(&0u64.to_le_bytes()); // proposal_id
+    vote_args.push(1u8); // support
+    vote_args.extend_from_slice(&stake_amount.to_le_bytes()); // weight
+
+    let mut op2 = UserOperation {
+        sender: voter,
+        nonce: 1,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "vote".to_string(),
+            args: vote_args,
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    sign_op(&voter_kp, &executor, &mut op2);
+
+    // Execute both in the same block (flash-vote attempt).
+    let result = executor.execute_block(&mut store, &[op1, op2]);
+
+    // Registration should succeed.
+    assert!(result.receipts[0].success, "registration should succeed");
+    // Vote should fail — stake is not yet eligible (eligible_from_epoch > current).
+    assert!(
+        !result.receipts[1].success,
+        "flash-vote must be rejected: new stake is not yet eligible"
+    );
+}

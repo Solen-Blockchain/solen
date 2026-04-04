@@ -917,10 +917,16 @@ impl SolenApiServer for SolenRpc {
             ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>)
         })?;
 
-        let sig_bytes = if let Some(hex) = &req.signature {
-            hex_decode(hex).unwrap_or_default()
-        } else {
-            vec![]
+        // Solver signature is mandatory for RPC submissions.
+        // Only the built-in solver (in-process) may omit the signature.
+        let sig_bytes = match &req.signature {
+            Some(hex) if !hex.is_empty() => hex_decode(hex).unwrap_or_default(),
+            _ => {
+                return Ok(SolutionSubmitResult {
+                    accepted: false,
+                    error: Some("solver signature is required".to_string()),
+                });
+            }
         };
 
         let solution = solen_intents::types::Solution {

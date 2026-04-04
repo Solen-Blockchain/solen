@@ -542,17 +542,20 @@ fn execute_governance_call(
             let claimed_weight = read_u128(args, 9).unwrap_or(1);
             let epoch = read_current_epoch(store);
 
-            // Cap vote weight at voter's actual stake (self-stake + delegations).
-            // Prevents voting with arbitrary weight.
+            // Cap vote weight at voter's actual stake that was committed BEFORE
+            // the current epoch. This prevents flash-vote attacks where an attacker
+            // stakes, votes, and unstakes in the same block.
             let actual_stake = {
                 use solen_system_contracts::staking::StakingContract;
                 let staking = StakingContract::load(store);
                 let validator_stake: u128 = staking.validators.iter()
                     .filter(|v| v.id == *sender && v.is_active)
+                    .filter(|v| v.eligible_from_epoch <= epoch)
                     .map(|v| v.total_stake())
                     .sum();
                 let delegated_stake: u128 = staking.delegations.iter()
                     .filter(|d| d.delegator == *sender)
+                    .filter(|d| d.eligible_from_epoch <= epoch)
                     .map(|d| d.amount)
                     .sum();
                 validator_stake.saturating_add(delegated_stake)

@@ -123,6 +123,9 @@ pub struct ConsensusEngine {
     proof_registry: Arc<RwLock<ProofVerifierRegistry>>,
     /// Queued slashing evidence to include in the next block.
     pending_slashing: Arc<std::sync::Mutex<Vec<crate::slashing::SlashingEvidence>>>,
+    /// Buffered attestations for blocks not yet received. Bounded and time-limited
+    /// to prevent memory exhaustion while allowing out-of-order gossip delivery.
+    early_attestations: Arc<RwLock<Vec<(ValidatorId, u64, Hash, std::time::Instant)>>>,
     /// Trusted checkpoints for long-range attack protection.
     trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
 }
@@ -201,6 +204,7 @@ impl ConsensusEngine {
                 Arc::new(RwLock::new(reg))
             },
             pending_slashing: Arc::new(std::sync::Mutex::new(Vec::new())),
+            early_attestations: Arc::new(RwLock::new(Vec::new())),
             trusted_checkpoints: match chain_id {
                 1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
                 9000 => crate::checkpoint::TrustedCheckpoints::testnet(),
@@ -649,6 +653,21 @@ impl ConsensusEngine {
             "accepted block from peer"
         );
 
+        // Drain any early-buffered attestations that match this block.
+        let bh = block_hash(header);
+        let early: Vec<(ValidatorId, u64, Hash)> = {
+            let mut buf = self.early_attestations.write().unwrap();
+            let matching: Vec<_> = buf.iter()
+                .filter(|(_, h, hash, _)| *h == header.height && *hash == bh)
+                .map(|(v, h, hash, _)| (*v, *h, *hash))
+                .collect();
+            buf.retain(|(_, h, _, _)| *h != header.height);
+            matching
+        };
+        for (vid, height, hash) in early {
+            self.accept_attestation(vid, height, hash);
+        }
+
         true
     }
 
@@ -678,13 +697,20 @@ impl ConsensusEngine {
                     }
                 }
                 None => {
-                    // We don't have this block yet. Reject the attestation.
-                    // The attestation will be re-sent when we receive the actual block,
-                    // or we'll get the block and self-attest + broadcast.
-                    debug!(
-                        height = block_height,
-                        "attestation for unknown block — ignoring (block not yet received)"
-                    );
+                    // We don't have this block yet. Buffer for short period
+                    // to handle out-of-order gossip delivery. Bounded to prevent
+                    // memory exhaustion from attestation spam.
+                    const MAX_EARLY_ATTESTATIONS: usize = 200;
+                    const EARLY_ATT_TTL_SECS: u64 = 10;
+                    let mut buf = self.early_attestations.write().unwrap();
+                    // Expire old entries.
+                    buf.retain(|(_, _, _, t)| t.elapsed().as_secs() < EARLY_ATT_TTL_SECS);
+                    if buf.len() < MAX_EARLY_ATTESTATIONS {
+                        // Dedup before inserting.
+                        if !buf.iter().any(|(v, h, _, _)| *v == validator_id && *h == block_height) {
+                            buf.push((validator_id, block_height, attested_hash, std::time::Instant::now()));
+                        }
+                    }
                     return false;
                 }
             }

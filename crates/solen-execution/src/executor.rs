@@ -734,8 +734,8 @@ impl BlockExecutor {
                 }
             }
 
-            // Session keys must NEVER be able to change auth methods or deploy code.
-            // These are privileged operations requiring full account authorization.
+            // Session keys must NEVER be able to perform privileged operations.
+            // These require full account authorization (Ed25519/Threshold/Passkey).
             for action in &op.actions {
                 match action {
                     Action::SetAuth { .. } => {
@@ -747,6 +747,24 @@ impl BlockExecutor {
                         return Err(ExecutionError::State(StateError::AccountNotFound(
                             "session keys cannot deploy contracts".into(),
                         )));
+                    }
+                    Action::Call { target, method, .. } => {
+                        // Block guardian recovery operations — a session key holder
+                        // who is also a guardian could bypass SetAuth restrictions
+                        // by initiating recovery to replace the account's auth.
+                        if *target == solen_types::system::GUARDIAN_ADDRESS {
+                            return Err(ExecutionError::State(StateError::AccountNotFound(
+                                "session keys cannot call guardian recovery".into(),
+                            )));
+                        }
+                        // Block direct governance proposal creation (requires stake commitment).
+                        if *target == solen_types::system::GOVERNANCE_ADDRESS
+                            && (method.starts_with("propose") || method == "execute")
+                        {
+                            return Err(ExecutionError::State(StateError::AccountNotFound(
+                                "session keys cannot create or execute governance proposals".into(),
+                            )));
+                        }
                     }
                     _ => {}
                 }

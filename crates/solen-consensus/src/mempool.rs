@@ -74,6 +74,10 @@ impl Mempool {
         }
     }
 
+    /// Maximum serialized size of a single operation (256 KB).
+    /// Prevents memory exhaustion from operations with huge code or args.
+    const MAX_OP_SIZE: usize = 256 * 1024;
+
     /// Add an operation to the mempool. Returns false if pool is full, duplicate,
     /// or if the operation is a system-reserved intent operation.
     pub fn submit(&self, op: UserOperation) -> bool {
@@ -84,6 +88,17 @@ impl Mempool {
                 sender = ?&op.sender[..4],
                 "rejected [0xFF] system signature from external submission"
             );
+            return false;
+        }
+
+        // Reject oversized operations (prevent memory exhaustion).
+        let op_size: usize = op.signature.len()
+            + op.actions.iter().map(|a| match a {
+                solen_types::transaction::Action::Deploy { code, .. } => code.len() + 32,
+                solen_types::transaction::Action::Call { args, method, .. } => args.len() + method.len() + 32,
+                _ => 64,
+            }).sum::<usize>();
+        if op_size > Self::MAX_OP_SIZE {
             return false;
         }
 

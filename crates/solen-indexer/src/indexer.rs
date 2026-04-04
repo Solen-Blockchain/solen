@@ -34,6 +34,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
         timestamp_ms: block.header.timestamp_ms,
         tx_count: block.result.receipts.len(),
         gas_used: block.result.gas_used,
+        attestation_count: block.attestations.len(),
     };
     // Track proposer stats.
     let proposer_hex = hex(&block.header.proposer);

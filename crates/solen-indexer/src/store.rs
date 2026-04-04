@@ -15,6 +15,10 @@ pub struct IndexedBlock {
     pub timestamp_ms: u64,
     pub tx_count: usize,
     pub gas_used: u64,
+    /// Number of validator attestations. Blocks with fewer attestations than
+    /// the quorum threshold were force-finalized after timeout.
+    #[serde(default)]
+    pub attestation_count: usize,
 }
 
 /// An indexed transaction/operation.

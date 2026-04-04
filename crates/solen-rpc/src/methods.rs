@@ -338,10 +338,42 @@ struct CachedSnapshot {
     info: SnapshotInfo,
 }
 
+/// Per-method rate limiter: tracks call counts per second.
+struct RpcRateLimiter {
+    /// (call_count, window_start)
+    submit_ops: std::sync::Mutex<(u64, std::time::Instant)>,
+    submit_solutions: std::sync::Mutex<(u64, std::time::Instant)>,
+    snapshots: std::sync::Mutex<(u64, std::time::Instant)>,
+}
+
+impl RpcRateLimiter {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            submit_ops: std::sync::Mutex::new((0, now)),
+            submit_solutions: std::sync::Mutex::new((0, now)),
+            snapshots: std::sync::Mutex::new((0, now)),
+        }
+    }
+
+    /// Check and increment rate limit. Returns true if allowed.
+    fn check(counter: &std::sync::Mutex<(u64, std::time::Instant)>, max_per_sec: u64) -> bool {
+        let mut guard = counter.lock().unwrap();
+        if guard.1.elapsed() > std::time::Duration::from_secs(1) {
+            *guard = (1, std::time::Instant::now());
+            true
+        } else {
+            guard.0 += 1;
+            guard.0 <= max_per_sec
+        }
+    }
+}
+
 /// Implementation of the Solen RPC API.
 pub struct SolenRpc {
     engine: Arc<ConsensusEngine>,
     snapshot_cache: Arc<std::sync::Mutex<Option<CachedSnapshot>>>,
+    rate_limiter: Arc<RpcRateLimiter>,
 }
 
 /// Minimum blocks between snapshot regenerations.
@@ -395,7 +427,11 @@ impl SolenRpc {
             }
         });
 
-        Self { engine, snapshot_cache: cache }
+        Self {
+            engine,
+            snapshot_cache: cache,
+            rate_limiter: Arc::new(RpcRateLimiter::new()),
+        }
     }
 }
 
@@ -507,6 +543,14 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_operation(&self, op: UserOperation) -> RpcResult<SubmitResult> {
+        // Rate limit: max 50 submissions per second globally.
+        if !RpcRateLimiter::check(&self.rate_limiter.submit_ops, 50) {
+            return Ok(SubmitResult {
+                accepted: false,
+                error: Some("rate limited — too many submissions, try again".to_string()),
+            });
+        }
+
         // Validate nonce before accepting into mempool.
         {
             let store = self.engine.store();
@@ -532,6 +576,14 @@ impl SolenApiServer for SolenRpc {
                                     "nonce too far ahead: got {}, current is {}",
                                     op.nonce, account.nonce
                                 )),
+                            });
+                        }
+                        // Reject operations from accounts with zero balance.
+                        // Prevents mempool spam from unfunded accounts.
+                        if account.balance == 0 {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some("sender has zero balance".to_string()),
                             });
                         }
                     }
@@ -912,6 +964,14 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_solution(&self, req: SolutionRequest) -> RpcResult<SolutionSubmitResult> {
+        // Rate limit: max 20 solution submissions per second.
+        if !RpcRateLimiter::check(&self.rate_limiter.submit_solutions, 20) {
+            return Ok(SolutionSubmitResult {
+                accepted: false,
+                error: Some("rate limited — too many solution submissions".to_string()),
+            });
+        }
+
         let solver = parse_account_id(&req.solver)?;
         let claimed_tip: u128 = req.claimed_tip.parse().map_err(|_| {
             ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>)
@@ -1137,6 +1197,15 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn get_snapshot(&self) -> RpcResult<SnapshotInfo> {
+        // Rate limit: max 2 snapshot requests per second (10 MB responses).
+        if !RpcRateLimiter::check(&self.rate_limiter.snapshots, 2) {
+            return Err(ErrorObjectOwned::owned(
+                -32000,
+                "rate limited — snapshot requests throttled",
+                None::<()>,
+            ));
+        }
+
         let height = self.engine.height();
 
         // Return cached snapshot if it's recent enough.

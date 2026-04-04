@@ -21,6 +21,9 @@ pub async fn start_rpc_server(
     addr: SocketAddr,
     engine: Arc<ConsensusEngine>,
 ) -> Result<jsonrpsee::server::ServerHandle, RpcError> {
+    // Per-IP rate limiting should be configured at the reverse proxy layer
+    // (nginx/caddy) in production. The RPC server provides global rate limits
+    // via RpcRateLimiter on write operations (submit_operation, submit_solution).
     let server = Server::builder()
         .max_connections(100)
         .max_request_body_size(1024 * 1024) // 1 MB max request

@@ -104,7 +104,24 @@ impl Mempool {
 
         let mut pool = self.inner.lock().unwrap();
         if pool.entries.len() >= self.max_size {
-            return false;
+            // Fee-based eviction: if the new op has a higher fee than the
+            // lowest-fee entry, evict the lowest to make room.
+            if let Some(lowest) = pool.entries.last() {
+                if op.max_fee > lowest.op.max_fee {
+                    let evicted = pool.entries.pop_last().unwrap();
+                    pool.seen.remove(&(evicted.op.sender, evicted.op.nonce));
+                    if let Some(count) = pool.sender_counts.get_mut(&evicted.op.sender) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            pool.sender_counts.remove(&evicted.op.sender);
+                        }
+                    }
+                } else {
+                    return false; // New op has lower fee than all existing entries.
+                }
+            } else {
+                return false;
+            }
         }
 
         // Per-sender limit to prevent single-sender spam.

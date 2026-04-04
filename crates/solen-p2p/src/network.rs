@@ -378,6 +378,7 @@ mod tests {
                 receipts_root: [0; 32],
                 proposer: [2; 32],
                 timestamp_ms: 12345,
+                proposer_signature: vec![],
             },
             operations: vec![],
             tx_count: 5,

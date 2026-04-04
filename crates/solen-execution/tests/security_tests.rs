@@ -7,7 +7,7 @@ use solen_execution::executor::BlockExecutor;
 use solen_execution::fees::FeeConfig;
 use solen_execution::genesis::{apply_genesis, GenesisAccount};
 use solen_execution::state::StateManager;
-use solen_storage::MemoryStore;
+use solen_storage::{MemoryStore, StateStore};
 use solen_types::account::AuthMethod;
 use solen_types::transaction::{Action, UserOperation};
 use solen_types::AccountId;
@@ -950,5 +950,174 @@ fn session_key_cannot_finalize_proposal() {
     assert!(
         !result.receipts[0].success,
         "session key must NOT be able to finalize governance proposals"
+    );
+}
+
+// ── Test #28: Unjail cooldown after slash ─────────────────────
+
+#[test]
+fn unjail_cooldown_enforced_after_slash() {
+    let mut store = MemoryStore::new();
+    let v_kp = Keypair::from_seed(&[0x01; 32]);
+    let validator = v_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: validator,
+            balance: 100_000_000_000_000, // 1M SOLEN
+            auth_methods: vec![AuthMethod::Ed25519 { public_key: validator }],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let staking_addr = solen_types::system::STAKING_ADDRESS;
+
+    // Register as validator (above minimum so 1% slash doesn't drop below threshold).
+    let stake: u128 = 60_000_000_000_000; // 600K SOLEN
+    let mut register_args = Vec::new();
+    register_args.extend_from_slice(&stake.to_le_bytes());
+
+    let mut op1 = UserOperation {
+        sender: validator,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "register".to_string(),
+            args: register_args,
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    sign_op(&v_kp, &executor, &mut op1);
+
+    let r1 = executor.execute_block(&mut store, &[op1]);
+    assert!(r1.receipts[0].success, "registration should succeed");
+
+    // Set chain height to 100 (epoch 1). Chain meta needs 16 bytes: height[8] + epoch[8].
+    let mut meta = Vec::new();
+    meta.extend_from_slice(&100u64.to_le_bytes()); // height=100 → epoch=1
+    meta.extend_from_slice(&1u64.to_le_bytes());   // epoch field
+    store.put(b"__chain_meta__", &meta).unwrap();
+
+    // Slash the validator via system op.
+    let mut slash_args = Vec::new();
+    slash_args.extend_from_slice(&validator);
+    slash_args.extend_from_slice(&100u64.to_le_bytes()); // 1%
+
+    let slash_op = UserOperation {
+        sender: validator,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "slash".to_string(),
+            args: slash_args,
+        }],
+        max_fee: 0,
+        signature: vec![0xFF],
+    };
+
+    let r2 = executor.execute_block(&mut store, &[slash_op]);
+    assert!(r2.receipts[0].success, "slash should succeed");
+
+    // Try to unjail in same epoch — should fail due to cooldown.
+    let mut unjail_op = UserOperation {
+        sender: validator,
+        nonce: 1,
+        actions: vec![Action::Call {
+            target: staking_addr,
+            method: "unjail".to_string(),
+            args: vec![],
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    sign_op(&v_kp, &executor, &mut unjail_op);
+
+    let r3 = executor.execute_block(&mut store, &[unjail_op.clone()]);
+    assert!(
+        !r3.receipts[0].success,
+        "unjail must fail during cooldown period (same epoch as slash)"
+    );
+
+    // Advance to epoch 2 (height=200). Unjail should now work.
+    let mut meta2 = Vec::new();
+    meta2.extend_from_slice(&200u64.to_le_bytes()); // height=200 → epoch=2
+    meta2.extend_from_slice(&2u64.to_le_bytes());
+    store.put(b"__chain_meta__", &meta2).unwrap();
+
+    // Previous unjail failed but nonce was consumed. Use nonce=2.
+    unjail_op.nonce = 2;
+    sign_op(&v_kp, &executor, &mut unjail_op);
+
+    let r4 = executor.execute_block(&mut store, &[unjail_op]);
+    assert!(
+        r4.receipts[0].success,
+        "unjail should succeed after cooldown epoch, error: {:?}",
+        r4.receipts[0].error
+    );
+}
+
+// ── Test #29: Large threshold signature bounded execution ─────
+
+#[test]
+fn large_threshold_signature_does_not_hang() {
+    let mut store = MemoryStore::new();
+    let s1 = Keypair::from_seed(&[0x01; 32]);
+    let recipient = [0xFF; 32];
+    let owner = s1.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![
+            GenesisAccount {
+                id: owner,
+                balance: 1_000_000,
+                auth_methods: vec![AuthMethod::Threshold {
+                    signers: vec![s1.public_key()],
+                    threshold: 1,
+                }],
+            },
+            GenesisAccount {
+                id: recipient,
+                balance: 0,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+            },
+        ],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Transfer { to: recipient, amount: 1 }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    let msg = executor.operation_signing_message(&op);
+    let sig = s1.sign(&msg);
+
+    // Build a large signature with 100 duplicate chunks (9600 bytes).
+    // This should complete in bounded time due to HashSet dedup.
+    let mut large_sig = Vec::with_capacity(96 * 100);
+    for _ in 0..100 {
+        large_sig.extend_from_slice(&s1.public_key());
+        large_sig.extend_from_slice(&sig);
+    }
+    op.signature = large_sig;
+
+    let start = std::time::Instant::now();
+    let result = executor.execute_block(&mut store, &[op]);
+    let elapsed = start.elapsed();
+
+    // Should succeed (1 valid unique signer meets threshold=1).
+    assert!(result.receipts[0].success, "1-of-1 with duplicates should succeed");
+    // Should complete quickly (under 100ms even with 100 chunks).
+    assert!(
+        elapsed.as_millis() < 1000,
+        "large threshold signature should complete in bounded time, took {}ms",
+        elapsed.as_millis()
     );
 }

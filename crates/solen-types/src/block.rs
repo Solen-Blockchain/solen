@@ -14,4 +14,9 @@ pub struct BlockHeader {
     pub receipts_root: Hash,
     pub proposer: ValidatorId,
     pub timestamp_ms: u64,
+    /// Ed25519 signature over the header fields (excluding this field).
+    /// Proves the proposer actually authored this block. Optional for
+    /// backward compatibility during the rollout period.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposer_signature: Vec<u8>,
 }

@@ -108,6 +108,8 @@ pub struct ConsensusEngine {
     store: Arc<RwLock<Box<dyn StateStore>>>,
     mempool: Mempool,
     executor: BlockExecutor,
+    /// Keypair for signing block headers. Optional — non-validator nodes don't sign.
+    signing_keypair: Option<solen_crypto::Keypair>,
     chain: Arc<RwLock<Vec<FinalizedBlock>>>,
     validator_set: Arc<RwLock<ValidatorSet>>,
     epoch_manager: Arc<RwLock<EpochManager>>,
@@ -169,6 +171,7 @@ impl ConsensusEngine {
                     receipts_root: [0u8; 32],
                     proposer: [0u8; 32],
                     timestamp_ms: 0,
+                    proposer_signature: vec![],
                 },
                 result: BlockResult {
                     state_root: store.state_root(),
@@ -191,6 +194,7 @@ impl ConsensusEngine {
             store: Arc::new(RwLock::new(store)),
             mempool,
             executor: BlockExecutor::new().with_chain_id(chain_id),
+            signing_keypair: None, // set via set_signing_keypair() after construction
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),
             epoch_manager: Arc::new(RwLock::new(epoch_manager)),
@@ -215,6 +219,11 @@ impl ConsensusEngine {
 
     pub fn validator_id(&self) -> ValidatorId {
         self.config.validator_id
+    }
+
+    /// Set the signing keypair for block header signatures.
+    pub fn set_signing_keypair(&mut self, kp: solen_crypto::Keypair) {
+        self.signing_keypair = Some(kp);
     }
 
     pub fn store(&self) -> Arc<RwLock<Box<dyn StateStore>>> {
@@ -393,7 +402,7 @@ impl ConsensusEngine {
             em.epoch_for_height(height)
         };
 
-        let header = BlockHeader {
+        let mut header = BlockHeader {
             height,
             epoch,
             parent_hash,
@@ -402,7 +411,15 @@ impl ConsensusEngine {
             receipts_root: compute_receipts_root(&result),
             proposer: self.config.validator_id,
             timestamp_ms: now_ms(),
+            proposer_signature: vec![],
         };
+        // Sign the header (signature covers all fields except itself).
+        // This proves the proposer actually authored the block and prevents
+        // attribution attacks where a relay changes the proposer field.
+        if let Some(ref kp) = self.signing_keypair {
+            let bh_for_sig = block_hash(&header);
+            header.proposer_signature = kp.sign(&bh_for_sig).to_vec();
+        }
 
         let bh = block_hash(&header);
 
@@ -793,12 +810,14 @@ impl ConsensusEngine {
             })
         } else {
             // Received from peer — execute now (Tendermint "Commit" phase).
-            let exec_result = {
-                let mut store = self.store.write().unwrap();
-                self.executor.execute_block_with_height(
-                    store.as_mut(), &pb.operations, height,
-                )
-            };
+            // Take a snapshot BEFORE execution so we can rollback on state root mismatch.
+            // Without this, a rejected block would leave the store in a corrupted state.
+            let mut store = self.store.write().unwrap();
+            let pre_snapshot = store.snapshot();
+
+            let exec_result = self.executor.execute_block_with_height(
+                store.as_mut(), &pb.operations, height,
+            );
 
             // Verify state root matches the proposer's claim.
             if exec_result.state_root != pb.header.state_root {
@@ -807,15 +826,19 @@ impl ConsensusEngine {
                     proposer = ?&pb.header.proposer[..4],
                     ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
-                    "state root mismatch on finalization — REJECTING block (proposer may be byzantine)"
+                    "state root mismatch on finalization — ROLLING BACK and rejecting block"
                 );
-                // Reject the block entirely. A state root mismatch means the
-                // proposer computed a different result than us. Finalizing it
-                // would silently fork our state from the network. The block is
-                // discarded and the chain will advance via the next proposer
-                // or force-finalization timeout.
+                // Restore store to pre-execution state.
+                if let Ok(entries) = pre_snapshot.scan_all() {
+                    for (k, v) in entries {
+                        let _ = store.put(&k, &v);
+                    }
+                }
+                store.commit_root();
+                drop(store);
                 return;
             }
+            drop(store);
 
             exec_result
         };
@@ -1718,6 +1741,7 @@ mod tests {
             receipts_root: [0u8; 32],
             proposer: v1,
             timestamp_ms: 12345,
+            proposer_signature: vec![],
         };
 
         // Accept the block (no operations, so state root should match).

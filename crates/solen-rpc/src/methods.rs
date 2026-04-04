@@ -704,7 +704,10 @@ impl SolenApiServer for SolenRpc {
         let vm = solen_vm::runtime::VmRuntime::new()
             .map_err(|e| internal_error(e))?;
 
-        match vm.execute(&account.code_hash, &bytecode, &input, ctx, None) {
+        // Use a reduced fuel limit for view calls (read-only, no state changes).
+        // Prevents CPU amplification attacks via expensive callView loops.
+        const VIEW_FUEL_LIMIT: u64 = 500_000;
+        match vm.execute(&account.code_hash, &bytecode, &input, ctx, Some(VIEW_FUEL_LIMIT)) {
             Ok(result) => Ok(CallViewResult {
                 success: true,
                 return_data: hex_encode(&result.return_data),
@@ -1209,10 +1212,10 @@ impl SolenApiServer for SolenRpc {
         let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
             .map_err(|e| internal_error(e.to_string()))?;
 
-        // Cap snapshot size to prevent OOM from base64 encoding huge states.
-        // 1 GB compressed covers millions of accounts. If the chain outgrows
-        // this, switch to a streaming HTTP endpoint instead of JSON-RPC.
-        const MAX_SNAPSHOT_RESPONSE: usize = 1024 * 1024 * 1024; // 1 GB
+        // Cap snapshot size before base64 encoding. The JSON-RPC response limit
+        // is 10 MB, and base64 adds ~33% overhead, so max compressed snapshot is ~7 MB.
+        // For larger states, nodes should use direct P2P sync instead of RPC snapshots.
+        const MAX_SNAPSHOT_RESPONSE: usize = 7 * 1024 * 1024; // 7 MB compressed
         if data.len() > MAX_SNAPSHOT_RESPONSE {
             return Err(internal_error(format!(
                 "snapshot too large ({} MB), use direct sync instead",

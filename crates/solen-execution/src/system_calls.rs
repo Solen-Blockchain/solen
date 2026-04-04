@@ -316,6 +316,9 @@ fn execute_staking_call(
                 let penalty = val.self_stake.saturating_mul(penalty_bps as u128) / 10_000;
                 val.self_stake = val.self_stake.saturating_sub(penalty);
                 val.is_active = false;
+                // Set cooldown: validator can't unjail until next epoch.
+                let current_epoch = read_current_epoch(store);
+                val.eligible_from_epoch = current_epoch + 1;
 
                 // Send slashed funds to treasury (can be restored via governance).
                 if penalty > 0 {
@@ -344,7 +347,18 @@ fn execute_staking_call(
             }
         }
         "unjail" => {
-            // No args — sender is the validator requesting reactivation.
+            // Unjail cooldown: validators must wait at least 1 epoch after being
+            // slashed before reactivating. Prevents slash-unjail-slash drain loops.
+            let current_epoch = read_current_epoch(store);
+            if let Some(val) = staking.validators.iter().find(|v| v.id == *sender) {
+                if !val.is_active && val.eligible_from_epoch > current_epoch {
+                    return err(&format!(
+                        "unjail cooldown: wait until epoch {} (current: {})",
+                        val.eligible_from_epoch, current_epoch
+                    ));
+                }
+            }
+
             match staking.unjail(sender) {
                 Ok(()) => {
                     events.push(Event {

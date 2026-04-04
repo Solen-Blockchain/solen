@@ -165,6 +165,7 @@ mod tests {
             receipts_root: [0; 32],
             proposer: vid(1),
             timestamp_ms: 0,
+            proposer_signature: vec![],
         };
         let header_b = BlockHeader {
             height: 10,
@@ -175,6 +176,7 @@ mod tests {
             receipts_root: [0; 32],
             proposer: vid(1),
             timestamp_ms: 0,
+            proposer_signature: vec![],
         };
 
         let evidence = check_double_sign(&header_a, &header_b);

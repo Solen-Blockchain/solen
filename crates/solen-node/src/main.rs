@@ -490,7 +490,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mempool = Mempool::new(10_000);
-    let engine = Arc::new(ConsensusEngine::with_validators(config, store, mempool, validator_set));
+    let mut engine_raw = ConsensusEngine::with_validators(config, store, mempool, validator_set);
+    // Set signing keypair for block header signatures (proves proposer authored the block).
+    engine_raw.set_signing_keypair(Keypair::from_seed(&validator_seed));
+    let engine = Arc::new(engine_raw);
 
     // Reconcile in-memory validator set with on-chain staking state.
     // After a restart, the in-memory set is from genesis and doesn't know

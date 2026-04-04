@@ -80,7 +80,15 @@ impl ValidatorSet {
         self.proposer_for_height_with_seed(height, &[0u8; 32])
     }
 
-    /// Proposer selection with explicit epoch seed.
+    /// Stake-weighted proposer selection with epoch seed randomization.
+    ///
+    /// Validators are selected proportional to their stake. A validator with
+    /// 2x the stake of another gets ~2x the proposer slots over time. The
+    /// epoch seed (derived from previous epoch's last block) ensures the
+    /// schedule is unpredictable more than 1 epoch in advance.
+    ///
+    /// Algorithm: compute a deterministic random value from the seed + height,
+    /// then select the validator whose cumulative stake range contains that value.
     pub fn proposer_for_height_with_seed(&self, height: u64, epoch_seed: &[u8; 32]) -> Option<ValidatorId> {
         let active = self.active();
         if active.is_empty() {
@@ -93,24 +101,41 @@ impl ValidatorSet {
             return Some(active[idx].id);
         }
 
-        // Hash-based selection: sort validators by hash(seed || height || validator_id).
-        // The lowest hash wins the proposer slot.
-        let mut scored: Vec<([u8; 32], ValidatorId)> = active
-            .iter()
-            .map(|v| {
-                let mut input = Vec::with_capacity(72);
-                input.extend_from_slice(epoch_seed);
-                input.extend_from_slice(&height.to_le_bytes());
-                input.extend_from_slice(&v.id);
-                let score = solen_crypto::blake3_hash(&input);
-                (score, v.id)
-            })
-            .collect();
-        scored.sort_by(|a, b| a.0.cmp(&b.0));
-        Some(scored[0].1)
+        // Compute deterministic random selector from seed + height.
+        let mut input = Vec::with_capacity(40);
+        input.extend_from_slice(epoch_seed);
+        input.extend_from_slice(&height.to_le_bytes());
+        let hash = solen_crypto::blake3_hash(&input);
+
+        // Use first 16 bytes as u128 selector.
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&hash[..16]);
+        let selector = u128::from_le_bytes(buf);
+
+        // Stake-weighted selection via cumulative distribution.
+        let total_stake: u128 = active.iter().map(|v| v.stake).sum();
+        if total_stake == 0 {
+            return Some(active[0].id);
+        }
+        let target = selector % total_stake;
+
+        let mut cumulative: u128 = 0;
+        for v in &active {
+            cumulative += v.stake;
+            if cumulative > target {
+                return Some(v.id);
+            }
+        }
+        Some(active.last().unwrap().id)
     }
 
-    /// Get the full proposer order for a height (used for backup selection).
+    /// Get the full proposer order for a height, weighted by stake.
+    /// Position 0 = designated proposer, 1+ = backup order.
+    ///
+    /// Uses stake-weighted shuffle: each validator gets a score based on
+    /// hash(seed || height || validator_id) divided by their stake.
+    /// Lower effective score = higher priority. This ensures validators
+    /// with more stake are more likely to be earlier in the order.
     pub fn proposer_order_for_height(&self, height: u64, epoch_seed: &[u8; 32]) -> Vec<ValidatorId> {
         let active = self.active();
         if active.is_empty() {
@@ -123,15 +148,24 @@ impl ValidatorSet {
             let start = (height as usize) % n;
             (0..n).map(|i| active[(start + i) % n].id).collect()
         } else {
-            let mut scored: Vec<([u8; 32], ValidatorId)> = active
+            // Stake-weighted shuffle: score = hash / stake.
+            // Validators with higher stake get lower effective scores,
+            // placing them earlier in the proposer order.
+            let mut scored: Vec<(u128, ValidatorId)> = active
                 .iter()
                 .map(|v| {
                     let mut input = Vec::with_capacity(72);
                     input.extend_from_slice(epoch_seed);
                     input.extend_from_slice(&height.to_le_bytes());
                     input.extend_from_slice(&v.id);
-                    let score = solen_crypto::blake3_hash(&input);
-                    (score, v.id)
+                    let hash = solen_crypto::blake3_hash(&input);
+                    let mut buf = [0u8; 16];
+                    buf.copy_from_slice(&hash[..16]);
+                    let hash_val = u128::from_le_bytes(buf);
+                    // Effective score = hash / stake. Lower = higher priority.
+                    // Use saturating division to avoid div-by-zero.
+                    let effective = if v.stake > 0 { hash_val / v.stake } else { u128::MAX };
+                    (effective, v.id)
                 })
                 .collect();
             scored.sort_by(|a, b| a.0.cmp(&b.0));
@@ -300,21 +334,79 @@ mod tests {
     }
 
     #[test]
-    fn seeded_proposer_distributes_fairly() {
-        let vs = test_set();
+    fn seeded_proposer_distributes_by_stake() {
+        // Equal stake = roughly equal distribution.
+        let vs = test_set(); // 3 validators, 100 stake each
         let seed = [0xDD; 32];
 
-        // Over 300 heights, each validator should be selected ~100 times.
         let mut counts = std::collections::HashMap::new();
-        for h in 0..300 {
+        for h in 0..3000 {
             if let Some(p) = vs.proposer_for_height_with_seed(h, &seed) {
                 *counts.entry(p).or_insert(0u32) += 1;
             }
         }
-        // Each should get at least 50 out of 300 (very loose bound).
+        // Each should get roughly 1000 out of 3000.
         for (_, count) in &counts {
-            assert!(*count > 50, "proposer selection should be roughly fair");
+            assert!(*count > 500, "equal-stake validators should each get >500/3000");
         }
         assert_eq!(counts.len(), 3, "all validators should be selected");
+    }
+
+    #[test]
+    fn high_stake_validator_selected_more_often() {
+        // Unequal stake: vid(1)=1000, vid(2)=100, vid(3)=100.
+        let vs = ValidatorSet::new(vec![
+            ValidatorInfo::new(vid(1), 1000), // 83% of stake
+            ValidatorInfo::new(vid(2), 100),  // 8.3%
+            ValidatorInfo::new(vid(3), 100),  // 8.3%
+        ]);
+        let seed = [0xEE; 32];
+
+        let mut counts = std::collections::HashMap::new();
+        for h in 0..6000 {
+            if let Some(p) = vs.proposer_for_height_with_seed(h, &seed) {
+                *counts.entry(p).or_insert(0u32) += 1;
+            }
+        }
+
+        let v1_count = *counts.get(&vid(1)).unwrap_or(&0);
+        let v2_count = *counts.get(&vid(2)).unwrap_or(&0);
+        let v3_count = *counts.get(&vid(3)).unwrap_or(&0);
+
+        // vid(1) should get significantly more than vid(2) or vid(3).
+        assert!(
+            v1_count > v2_count * 3,
+            "high-stake validator should propose >3x more: v1={} v2={} v3={}",
+            v1_count, v2_count, v3_count
+        );
+        // All should still be selected sometimes.
+        assert!(v2_count > 0, "low-stake validators should still be selected");
+        assert!(v3_count > 0, "low-stake validators should still be selected");
+    }
+
+    #[test]
+    fn proposer_order_prefers_high_stake() {
+        let vs = ValidatorSet::new(vec![
+            ValidatorInfo::new(vid(1), 10000), // highest stake
+            ValidatorInfo::new(vid(2), 100),
+            ValidatorInfo::new(vid(3), 100),
+        ]);
+        let seed = [0xFF; 32];
+
+        // Over many heights, vid(1) should be first in the order more often.
+        let mut first_count = std::collections::HashMap::new();
+        for h in 0..1000 {
+            let order = vs.proposer_order_for_height(h, &seed);
+            if let Some(first) = order.first() {
+                *first_count.entry(*first).or_insert(0u32) += 1;
+            }
+        }
+
+        let v1_first = *first_count.get(&vid(1)).unwrap_or(&0);
+        assert!(
+            v1_first > 500,
+            "high-stake validator should be first in order >50% of the time: {}",
+            v1_first
+        );
     }
 }

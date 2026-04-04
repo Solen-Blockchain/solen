@@ -1,7 +1,7 @@
 //! Solen Faucet — HTTP service that drips testnet tokens.
 //!
 //! Endpoints:
-//!   POST /drip          { "account": "<hex or name>" }  → drip tokens
+//!   POST /drip          { "account": "<base58, hex, or name>" }  → drip tokens
 //!   GET  /status        → faucet balance, drip amount, cooldown
 //!   GET  /health        → 200 OK
 //!
@@ -21,6 +21,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use solen_crypto::{blake3_hash, Keypair};
 use solen_types::transaction::{Action, UserOperation};
+use solen_types::encoding::{account_to_base58, parse_address};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -175,7 +176,7 @@ async fn handle_drip(
     }
 
     // Get faucet nonce.
-    let faucet_hex = hex_encode(&state.faucet_id);
+    let faucet_hex = account_to_base58(&state.faucet_id);
     let nonce = match get_nonce(&state.http_client, &state.rpc_url, &faucet_hex).await {
         Ok(n) => n,
         Err(e) => {
@@ -194,7 +195,7 @@ async fn handle_drip(
     };
 
     // Build and sign the transfer.
-    let to = match hex_decode_32(&recipient_hex) {
+    let to = match parse_address(&recipient_hex) {
         Ok(id) => id,
         Err(_) => {
             return (
@@ -233,7 +234,7 @@ async fn handle_drip(
                 .insert(recipient_hex.clone(), Instant::now());
 
             info!(
-                recipient = %recipient_hex[..16],
+                recipient = %recipient_hex,
                 amount = state.drip_amount,
                 "drip successful"
             );
@@ -274,7 +275,7 @@ async fn handle_drip(
 
 async fn handle_status(State(state): State<AppState>) -> Json<StatusResponse> {
     Json(StatusResponse {
-        faucet_account: hex_encode(&state.faucet_id),
+        faucet_account: account_to_base58(&state.faucet_id),
         drip_amount: state.drip_amount.to_string(),
         cooldown_secs: state.cooldown.as_secs(),
         rpc_endpoint: state.rpc_url.clone(),
@@ -337,27 +338,21 @@ fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
 }
 
 fn resolve_account(input: &str) -> String {
-    let clean = input.strip_prefix("0x").unwrap_or(input);
-    if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
-        return clean.to_string();
+    // Try parsing as hex or Base58 address.
+    if let Ok(id) = parse_address(input) {
+        return account_to_base58(&id);
     }
     // Treat as a name — hash to deterministic account ID.
     // Uses blake3 to prevent different name variants from mapping
     // to the same account (which would bypass rate limiting).
     let hash = blake3_hash(input.as_bytes());
-    hex_encode(&hash)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    account_to_base58(&hash)
 }
 
 fn hex_decode_32(s: &str) -> anyhow::Result<[u8; 32]> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes: Vec<u8> = (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(Into::into))
-        .collect::<anyhow::Result<Vec<u8>>>()?;
+    let bytes = solen_types::encoding::hex_decode(s)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let mut arr = [0u8; 32];
     if bytes.len() != 32 {
         anyhow::bail!("expected 32 bytes");
@@ -386,7 +381,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         port = cli.port,
         rpc = %cli.rpc,
-        faucet = hex_encode(&faucet_id),
+        faucet = account_to_base58(&faucet_id),
         drip = cli.drip_amount,
         cooldown_secs = cli.cooldown,
         "starting Solen faucet"

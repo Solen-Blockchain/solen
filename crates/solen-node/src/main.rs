@@ -17,6 +17,7 @@ use solen_p2p::messages::NetworkMessage;
 use solen_p2p::network::{NetworkConfig, NetworkService};
 use solen_rpc::server::start_rpc_server;
 use solen_storage::StateStore;
+use solen_types::encoding::{account_to_base58, hex_encode as encoding_hex_encode};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -475,7 +476,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     info!(
-        validator_id = hex(&validator_id),
+        validator_id = account_to_base58(&validator_id),
         validators = validator_set.active_count(),
         "validator set initialized from genesis"
     );
@@ -508,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
                 if !on_chain.is_active {
                     v.status = solen_consensus::validator::ValidatorStatus::Jailed;
                     info!(
-                        validator = hex(&on_chain.id),
+                        validator = account_to_base58(&on_chain.id),
                         "validator is jailed on-chain — marking inactive in consensus set"
                     );
                 }
@@ -627,9 +628,9 @@ async fn main() -> anyhow::Result<()> {
                                     block_hash,
                                 );
                             } else {
-                                let v_hex = hex(&validator_id);
+                                let v_b58 = account_to_base58(&validator_id);
                                 tracing::warn!(
-                                    validator = &v_hex[..8],
+                                    validator = %v_b58,
                                     height = block_height,
                                     "invalid attestation signature — rejected"
                                 );
@@ -1051,7 +1052,7 @@ fn create_persistent_store(data_dir: &str) -> anyhow::Result<Box<dyn StateStore>
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    encoding_hex_encode(bytes)
 }
 
 /// Build the deterministic payload for attestation signing/verification.
@@ -1071,11 +1072,7 @@ fn rand_seed() -> [u8; 32] {
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(Into::into))
-        .collect()
+    solen_types::encoding::hex_decode(s).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {

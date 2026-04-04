@@ -9,6 +9,7 @@ use solen_crypto::Keypair;
 use solen_execution::genesis::{apply_genesis, GenesisAccount};
 use solen_storage::StateStore;
 use solen_types::account::AuthMethod;
+use solen_types::encoding::account_to_base58;
 use tracing::info;
 
 /// Top-level genesis configuration.
@@ -154,7 +155,7 @@ impl GenesisConfig {
 
             info!(
                 name = %v.name,
-                address = hex_encode(&id),
+                address = account_to_base58(&id),
                 stake = v.stake,
                 "genesis validator"
             );
@@ -178,7 +179,7 @@ impl GenesisConfig {
                     balance: a.balance,
                     auth_methods: vec![],
                 });
-                info!(name = %a.name, address = hex_encode(&id), balance = a.balance, "genesis account (no auth)");
+                info!(name = %a.name, address = account_to_base58(&id), balance = a.balance, "genesis account (no auth)");
                 continue;
             } else {
                 anyhow::bail!("account '{}' needs seed_hex, public_key_hex, or id_hex", a.name);
@@ -195,7 +196,7 @@ impl GenesisConfig {
 
             info!(
                 name = %a.name,
-                address = hex_encode(&id),
+                address = account_to_base58(&id),
                 balance = a.balance,
                 "genesis account"
             );
@@ -216,7 +217,7 @@ impl GenesisConfig {
 
             info!(
                 name = %faucet.account_name,
-                address = hex_encode(&id),
+                address = account_to_base58(&id),
                 drip = faucet.drip_amount,
                 "genesis faucet"
             );
@@ -468,10 +469,6 @@ pub fn resolve_validator_pubkey(v: &ValidatorConfig) -> Result<[u8; 32]> {
     } else {
         anyhow::bail!("validator '{}' needs either seed_hex or public_key_hex", v.name)
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hex_decode_32(s: &str) -> Result<[u8; 32]> {

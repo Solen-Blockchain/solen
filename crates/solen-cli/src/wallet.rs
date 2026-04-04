@@ -12,6 +12,7 @@ use anyhow::{bail, Result};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 use solen_crypto::Keypair;
+use solen_types::encoding::account_to_base58;
 
 /// Salt length for Argon2.
 const SALT_LEN: usize = 16;
@@ -108,8 +109,8 @@ pub fn generate_key(name: &str) -> Result<StoredKey> {
     Ok(StoredKey {
         name: name.to_string(),
         seed_hex: Some(hex_encode(&seed)),
-        public_key_hex: hex_encode(&public_key),
-        account_id_hex: hex_encode(&public_key),
+        public_key_hex: account_to_base58(&public_key),
+        account_id_hex: account_to_base58(&public_key),
         encrypted_seed_hex: None,
     })
 }
@@ -128,8 +129,8 @@ pub fn import_key(name: &str, seed_hex: &str) -> Result<StoredKey> {
     Ok(StoredKey {
         name: name.to_string(),
         seed_hex: Some(hex_encode(&seed)),
-        public_key_hex: hex_encode(&public_key),
-        account_id_hex: hex_encode(&public_key),
+        public_key_hex: account_to_base58(&public_key),
+        account_id_hex: account_to_base58(&public_key),
         encrypted_seed_hex: None,
     })
 }
@@ -163,9 +164,8 @@ pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Keypair, [u8; 32])> {
     seed.copy_from_slice(&seed_bytes);
     let kp = Keypair::from_seed(&seed);
 
-    let account_id_bytes = hex_decode(&key.account_id_hex)?;
-    let mut account_id = [0u8; 32];
-    account_id.copy_from_slice(&account_id_bytes);
+    let account_id = solen_types::encoding::parse_address(&key.account_id_hex)
+        .map_err(|e| anyhow::anyhow!("invalid account_id: {}", e))?;
 
     Ok((kp, account_id))
 }

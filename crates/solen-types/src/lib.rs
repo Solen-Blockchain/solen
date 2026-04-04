@@ -3,6 +3,7 @@
 pub mod account;
 pub mod block;
 pub mod crypto;
+pub mod encoding;
 pub mod rollup;
 pub mod system;
 pub mod transaction;

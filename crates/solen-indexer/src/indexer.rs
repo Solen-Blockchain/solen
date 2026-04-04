@@ -5,11 +5,9 @@ use std::sync::{Arc, RwLock};
 use solen_consensus::engine::{ConsensusEngine, FinalizedBlock};
 use tracing::debug;
 
-use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
+use solen_types::encoding::{account_to_base58, hex_encode};
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
 
 fn u64_from_le_hex(hex_str: &str) -> Result<u64, ()> {
     if hex_str.len() != 16 {
@@ -28,16 +26,16 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
     let block_summary = IndexedBlock {
         height: block.header.height,
         epoch: block.header.epoch,
-        parent_hash: hex(&block.header.parent_hash),
-        state_root: hex(&block.header.state_root),
-        proposer: hex(&block.header.proposer),
+        parent_hash: hex_encode(&block.header.parent_hash),
+        state_root: hex_encode(&block.header.state_root),
+        proposer: account_to_base58(&block.header.proposer),
         timestamp_ms: block.header.timestamp_ms,
         tx_count: block.result.receipts.len(),
         gas_used: block.result.gas_used,
         attestation_count: block.attestations.len(),
     };
     // Track proposer stats.
-    let proposer_hex = hex(&block.header.proposer);
+    let proposer_hex = account_to_base58(&block.header.proposer);
     if block.header.proposer != [0u8; 32] {
         *store.blocks_proposed.entry(proposer_hex.clone()).or_insert(0) += 1;
         store.last_proposed.insert(proposer_hex, block.header.height);
@@ -62,24 +60,26 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                     || e.topic == b"solver_tip")
                     && e.data.len() >= 32
                 {
-                    let recipient = hex(&e.data[..32]);
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&e.data[..32]);
+                    let recipient = account_to_base58(&addr);
                     if !related_accounts.contains(&recipient) {
                         related_accounts.push(recipient);
                     }
                 }
 
                 // Also track event emitters as related accounts.
-                let emitter_hex = hex(&e.emitter);
-                if !related_accounts.contains(&emitter_hex) {
-                    related_accounts.push(emitter_hex.clone());
+                let emitter_b58 = account_to_base58(&e.emitter);
+                if !related_accounts.contains(&emitter_b58) {
+                    related_accounts.push(emitter_b58.clone());
                 }
 
                 IndexedEvent {
                     block_height: block.header.height,
                     tx_index: i,
-                    emitter: emitter_hex,
+                    emitter: emitter_b58,
                     topic: String::from_utf8_lossy(&e.topic).to_string(),
-                    data: hex(&e.data),
+                    data: hex_encode(&e.data),
                 }
             })
             .collect();
@@ -91,27 +91,46 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
             // have recipient[32 bytes] in event data.
             if (event.topic == "mint" || event.topic == "transfer")
                 && event.data.len() >= 64
-                && !event.emitter.starts_with("ffffffffffffffffffffffffffffffff")
             {
                 // First 64 hex chars = 32 bytes = recipient account ID.
-                let recipient = event.data[..64].to_string();
-                store.track_token_holder(&recipient, &event.emitter);
-                // Also track the sender for transfers.
-                let sender_hex = hex(&receipt.sender);
-                store.track_token_holder(&sender_hex, &event.emitter);
-                // Add recipient as related account so the tx shows on their page.
-                if !related_accounts.contains(&recipient) {
-                    related_accounts.push(recipient);
+                if let Ok(recipient_bytes) = solen_types::encoding::hex_decode(&event.data[..64]) {
+                    if recipient_bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&recipient_bytes);
+                        // Skip system addresses (all 0xff prefix).
+                        if addr[..16] != [0xff; 16] {
+                            let recipient = account_to_base58(&addr);
+                            store.track_token_holder(&recipient, &event.emitter);
+                            // Also track the sender for transfers.
+                            let sender_b58 = account_to_base58(&receipt.sender);
+                            store.track_token_holder(&sender_b58, &event.emitter);
+                            // Add recipient as related account so the tx shows on their page.
+                            if !related_accounts.contains(&recipient) {
+                                related_accounts.push(recipient);
+                            }
+                        }
+                    }
                 }
             }
 
             // Track slash events: add slashed validator and treasury as related accounts.
             if event.topic == "slashed" && event.data.len() >= 64 {
-                let slashed_validator = event.data[..64].to_string();
-                if !related_accounts.contains(&slashed_validator) {
-                    related_accounts.push(slashed_validator);
+                if let Ok(val_bytes) = solen_types::encoding::hex_decode(&event.data[..64]) {
+                    if val_bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&val_bytes);
+                        let slashed_validator = account_to_base58(&addr);
+                        if !related_accounts.contains(&slashed_validator) {
+                            related_accounts.push(slashed_validator);
+                        }
+                    }
                 }
-                let treasury = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff04".to_string();
+                let treasury_addr = {
+                    let mut t = [0xFFu8; 32];
+                    t[31] = 0x04;
+                    t
+                };
+                let treasury = account_to_base58(&treasury_addr);
                 if !related_accounts.contains(&treasury) {
                     related_accounts.push(treasury);
                 }
@@ -135,7 +154,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                         rollup_id,
                         name: format!("Rollup #{}", rollup_id),
                         proof_type: String::new(),
-                        sequencer: receipt.sender.iter().map(|b| format!("{b:02x}")).collect(),
+                        sequencer: account_to_base58(&receipt.sender),
                         genesis_state_root: String::new(),
                         registered_at_height: block.header.height,
                     });
@@ -171,7 +190,9 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
                     for sibling in &receipt.events {
                         if sibling.topic == b"transfer" && sibling.data.len() >= 48 {
-                            transfer_to = Some(hex(&sibling.data[..32]));
+                            let mut addr = [0u8; 32];
+                            addr.copy_from_slice(&sibling.data[..32]);
+                            transfer_to = Some(account_to_base58(&addr));
                             let amt_bytes = &sibling.data[32..48];
                             let mut val = 0u128;
                             for (j, &b) in amt_bytes.iter().enumerate() {
@@ -180,7 +201,9 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
                             transfer_amount = Some(val.to_string());
                         }
                         if sibling.topic == b"solver_tip" && sibling.data.len() >= 48 {
-                            solver = Some(hex(&sibling.data[..32]));
+                            let mut addr = [0u8; 32];
+                            addr.copy_from_slice(&sibling.data[..32]);
+                            solver = Some(account_to_base58(&addr));
                             let amt_bytes = &sibling.data[32..48];
                             let mut val = 0u128;
                             for (j, &b) in amt_bytes.iter().enumerate() {
@@ -192,7 +215,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
                     store.add_fulfilled_intent(IndexedIntent {
                         intent_id,
-                        sender: hex(&receipt.sender),
+                        sender: account_to_base58(&receipt.sender),
                         block_height: block.header.height,
                         tx_index: i,
                         transfer_to,
@@ -207,7 +230,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
         let tx = IndexedTx {
             block_height: block.header.height,
             index: i,
-            sender: hex(&receipt.sender),
+            sender: account_to_base58(&receipt.sender),
             nonce: receipt.nonce,
             success: receipt.success,
             gas_used: receipt.gas_used,

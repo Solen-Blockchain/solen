@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
 use solen_execution::state::ReadonlyStateManager;
 use solen_intents::types::{Constraint, Intent};
+use solen_types::encoding::{account_to_base58, hex_decode as encoding_hex_decode, hex_encode, parse_address};
 use solen_types::rollup::BatchCommitment;
 use solen_types::transaction::UserOperation;
 
@@ -435,10 +436,6 @@ impl SolenRpc {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
@@ -456,40 +453,15 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            "hex string must have even length",
-            None::<()>,
-        ));
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("invalid hex at position {i}"),
-                    None::<()>,
-                )
-            })
-        })
-        .collect()
+    encoding_hex_decode(s).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, e, None::<()>)
+    })
 }
 
 fn parse_account_id(s: &str) -> RpcResult<[u8; 32]> {
-    let bytes = hex_decode(s)?;
-    if bytes.len() != 32 {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            format!("account_id must be 32 bytes, got {}", bytes.len()),
-            None::<()>,
-        ));
-    }
-    let mut id = [0u8; 32];
-    id.copy_from_slice(&bytes);
-    Ok(id)
+    parse_address(s).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, e, None::<()>)
+    })
 }
 
 fn internal_error(msg: impl ToString) -> ErrorObjectOwned {
@@ -519,7 +491,7 @@ impl SolenApiServer for SolenRpc {
             })?;
 
         Ok(AccountInfo {
-            id: hex_encode(&account.id),
+            id: account_to_base58(&account.id),
             balance: account.balance.to_string(),
             nonce: account.nonce,
             code_hash: hex_encode(&account.code_hash),
@@ -622,7 +594,7 @@ impl SolenApiServer for SolenRpc {
                 .events
                 .iter()
                 .map(|e| EventInfo {
-                    emitter: hex_encode(&e.emitter),
+                    emitter: account_to_base58(&e.emitter),
                     topic: String::from_utf8_lossy(&e.topic).to_string(),
                 })
                 .collect(),
@@ -637,7 +609,7 @@ impl SolenApiServer for SolenRpc {
         let proposals = gov.proposals.iter().map(|p| {
             GovernanceProposalInfo {
                 id: p.id,
-                proposer: hex_encode(&p.proposer),
+                proposer: account_to_base58(&p.proposer),
                 action: format!("{:?}", p.action),
                 description: p.description.clone(),
                 status: format!("{:?}", p.status),
@@ -812,7 +784,7 @@ impl SolenApiServer for SolenRpc {
             .validators
             .iter()
             .map(|v| ValidatorInfo {
-                address: hex_encode(&v.id),
+                address: account_to_base58(&v.id),
                 self_stake: v.self_stake.to_string(),
                 total_delegated: v.total_delegated.to_string(),
                 total_stake: v.total_stake().to_string(),
@@ -837,7 +809,7 @@ impl SolenApiServer for SolenRpc {
             .iter()
             .filter(|d| d.delegator == id)
             .map(|d| DelegationInfo {
-                validator: hex_encode(&d.validator),
+                validator: account_to_base58(&d.validator),
                 amount: d.amount.to_string(),
             })
             .collect();
@@ -951,7 +923,7 @@ impl SolenApiServer for SolenRpc {
         let intents: Vec<IntentInfo> = pending.into_iter().take(limit).map(|i| {
             IntentInfo {
                 id: i.id,
-                sender: hex_encode(&i.sender),
+                sender: account_to_base58(&i.sender),
                 constraints: i.constraints.iter().map(|c| constraint_to_info(c)).collect(),
                 max_fee: i.max_fee.to_string(),
                 expiry_height: i.expiry_height,
@@ -1080,7 +1052,7 @@ impl SolenApiServer for SolenRpc {
 
                     return Ok(SponsorshipResult {
                         sponsored: true,
-                        paymaster: Some(hex_encode(pm)),
+                        paymaster: Some(account_to_base58(pm)),
                         max_gas,
                         reason: None,
                     });
@@ -1238,7 +1210,9 @@ impl SolenApiServer for SolenRpc {
             .map_err(|e| internal_error(e.to_string()))?;
 
         // Cap snapshot size to prevent OOM from base64 encoding huge states.
-        const MAX_SNAPSHOT_RESPONSE: usize = 100 * 1024 * 1024; // 100 MB
+        // 1 GB compressed covers millions of accounts. If the chain outgrows
+        // this, switch to a streaming HTTP endpoint instead of JSON-RPC.
+        const MAX_SNAPSHOT_RESPONSE: usize = 1024 * 1024 * 1024; // 1 GB
         if data.len() > MAX_SNAPSHOT_RESPONSE {
             return Err(internal_error(format!(
                 "snapshot too large ({} MB), use direct sync instead",
@@ -1338,24 +1312,24 @@ fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
 fn constraint_to_info(c: &Constraint) -> ConstraintInfo {
     match c {
         Constraint::MinBalance { account, min_amount } => ConstraintInfo::MinBalance {
-            account: hex_encode(account),
+            account: account_to_base58(account),
             min_amount: min_amount.to_string(),
         },
         Constraint::MaxSpend { account, max_amount } => ConstraintInfo::MaxSpend {
-            account: hex_encode(account),
+            account: account_to_base58(account),
             max_amount: max_amount.to_string(),
         },
         Constraint::RequireTransfer { from, to, min_amount } => ConstraintInfo::RequireTransfer {
-            from: hex_encode(from),
-            to: hex_encode(to),
+            from: account_to_base58(from),
+            to: account_to_base58(to),
             min_amount: min_amount.to_string(),
         },
         Constraint::RequireCall { target, method } => ConstraintInfo::RequireCall {
-            target: hex_encode(target),
+            target: account_to_base58(target),
             method: method.clone(),
         },
         Constraint::Custom { verifier, data } => ConstraintInfo::Custom {
-            verifier: hex_encode(verifier),
+            verifier: account_to_base58(verifier),
             data: hex_encode(data),
         },
     }
@@ -1369,7 +1343,7 @@ fn block_to_info(block: &solen_consensus::engine::FinalizedBlock) -> BlockInfo {
         state_root: hex_encode(&block.header.state_root),
         transactions_root: hex_encode(&block.header.transactions_root),
         receipts_root: hex_encode(&block.header.receipts_root),
-        proposer: hex_encode(&block.header.proposer),
+        proposer: account_to_base58(&block.header.proposer),
         timestamp_ms: block.header.timestamp_ms,
         tx_count: block.result.receipts.len(),
         gas_used: block.result.gas_used,

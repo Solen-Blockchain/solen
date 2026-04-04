@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
 use tracing::info;
 
+use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
+
 use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
 
 #[derive(Clone)]
@@ -142,9 +144,15 @@ async fn get_account_txs(
     Path(account): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedTx>> {
+    // Accept both hex and base58 addresses — normalize to base58 for lookup.
+    let lookup = if let Ok(id) = parse_address(&account) {
+        account_to_base58(&id)
+    } else {
+        account
+    };
     let store = state.store.read().unwrap();
     let txs: Vec<IndexedTx> = store
-        .get_account_txs_paged(&account, params.limit, params.offset)
+        .get_account_txs_paged(&lookup, params.limit, params.offset)
         .into_iter()
         .cloned()
         .collect();
@@ -162,10 +170,6 @@ async fn get_events(
         .cloned()
         .collect();
     Json(events)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetResponse> {
@@ -199,7 +203,7 @@ async fn get_validators(State(state): State<ApiState>) -> Json<ValidatorSetRespo
             let is_genesis = staking_info.map(|s| s.is_genesis).unwrap_or(false);
 
             ValidatorResponse {
-                id: hex_encode(&v.id),
+                id: account_to_base58(&v.id),
                 stake: v.stake.to_string(),
                 self_stake: self_stake.to_string(),
                 delegated: delegated.to_string(),
@@ -467,8 +471,13 @@ async fn get_account_tokens(
     State(state): State<ApiState>,
     Path(account): Path<String>,
 ) -> Json<Vec<String>> {
+    let lookup = if let Ok(id) = parse_address(&account) {
+        account_to_base58(&id)
+    } else {
+        account
+    };
     let store = state.store.read().unwrap();
-    Json(store.get_account_tokens(&account))
+    Json(store.get_account_tokens(&lookup))
 }
 
 async fn get_contracts(

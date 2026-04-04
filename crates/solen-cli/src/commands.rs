@@ -4,8 +4,10 @@ use anyhow::Result;
 use solen_crypto::{blake3_hash, Keypair};
 use solen_types::transaction::{Action, UserOperation};
 
+use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
+
 use crate::rpc::RpcClient;
-use crate::wallet::{self, hex_decode, hex_encode};
+use crate::wallet::{self, hex_decode};
 
 // ── Status ──────────────────────────────────────────────────────
 
@@ -74,7 +76,7 @@ pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str, chain_id: u64) -> Re
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Vesting system contract address.
@@ -122,7 +124,7 @@ pub async fn cmd_propose_block_time(
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
@@ -166,7 +168,7 @@ pub async fn cmd_vote(
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
@@ -207,7 +209,7 @@ pub async fn cmd_finalize_proposal(
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
@@ -243,7 +245,7 @@ pub async fn cmd_execute_proposal(
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
@@ -280,7 +282,7 @@ pub async fn cmd_register_validator(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Build args: amount[16 LE]
@@ -332,7 +334,7 @@ pub async fn cmd_stake(
     let validator_id = resolve_account_id(validator)?;
     let validator_bytes = hex_decode(&validator_id)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Build args: validator[32] + amount[16]
@@ -362,7 +364,7 @@ pub async fn cmd_stake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Stake submitted successfully.");
-        println!("  Delegated {} SOLEN to {}...", format_solen(amount), &validator_id[..16]);
+        println!("  Delegated {} SOLEN to {}", format_solen(amount), validator_id);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
     }
@@ -382,7 +384,7 @@ pub async fn cmd_unstake(
     let validator_id = resolve_account_id(validator)?;
     let validator_bytes = hex_decode(&validator_id)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Build args: validator[32] + amount[16] + epoch[8]
@@ -412,7 +414,7 @@ pub async fn cmd_unstake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Unstake submitted successfully.");
-        println!("  Undelegating {} SOLEN from {}...", format_solen(amount), &validator_id[..16]);
+        println!("  Undelegating {} SOLEN from {}", format_solen(amount), validator_id);
         println!("  Funds available after unbonding period (7 epochs).");
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -425,7 +427,7 @@ pub async fn cmd_withdraw_stake(rpc: &RpcClient, from: &str, chain_id: u64) -> R
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let staking_addr = {
@@ -462,7 +464,7 @@ pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let staking_addr = {
@@ -557,7 +559,7 @@ pub async fn cmd_transfer(
     to_arr.copy_from_slice(&to_bytes);
 
     // Get current nonce.
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let mut op = UserOperation {
@@ -586,8 +588,8 @@ pub async fn cmd_transfer(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Transaction submitted successfully.");
-        println!("  From:   {} ({})", from, &sender_hex[..12]);
-        println!("  To:     {} ({}...)", to, &to_id[..12]);
+        println!("  From:   {} ({})", from, sender_hex);
+        println!("  To:     {} ({})", to, to_id);
         println!("  Amount: {}", amount);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -606,7 +608,7 @@ pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str, chain_id: 
         .map_err(|e| anyhow::anyhow!("cannot read {}: {}", wasm_path, e))?;
 
     let code_hash = blake3_hash(&code);
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Generate a deterministic salt from sender + nonce.
@@ -647,7 +649,7 @@ pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str, chain_id: 
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Contract deployed successfully.");
-        println!("  Contract ID: {}", hex_encode(&contract_id));
+        println!("  Contract ID: {}", account_to_base58(&contract_id));
         println!("  Code hash:   {}...", &hex_encode(&code_hash)[..16]);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -678,7 +680,7 @@ pub async fn cmd_call(
         None => vec![],
     };
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let mut op = UserOperation {
@@ -707,7 +709,7 @@ pub async fn cmd_call(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Call submitted successfully.");
-        println!("  Target: {}...", &target_id[..16]);
+        println!("  Target: {}", target_id);
         println!("  Method: {}", method);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -864,12 +866,11 @@ pub fn cmd_key_change_password() -> Result<()> {
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-/// Resolve an account identifier — either a key name or a hex ID.
+/// Resolve an account identifier — a key name, hex ID, or Base58 address.
 fn resolve_account_id(input: &str) -> Result<String> {
-    // If it looks like hex (64 chars), use as-is.
-    let clean = input.strip_prefix("0x").unwrap_or(input);
-    if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(clean.to_string());
+    // Try parsing as an address (hex or Base58).
+    if let Ok(id) = parse_address(input) {
+        return Ok(hex_encode(&id));
     }
 
     // Try loading from keystore.
@@ -918,18 +919,14 @@ pub async fn cmd_multisig(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    // Parse signer public keys.
+    // Parse signer public keys (hex or Base58).
     let mut signers = Vec::new();
-    for hex_str in signer_hexes {
-        let bytes = hex_decode(hex_str)?;
-        if bytes.len() != 32 {
-            anyhow::bail!("signer key must be 32 bytes (64 hex chars), got {}", bytes.len());
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
+    for addr_str in signer_hexes {
+        let key = parse_address(addr_str)
+            .map_err(|e| anyhow::anyhow!("invalid signer address '{}': {}", addr_str, e))?;
         signers.push(key);
     }
 
@@ -953,7 +950,7 @@ pub async fn cmd_multisig(
         println!("Account converted to {}-of-{} multi-sig.", threshold, signers.len());
         println!("Signers:");
         for (i, s) in signers.iter().enumerate() {
-            println!("  {}: {}", i + 1, hex_encode(s));
+            println!("  {}: {}", i + 1, account_to_base58(s));
         }
         println!("\nAll future operations require {} signature(s).", threshold);
     } else {
@@ -985,7 +982,7 @@ pub async fn cmd_initiate_recovery(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let target_id = resolve_account_id(target)?;
@@ -1053,7 +1050,7 @@ pub async fn cmd_confirm_recovery(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let guardian_addr = {
@@ -1095,7 +1092,7 @@ pub async fn cmd_cancel_recovery(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let guardian_addr = {
@@ -1137,7 +1134,7 @@ pub async fn cmd_execute_recovery(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let guardian_addr = {
@@ -1182,7 +1179,7 @@ pub async fn cmd_register_rollup(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     // Build args: rollup_id[8] + name_len[4] + name + proof_type_len[4] + proof_type + sequencer[32] + genesis_state_root[32]
@@ -1251,7 +1248,7 @@ pub async fn cmd_register_paymaster(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let paymaster_addr = {
@@ -1294,7 +1291,7 @@ pub async fn cmd_unregister_paymaster(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
-    let sender_hex = hex_encode(&sender_id);
+    let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
     let paymaster_addr = {

@@ -183,6 +183,7 @@ fn is_non_state_key(key: &[u8]) -> bool {
         || key.starts_with(b"__chain_meta__")
         || key.starts_with(b"__chain_id__")
         || key.starts_with(b"slash/")
+        || key.starts_with(b"source/")
 }
 
 fn hash_leaf(key: &[u8], value: &[u8]) -> Hash {

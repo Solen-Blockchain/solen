@@ -278,8 +278,29 @@ async fn get_contract_source(
     State(state): State<ApiState>,
     Path(code_hash): Path<String>,
 ) -> Json<Option<crate::store::ContractSource>> {
+    // Check in-memory index first.
     let store = state.store.read().unwrap();
-    Json(store.contract_sources.get(&code_hash).cloned())
+    if let Some(src) = store.contract_sources.get(&code_hash) {
+        return Json(Some(src.clone()));
+    }
+    drop(store);
+
+    // Fall back to persistent storage (survives restarts).
+    if let Some(engine) = &state.engine {
+        let estore = engine.store();
+        let estore = estore.read().unwrap();
+        let key = format!("source/{}", code_hash);
+        if let Ok(Some(data)) = estore.get(key.as_bytes()) {
+            if let Ok(src) = serde_json::from_slice::<crate::store::ContractSource>(&data) {
+                // Cache in memory for future lookups.
+                drop(estore);
+                let mut idx = state.store.write().unwrap();
+                idx.contract_sources.insert(code_hash, src.clone());
+                return Json(Some(src));
+            }
+        }
+    }
+    Json(None)
 }
 
 #[derive(Deserialize)]
@@ -341,7 +362,19 @@ async fn publish_contract_source(
         verified,
     };
 
-    store.contract_sources.insert(code_hash, source);
+    store.contract_sources.insert(code_hash.clone(), source.clone());
+    drop(store);
+
+    // Persist to engine store so it survives restarts.
+    if let Some(engine) = &state.engine {
+        let estore = engine.store();
+        let mut estore = estore.write().unwrap();
+        let key = format!("source/{}", code_hash);
+        if let Ok(data) = serde_json::to_vec(&source) {
+            let _ = estore.put(key.as_bytes(), &data);
+        }
+    }
+
     Json(serde_json::json!({"success": true, "verified": verified}))
 }
 

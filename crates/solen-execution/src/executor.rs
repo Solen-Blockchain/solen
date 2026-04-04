@@ -42,8 +42,12 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
             solen_crypto::verify(public_key, msg, &sig).is_ok()
         }
         AuthMethod::Threshold { signers, threshold } => {
+            // Reject invalid threshold (0 would accept empty signatures).
+            if *threshold == 0 || signers.is_empty() {
+                return false;
+            }
             // Each sub-signature is pubkey[32] + sig[64] = 96 bytes.
-            if signature.len() % 96 != 0 {
+            if signature.len() % 96 != 0 || signature.is_empty() {
                 return false;
             }
             let mut valid_count = 0u16;
@@ -757,9 +761,10 @@ impl BlockExecutor {
                                 "session keys cannot call guardian recovery".into(),
                             )));
                         }
-                        // Block direct governance proposal creation (requires stake commitment).
+                        // Block governance operations that change proposal state.
+                        // Session keys may vote but cannot create, finalize, or execute proposals.
                         if *target == solen_types::system::GOVERNANCE_ADDRESS
-                            && (method.starts_with("propose") || method == "execute")
+                            && (method.starts_with("propose") || method == "finalize" || method == "execute")
                         {
                             return Err(ExecutionError::State(StateError::AccountNotFound(
                                 "session keys cannot create or execute governance proposals".into(),

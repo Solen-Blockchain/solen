@@ -851,3 +851,104 @@ fn flash_vote_rejected_for_new_stake() {
         "flash-vote must be rejected: new stake is not yet eligible"
     );
 }
+
+// ── Test #26: Threshold=0 rejects empty signature ────────────
+
+#[test]
+fn threshold_zero_rejects_empty_signature() {
+    let mut store = MemoryStore::new();
+    let s1 = Keypair::from_seed(&[0x01; 32]);
+    let recipient = Keypair::from_seed(&[0x04; 32]).public_key();
+    let owner = s1.public_key();
+
+    // Force a threshold=0 account (simulating bad genesis config).
+    apply_genesis(
+        &mut store,
+        vec![
+            GenesisAccount {
+                id: owner,
+                balance: 1_000_000_000,
+                auth_methods: vec![AuthMethod::Threshold {
+                    signers: vec![s1.public_key()],
+                    threshold: 0, // invalid but could exist from genesis
+                }],
+            },
+            GenesisAccount {
+                id: recipient,
+                balance: 0,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+            },
+        ],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+
+    // ATTACK: Empty signature should NOT authenticate threshold=0.
+    let op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Transfer { to: recipient, amount: 100 }],
+        max_fee: 0,
+        signature: vec![], // empty!
+    };
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "CRITICAL: threshold=0 with empty signature must be rejected"
+    );
+}
+
+// ── Test #27: Session key cannot finalize governance proposals ─
+
+#[test]
+fn session_key_cannot_finalize_proposal() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x0A; 32]);
+    let session_kp = Keypair::from_seed(&[0x0B; 32]);
+    let owner = owner_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 1_000_000_000,
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 1_000_000_000,
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let gov_addr = solen_types::system::GOVERNANCE_ADDRESS;
+
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "finalize".to_string(),
+            args: 0u64.to_le_bytes().to_vec(),
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+
+    let msg = executor.operation_signing_message(&op);
+    op.signature = session_kp.sign(&msg).to_vec();
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "session key must NOT be able to finalize governance proposals"
+    );
+}

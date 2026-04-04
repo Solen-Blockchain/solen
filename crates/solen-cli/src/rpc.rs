@@ -106,7 +106,7 @@ impl RpcClient {
 #[derive(Debug, Deserialize)]
 pub struct ChainStatus {
     pub height: u64,
-    pub latest_state_root: String,
+    pub state_root: String,
     pub pending_ops: u64,
 }
 

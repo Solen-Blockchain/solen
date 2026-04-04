@@ -18,7 +18,7 @@ pub async fn cmd_status(rpc: &RpcClient) -> Result<()> {
     println!("Solen Network Status");
     println!("────────────────────────────────────────");
     println!("  Height:      {}", status.height);
-    println!("  State root:  {}...{}", &status.latest_state_root[..12], &status.latest_state_root[status.latest_state_root.len()-8..]);
+    println!("  State root:  {}...{}", &status.state_root[..12], &status.state_root[status.state_root.len()-8..]);
     println!("  Pending ops: {}", status.pending_ops);
     println!("  Epoch:       {}", block.epoch);
     println!("  Proposer:    {}...", &block.proposer[..16]);

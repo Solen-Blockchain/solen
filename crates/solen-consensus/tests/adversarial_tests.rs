@@ -348,3 +348,239 @@ fn mempool_rejects_system_signature() {
         "[0xFF] system signature must be rejected from mempool"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════
+// CONSENSUS EDGE CASE TESTS
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn block_at_wrong_height_rejected() {
+    let (engine, _, _, _) = setup_engine();
+    engine.produce_block(); // height 1
+
+    let mut fake_header = solen_types::block::BlockHeader {
+        height: 5, // way ahead
+        epoch: 0,
+        parent_hash: [0; 32],
+        state_root: [0; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: [0x01; 32],
+        timestamp_ms: 0,
+    };
+
+    let accepted = engine.accept_block(&fake_header, &[]);
+    assert!(!accepted, "block at wrong height must be rejected");
+}
+
+#[test]
+fn block_from_invalid_proposer_rejected() {
+    let (engine, _, _, _) = setup_engine();
+    engine.produce_block(); // height 1
+
+    let fake_proposer = [0xDE; 32]; // not in validator set
+    let header = solen_types::block::BlockHeader {
+        height: 2,
+        epoch: 0,
+        parent_hash: solen_consensus::engine::block_hash(&engine.get_blocks_for_sync(1, 1)[0].header),
+        state_root: [0; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: fake_proposer,
+        timestamp_ms: 0,
+    };
+
+    let accepted = engine.accept_block(&header, &[]);
+    assert!(!accepted, "block from unknown proposer must be rejected");
+}
+
+#[test]
+fn block_with_wrong_epoch_rejected() {
+    let (engine, _, _, _) = setup_engine();
+    engine.produce_block(); // height 1
+
+    let header = solen_types::block::BlockHeader {
+        height: 2,
+        epoch: 999, // wrong epoch
+        parent_hash: solen_consensus::engine::block_hash(&engine.get_blocks_for_sync(1, 1)[0].header),
+        state_root: [0; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: engine.validator_id(),
+        timestamp_ms: 0,
+    };
+
+    let accepted = engine.accept_block(&header, &[]);
+    assert!(!accepted, "block with wrong epoch must be rejected");
+}
+
+#[test]
+fn duplicate_block_at_same_height_rejected() {
+    let (engine, _, _, _) = setup_engine();
+    engine.produce_block(); // height 1
+
+    // Produce a second block — it should go to pending.
+    // But our engine already finalized height 1 (single validator mode),
+    // so we need to craft a block at height 2.
+    let blocks = engine.get_blocks_for_sync(1, 1);
+    let parent_hash = solen_consensus::engine::block_hash(&blocks[0].header);
+
+    let header = solen_types::block::BlockHeader {
+        height: 2,
+        epoch: 0,
+        parent_hash,
+        state_root: [0; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: engine.validator_id(),
+        timestamp_ms: 0,
+    };
+
+    // First accept should work.
+    let accepted1 = engine.accept_block(&header, &[]);
+    assert!(accepted1, "first block at height 2 should be accepted");
+
+    // Second accept at same height should be rejected (already pending).
+    let accepted2 = engine.accept_block(&header, &[]);
+    assert!(!accepted2, "duplicate block at same height must be rejected");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SLASHING EDGE CASE TESTS
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn missed_block_counter_resets_on_successful_proposal() {
+    use solen_consensus::validator::{ValidatorInfo, ValidatorSet};
+    use solen_consensus::slashing::record_missed_block;
+
+    let v1 = {
+        let mut id = [0u8; 32];
+        id[0] = 1;
+        id
+    };
+
+    let mut vs = ValidatorSet::new(vec![
+        ValidatorInfo::new(v1, 100),
+    ]);
+
+    // Miss 49 blocks (just under threshold).
+    for _ in 0..49 {
+        assert!(record_missed_block(&mut vs, &v1).is_none());
+    }
+    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, 49);
+
+    // Reset by successful proposal.
+    vs.get_mut(&v1).unwrap().missed_blocks = 0;
+
+    // Miss 49 more — should NOT trigger slash (counter was reset).
+    for _ in 0..49 {
+        assert!(record_missed_block(&mut vs, &v1).is_none());
+    }
+    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, 49);
+
+    // One more miss triggers slash.
+    let evidence = record_missed_block(&mut vs, &v1);
+    assert!(evidence.is_some(), "50th miss must trigger slash");
+}
+
+#[test]
+fn double_sign_detection_requires_different_state_roots() {
+    use solen_consensus::slashing::check_double_sign;
+
+    let proposer = [0x01; 32];
+    let header_a = solen_types::block::BlockHeader {
+        height: 10,
+        epoch: 0,
+        parent_hash: [0; 32],
+        state_root: [0xAA; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer,
+        timestamp_ms: 100,
+    };
+
+    // Same proposer, same height, SAME state root — not a double sign.
+    let mut header_b = header_a.clone();
+    header_b.timestamp_ms = 200; // different timestamp but same state root
+    assert!(
+        check_double_sign(&header_a, &header_b).is_none(),
+        "same state root must NOT trigger double-sign"
+    );
+
+    // Same proposer, same height, different state root — IS a double sign.
+    header_b.state_root = [0xBB; 32];
+    assert!(
+        check_double_sign(&header_a, &header_b).is_some(),
+        "different state root must trigger double-sign"
+    );
+
+    // Different proposer — NOT a double sign.
+    header_b.proposer = [0x02; 32];
+    assert!(
+        check_double_sign(&header_a, &header_b).is_none(),
+        "different proposer must NOT trigger double-sign"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MEMPOOL RESOURCE EXHAUSTION TESTS
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn mempool_full_rejects_new_ops() {
+    let mempool = Mempool::new(5); // tiny pool
+
+    for i in 0..5u8 {
+        let mut sender = [0u8; 32];
+        sender[0] = i;
+        let op = solen_types::transaction::UserOperation {
+            sender,
+            nonce: 0,
+            actions: vec![],
+            max_fee: 100,
+            signature: vec![0; 64],
+        };
+        assert!(mempool.submit(op), "op {} should be accepted", i);
+    }
+
+    // 6th op should be rejected.
+    let op = solen_types::transaction::UserOperation {
+        sender: [0xFF; 32],
+        nonce: 0,
+        actions: vec![],
+        max_fee: 100,
+        signature: vec![0; 64],
+    };
+    assert!(!mempool.submit(op), "mempool at capacity must reject");
+}
+
+#[test]
+fn mempool_drain_returns_correct_count() {
+    let mempool = Mempool::new(100);
+
+    for i in 0..10u8 {
+        let mut sender = [0u8; 32];
+        sender[0] = i;
+        let op = solen_types::transaction::UserOperation {
+            sender,
+            nonce: 0,
+            actions: vec![],
+            max_fee: 100,
+            signature: vec![0; 64],
+        };
+        mempool.submit(op);
+    }
+
+    // Drain 5 — should get exactly 5.
+    let drained = mempool.drain(5);
+    assert_eq!(drained.len(), 5, "drain(5) should return 5 ops");
+
+    // Drain remaining — should get 5 more.
+    let remaining = mempool.drain(100);
+    assert_eq!(remaining.len(), 5, "remaining should be 5");
+
+    // Drain again — empty.
+    let empty = mempool.drain(100);
+    assert_eq!(empty.len(), 0, "pool should be empty");
+}

@@ -47,11 +47,17 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
                 return false;
             }
             let mut valid_count = 0u16;
+            let mut counted_signers = std::collections::HashSet::new();
             for chunk in signature.chunks_exact(96) {
                 let mut pubkey = [0u8; 32];
                 pubkey.copy_from_slice(&chunk[..32]);
                 let mut sig = [0u8; 64];
                 sig.copy_from_slice(&chunk[32..96]);
+
+                // Reject duplicate signers — each key can only count once.
+                if !counted_signers.insert(pubkey) {
+                    continue;
+                }
 
                 // Only count if this pubkey is in the signers list.
                 if signers.contains(&pubkey) && solen_crypto::verify(&pubkey, msg, &sig).is_ok() {
@@ -166,17 +172,43 @@ fn verify_passkey(pk_x: &[u8; 32], pk_y: &[u8; 32], msg: &[u8], signature: &[u8]
 }
 
 /// Extract a string value from a JSON object (simple parser, no dependencies).
+/// Rejects duplicate keys to prevent injection attacks where an attacker
+/// provides two "challenge" fields and the parser picks the wrong one.
 fn extract_json_string<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let pattern = format!("\"{}\"", key);
+
+    // Find first occurrence.
     let key_pos = json.find(&pattern)?;
+
+    // Reject if there's a second occurrence (duplicate key injection).
+    if json[key_pos + pattern.len()..].contains(&pattern) {
+        return None;
+    }
+
     let after_key = &json[key_pos + pattern.len()..];
     // Skip whitespace and colon
     let after_colon = after_key.trim_start().strip_prefix(':')?;
     let after_ws = after_colon.trim_start();
     // Expect opening quote
     let after_quote = after_ws.strip_prefix('"')?;
-    let end = after_quote.find('"')?;
-    Some(&after_quote[..end])
+    // Find closing quote, handling escaped quotes.
+    let mut end = 0;
+    let bytes = after_quote.as_bytes();
+    while end < bytes.len() {
+        if bytes[end] == b'"' && (end == 0 || bytes[end - 1] != b'\\') {
+            break;
+        }
+        end += 1;
+    }
+    if end >= bytes.len() {
+        return None;
+    }
+    // Reject values containing backslashes (no legitimate challenge uses escapes).
+    let value = &after_quote[..end];
+    if value.contains('\\') {
+        return None;
+    }
+    Some(value)
 }
 
 /// Base64url encoding without padding (RFC 4648 §5).
@@ -699,6 +731,24 @@ impl BlockExecutor {
                             )));
                         }
                     }
+                }
+            }
+
+            // Session keys must NEVER be able to change auth methods or deploy code.
+            // These are privileged operations requiring full account authorization.
+            for action in &op.actions {
+                match action {
+                    Action::SetAuth { .. } => {
+                        return Err(ExecutionError::State(StateError::AccountNotFound(
+                            "session keys cannot modify account auth methods".into(),
+                        )));
+                    }
+                    Action::Deploy { .. } => {
+                        return Err(ExecutionError::State(StateError::AccountNotFound(
+                            "session keys cannot deploy contracts".into(),
+                        )));
+                    }
+                    _ => {}
                 }
             }
 

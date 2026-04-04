@@ -149,10 +149,26 @@ pub fn restore_snapshot(
     let meta = read_snapshot_meta(data)?;
     let compressed = &data[HEADER_SIZE..];
 
-    // Decompress.
+    // Decompress with size limit to prevent decompression bombs.
+    const MAX_SNAPSHOT_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GB
     let mut decoder = DeflateDecoder::new(compressed);
     let mut raw = Vec::new();
-    decoder.read_to_end(&mut raw)?;
+    let mut buf = [0u8; 64 * 1024]; // 64 KB chunks
+    loop {
+        match std::io::Read::read(&mut decoder, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if raw.len() > MAX_SNAPSHOT_SIZE {
+                    return Err(SnapshotError::Invalid(format!(
+                        "decompressed size exceeds {}MB limit",
+                        MAX_SNAPSHOT_SIZE / (1024 * 1024)
+                    )));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     let uncompressed_size = raw.len();
 

@@ -539,8 +539,28 @@ fn execute_governance_call(
                 None => return err("invalid args"),
             };
             let support = args.get(8).map(|&b| b != 0).unwrap_or(false);
-            let weight = read_u128(args, 9).unwrap_or(1);
+            let claimed_weight = read_u128(args, 9).unwrap_or(1);
             let epoch = read_current_epoch(store);
+
+            // Cap vote weight at voter's actual stake (self-stake + delegations).
+            // Prevents voting with arbitrary weight.
+            let actual_stake = {
+                use solen_system_contracts::staking::StakingContract;
+                let staking = StakingContract::load(store);
+                let validator_stake: u128 = staking.validators.iter()
+                    .filter(|v| v.id == *sender && v.is_active)
+                    .map(|v| v.total_stake())
+                    .sum();
+                let delegated_stake: u128 = staking.delegations.iter()
+                    .filter(|d| d.delegator == *sender)
+                    .map(|d| d.amount)
+                    .sum();
+                validator_stake.saturating_add(delegated_stake)
+            };
+            if actual_stake == 0 {
+                return err("voter has no stake");
+            }
+            let weight = claimed_weight.min(actual_stake);
 
             match gov.vote(proposal_id, *sender, support, weight, epoch) {
                 Ok(()) => {

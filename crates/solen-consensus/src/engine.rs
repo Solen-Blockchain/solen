@@ -1136,13 +1136,15 @@ impl ConsensusEngine {
         };
 
         // Verify our computed state root matches the block header.
+        // Reject mismatched blocks to prevent state corruption from poisoned peers.
         if exec_result.state_root != header.state_root {
             warn!(
                 height,
                 ours = ?&exec_result.state_root[..4],
                 theirs = ?&header.state_root[..4],
-                "state root mismatch in synced block — applying anyway (peer is authoritative)"
+                "state root mismatch in synced block — rejecting (possible poisoned peer)"
             );
+            return;
         }
 
         // Use synced receipts if available (they include user tx events).
@@ -1344,14 +1346,12 @@ impl ConsensusEngine {
 }
 
 /// Hash a block header to get the block hash.
+/// Panics if serialization fails — a block header must always be serializable.
+/// A fallback hash would create collisions between blocks at the same height.
 pub fn block_hash(header: &BlockHeader) -> Hash {
-    match serde_json::to_vec(header) {
-        Ok(data) => blake3_hash(&data),
-        Err(e) => {
-            warn!(error = %e, "block header serialization failed — using height-based hash");
-            blake3_hash(&header.height.to_le_bytes())
-        }
-    }
+    let data = serde_json::to_vec(header)
+        .expect("block header serialization must not fail");
+    blake3_hash(&data)
 }
 
 fn compute_tx_root(ops: &[solen_types::transaction::UserOperation]) -> Hash {

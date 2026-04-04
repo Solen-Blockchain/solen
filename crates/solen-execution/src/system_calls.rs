@@ -969,31 +969,59 @@ fn execute_intent_call(
             let num_transfers = u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
 
             let mut offset = 60;
-            let mut state = StateManager::new(store);
 
-            // Execute each transfer.
-            for _ in 0..num_transfers {
-                if offset + 48 > args.len() {
-                    return err("invalid args: transfer data truncated");
+            // Pre-validate: parse all transfers and check total balance BEFORE
+            // executing any. This prevents partial execution where transfers 1..N
+            // succeed but N+1 fails, leaving the intent half-fulfilled.
+            let mut transfers = Vec::with_capacity(num_transfers);
+            let mut total_needed: u128 = 0;
+            {
+                let mut check_offset = offset;
+                for _ in 0..num_transfers {
+                    if check_offset + 48 > args.len() {
+                        return err("invalid args: transfer data truncated");
+                    }
+                    let to = match read_account_id(args, check_offset) {
+                        Some(t) => t,
+                        None => return err("invalid args: bad transfer recipient"),
+                    };
+                    let amount = read_u128(args, check_offset + 32).unwrap_or(0);
+                    check_offset += 48;
+                    total_needed = total_needed.saturating_add(amount);
+                    transfers.push((to, amount));
                 }
-                let to = match read_account_id(args, offset) {
-                    Some(t) => t,
-                    None => return err("invalid args: bad transfer recipient"),
-                };
-                let amount = read_u128(args, offset + 32).unwrap_or(0);
-                offset += 48;
+            }
+            // Add solver tip to total needed.
+            total_needed = total_needed.saturating_add(claimed_tip);
 
-                // Debit sender.
-                match state.require_account(sender) {
-                    Ok(mut sender_acct) => {
-                        if sender_acct.balance < amount {
+            // Check sender has enough balance for ALL transfers + tip.
+            {
+                let state = StateManager::new(store);
+                match state.get_account(sender) {
+                    Ok(Some(acct)) => {
+                        if acct.balance < total_needed {
                             return SystemCallResult {
                                 gas_used: SYSTEM_CALL_GAS,
                                 events,
-                                error: Some("insufficient balance for intent transfer".to_string()),
+                                error: Some(format!(
+                                    "insufficient balance for intent: need {} but have {}",
+                                    total_needed, acct.balance
+                                )),
                             };
                         }
-                        sender_acct.balance -= amount;
+                    }
+                    _ => return err("sender account not found"),
+                }
+            }
+
+            let mut state = StateManager::new(store);
+
+            // Execute each transfer (pre-validated — all will succeed).
+            for (to, amount) in &transfers {
+                // Debit sender.
+                match state.require_account(sender) {
+                    Ok(mut sender_acct) => {
+                        sender_acct.balance -= *amount;
                         let _ = state.save_account(&sender_acct);
                     }
                     Err(e) => return SystemCallResult {
@@ -1004,22 +1032,22 @@ fn execute_intent_call(
                 }
 
                 // Credit recipient (create if needed).
-                let mut recipient = state.get_account(&to)
+                let mut recipient = state.get_account(to)
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| solen_types::account::Account {
-                        id: to,
+                        id: *to,
                         code_hash: [0u8; 32],
                         auth_methods: vec![],
                         nonce: 0,
                         balance: 0,
                     });
-                recipient.balance += amount;
+                recipient.balance += *amount;
                 let _ = state.save_account(&recipient);
 
                 // Emit transfer event.
                 let mut data = Vec::with_capacity(48);
-                data.extend_from_slice(&to);
+                data.extend_from_slice(to);
                 data.extend_from_slice(&amount.to_le_bytes());
                 events.push(Event {
                     emitter: *sender,

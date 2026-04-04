@@ -275,8 +275,9 @@ impl<'a> StateManager<'a> {
         contract_id: &AccountId,
         storage: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
     ) -> Result<(), StateError> {
-        // Save each key-value pair. Keys MUST be sorted for deterministic
-        // manifest serialization — HashMap iteration order is random.
+        // Save each key-value pair. Put order doesn't affect state root (the
+        // store iterates keys in sorted order for merkle computation). The sorted
+        // keys vec below is used only for the manifest.
         let mut keys: Vec<Vec<u8>> = storage.keys().cloned().collect();
         keys.sort();
         for (key, value) in storage {

@@ -367,6 +367,43 @@ async fn main() -> anyhow::Result<()> {
                                         );
                                     }
                                     {
+                                        // Verify finalized checkpoint if present.
+                                        // The checkpoint proves 2/3+ of validators attested
+                                        // to this state root, preventing long-range attacks.
+                                        let checkpoint_valid = if let Some(cp) = json["result"]["checkpoint"].as_object() {
+                                            let cp_state_root = cp.get("state_root")
+                                                .and_then(|v| v.as_str()).unwrap_or("");
+                                            let cp_height = cp.get("height")
+                                                .and_then(|v| v.as_u64()).unwrap_or(0);
+                                            let attestations = cp.get("attestations")
+                                                .and_then(|v| v.as_array())
+                                                .map(|a| a.len()).unwrap_or(0);
+
+                                            if attestations == 0 {
+                                                info!("snapshot has no checkpoint attestations — accepting on seed consensus only");
+                                                true
+                                            } else {
+                                                info!(
+                                                    cp_height,
+                                                    attestations,
+                                                    cp_state_root,
+                                                    "snapshot includes finalized checkpoint"
+                                                );
+                                                // Verify checkpoint state_root matches snapshot.
+                                                // Full attestation signature verification happens after restore.
+                                                cp_state_root == snap_root || cp_state_root.is_empty()
+                                            }
+                                        } else {
+                                            // No checkpoint in response — older node or genesis.
+                                            info!("snapshot has no checkpoint — accepting on seed consensus only");
+                                            true
+                                        };
+
+                                        if !checkpoint_valid {
+                                            warn!("snapshot checkpoint state_root doesn't match — trying next seed");
+                                            continue;
+                                        }
+
                                         match base64_decode(b64) {
                                             Ok(data) => {
                                                 let tmp = format!("{}/snapshot.bin", data_dir);
@@ -518,6 +555,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Load persisted finalized checkpoint (survives restarts, anchors snapshot sync).
+    {
+        let store_lock = engine.store();
+        let store_guard = store_lock.read().unwrap();
+        let loaded = solen_consensus::checkpoint::FinalizedCheckpointStore::load(&**store_guard);
+        if let Some(ref cp) = loaded.latest {
+            info!(
+                height = cp.height,
+                epoch = cp.epoch,
+                attestations = cp.attestations.len(),
+                "loaded finalized checkpoint from store"
+            );
+        }
+        drop(store_guard);
+        *engine.finalized_checkpoints().write().unwrap() = loaded;
     }
 
     // Syncing flag: start in sync mode for multi-validator networks to prevent

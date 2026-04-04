@@ -258,6 +258,21 @@ pub struct SnapshotInfo {
     pub uncompressed_bytes: usize,
     /// Base64-encoded compressed snapshot data.
     pub data: String,
+    /// The latest finalized checkpoint (with 2/3+ validator attestations).
+    /// Syncing nodes verify the snapshot state_root matches this checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<SnapshotCheckpoint>,
+}
+
+/// Finalized checkpoint included in snapshot responses for verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotCheckpoint {
+    pub height: u64,
+    pub epoch: u64,
+    pub block_hash: String,
+    pub state_root: String,
+    /// Validator attestations: [(validator_id_base58, signature_hex)].
+    pub attestations: Vec<(String, String)>,
 }
 
 /// Verified batch info returned by the API.
@@ -439,6 +454,7 @@ impl SolenRpc {
                             compressed_bytes,
                             uncompressed_bytes: meta.uncompressed_size,
                             data: b64,
+                            checkpoint: None, // cache doesn't have engine access
                         };
                         *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info });
                         tracing::info!(height, "snapshot cache warmed");
@@ -1309,6 +1325,21 @@ impl SolenApiServer for SolenRpc {
         let compressed_bytes = data.len() - 56;
         let b64 = base64_encode(&data);
 
+        // Include the latest finalized checkpoint for snapshot verification.
+        let checkpoint = {
+            let cp_store = self.engine.finalized_checkpoints();
+            let cp = cp_store.read().unwrap();
+            cp.latest.as_ref().map(|fc| SnapshotCheckpoint {
+                height: fc.height,
+                epoch: fc.epoch,
+                block_hash: hex_encode(&fc.block_hash),
+                state_root: hex_encode(&fc.state_root),
+                attestations: fc.attestations.iter()
+                    .map(|(v, sig)| (account_to_base58(v), hex_encode(sig)))
+                    .collect(),
+            })
+        };
+
         let info = SnapshotInfo {
             height,
             epoch,
@@ -1317,6 +1348,7 @@ impl SolenApiServer for SolenRpc {
             compressed_bytes,
             uncompressed_bytes: meta.uncompressed_size,
             data: b64,
+            checkpoint,
         };
 
         // Cache it.

@@ -8,12 +8,16 @@ use serde::{Deserialize, Serialize};
 use solen_types::{AccountId, ValidatorId};
 use thiserror::Error;
 
-/// Unbonding cooldown in epochs.
-pub const UNBONDING_PERIOD: u64 = 7;
+/// Default unbonding cooldown in epochs (configurable via governance).
+pub const DEFAULT_UNBONDING_PERIOD: u64 = 7;
 
-/// Minimum stake to register as a validator.
+/// Default minimum stake to register as a validator (configurable via governance).
 /// 500,000 SOLEN in base units (8 decimals).
-pub const MIN_VALIDATOR_STAKE: u128 = 500_000 * 100_000_000;
+pub const DEFAULT_MIN_VALIDATOR_STAKE: u128 = 500_000 * 100_000_000;
+
+/// Backwards compatibility aliases.
+pub const UNBONDING_PERIOD: u64 = DEFAULT_UNBONDING_PERIOD;
+pub const MIN_VALIDATOR_STAKE: u128 = DEFAULT_MIN_VALIDATOR_STAKE;
 
 /// Minimum number of active validators. The network will reject
 /// deregistrations that would drop below this count.
@@ -115,6 +119,14 @@ pub struct StakingContract {
     pub validators: Vec<StakingValidator>,
     pub delegations: Vec<Delegation>,
     pub undelegations: Vec<Undelegation>,
+    /// Configurable minimum validator stake (base units). Set via governance.
+    /// If None, uses DEFAULT_MIN_VALIDATOR_STAKE.
+    #[serde(default)]
+    pub min_validator_stake: Option<u128>,
+    /// Configurable unbonding period (epochs). Set via governance.
+    /// If None, uses DEFAULT_UNBONDING_PERIOD.
+    #[serde(default)]
+    pub unbonding_period: Option<u64>,
 }
 
 impl StakingContract {
@@ -128,9 +140,18 @@ impl StakingContract {
         id: ValidatorId,
         self_stake: u128,
     ) -> Result<(), StakingError> {
-        if self_stake < MIN_VALIDATOR_STAKE {
+        self.register_validator_with_min_stake(id, self_stake, MIN_VALIDATOR_STAKE)
+    }
+
+    pub fn register_validator_with_min_stake(
+        &mut self,
+        id: ValidatorId,
+        self_stake: u128,
+        min_stake: u128,
+    ) -> Result<(), StakingError> {
+        if self_stake < min_stake {
             return Err(StakingError::InsufficientStake {
-                need: MIN_VALIDATOR_STAKE,
+                need: min_stake,
                 have: self_stake,
             });
         }
@@ -160,9 +181,19 @@ impl StakingContract {
         self_stake: u128,
         current_epoch: u64,
     ) -> Result<(), StakingError> {
-        if self_stake < MIN_VALIDATOR_STAKE {
+        self.register_validator_at_epoch_with_config(id, self_stake, current_epoch, MIN_VALIDATOR_STAKE)
+    }
+
+    pub fn register_validator_at_epoch_with_config(
+        &mut self,
+        id: ValidatorId,
+        self_stake: u128,
+        current_epoch: u64,
+        min_stake: u128,
+    ) -> Result<(), StakingError> {
+        if self_stake < min_stake {
             return Err(StakingError::InsufficientStake {
-                need: MIN_VALIDATOR_STAKE,
+                need: min_stake,
                 have: self_stake,
             });
         }
@@ -338,7 +369,7 @@ impl StakingContract {
             delegator,
             validator,
             amount,
-            unlock_epoch: current_epoch + UNBONDING_PERIOD,
+            unlock_epoch: current_epoch + self.unbonding_period.unwrap_or(UNBONDING_PERIOD),
         });
 
         Ok(())
@@ -424,9 +455,10 @@ impl StakingContract {
             return Ok(()); // Already active, nothing to do.
         }
 
-        if val.self_stake < MIN_VALIDATOR_STAKE {
+        let min_stake = self.min_validator_stake.unwrap_or(MIN_VALIDATOR_STAKE);
+        if val.self_stake < min_stake {
             return Err(StakingError::InsufficientStake {
-                need: MIN_VALIDATOR_STAKE,
+                need: min_stake,
                 have: val.self_stake,
             });
         }

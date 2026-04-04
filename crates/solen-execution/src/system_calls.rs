@@ -134,7 +134,7 @@ fn execute_staking_call(
 
             staking = StakingContract::load(store);
             let current_epoch = read_current_epoch(store);
-            match staking.register_validator_at_epoch(*sender, amount, current_epoch) {
+            match staking.register_validator_at_epoch_with_config(*sender, amount, current_epoch, min_stake) {
                 Ok(()) => {
                     let mut data = Vec::with_capacity(48);
                     data.extend_from_slice(sender);
@@ -553,6 +553,29 @@ fn execute_governance_call(
             });
             Ok(())
         }
+        "propose_set_unbonding_period" => {
+            let new_period = match read_u64(args, 0) {
+                Some(p) => p,
+                None => return err("invalid args: need new_period[8]"),
+            };
+            if new_period == 0 {
+                return err("unbonding period must be > 0");
+            }
+            let desc = String::from_utf8_lossy(&args[8..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetUnbondingPeriod { new_period },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
         "vote" => {
             // args: proposal_id[8] + support[1] + stake_weight[16]
             let proposal_id = match read_u64(args, 0) {
@@ -685,7 +708,18 @@ fn execute_governance_call(
                         }
                         ProposalAction::SetMinValidatorStake { new_min_stake } => {
                             let _ = store.put(b"__config_min_validator_stake__", &new_min_stake.to_le_bytes());
+                            // Also update the staking contract's config.
+                            let mut staking_cfg = solen_system_contracts::staking::StakingContract::load(store);
+                            staking_cfg.min_validator_stake = Some(*new_min_stake);
+                            staking_cfg.save(store);
                             format!("min_validator_stake={}", new_min_stake)
+                        }
+                        ProposalAction::SetUnbondingPeriod { new_period } => {
+                            let _ = store.put(b"__config_unbonding_period__", &new_period.to_le_bytes());
+                            let mut staking_cfg = solen_system_contracts::staking::StakingContract::load(store);
+                            staking_cfg.unbonding_period = Some(*new_period);
+                            staking_cfg.save(store);
+                            format!("unbonding_period={}", new_period)
                         }
                         ProposalAction::EmergencyPause => "paused".to_string(),
                         ProposalAction::EmergencyResume => "resumed".to_string(),

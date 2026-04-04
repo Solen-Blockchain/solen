@@ -62,6 +62,8 @@ pub enum ProposalAction {
     SetEpochReward { new_reward: u128 },
     /// Change minimum validator self-stake (base units).
     SetMinValidatorStake { new_min_stake: u128 },
+    /// Change unbonding period (epochs).
+    SetUnbondingPeriod { new_period: u64 },
     /// Emergency pause (circuit breaker).
     EmergencyPause,
     /// Resume from emergency pause.

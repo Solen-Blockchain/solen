@@ -195,6 +195,9 @@ async fn handle_drip(
     };
 
     // Build and sign the transfer.
+    // IMPORTANT: parse_address properly Base58-decodes the address to [u8; 32].
+    // Do NOT use .as_bytes() or hex_decode on Base58 strings — that produces
+    // ASCII byte values instead of the actual public key.
     let to = match parse_address(&recipient_hex) {
         Ok(id) => id,
         Err(_) => {

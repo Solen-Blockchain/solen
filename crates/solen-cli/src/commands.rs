@@ -332,7 +332,7 @@ pub async fn cmd_stake(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
     let validator_id = resolve_account_id(validator)?;
-    let validator_bytes = hex_decode(&validator_id)?;
+    let validator_bytes = validator_id.to_vec();
 
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
@@ -364,7 +364,7 @@ pub async fn cmd_stake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Stake submitted successfully.");
-        println!("  Delegated {} SOLEN to {}", format_solen(amount), validator_id);
+        println!("  Delegated {} SOLEN to {}", format_solen(amount), account_to_base58(&validator_id));
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
     }
@@ -382,7 +382,7 @@ pub async fn cmd_unstake(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
     let validator_id = resolve_account_id(validator)?;
-    let validator_bytes = hex_decode(&validator_id)?;
+    let validator_bytes = validator_id.to_vec();
 
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
@@ -414,7 +414,7 @@ pub async fn cmd_unstake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Unstake submitted successfully.");
-        println!("  Undelegating {} SOLEN from {}", format_solen(amount), validator_id);
+        println!("  Undelegating {} SOLEN from {}", format_solen(amount), account_to_base58(&validator_id));
         println!("  Funds available after unbonding period (7 epochs).");
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -501,7 +501,7 @@ pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()
 
 pub async fn cmd_balance(rpc: &RpcClient, account: &str) -> Result<()> {
     let account_id = resolve_account_id(account)?;
-    let balance = rpc.get_balance(&account_id).await?;
+    let balance = rpc.get_balance(&account_to_base58(&account_id)).await?;
     println!("{}", balance);
     Ok(())
 }
@@ -510,7 +510,7 @@ pub async fn cmd_balance(rpc: &RpcClient, account: &str) -> Result<()> {
 
 pub async fn cmd_account(rpc: &RpcClient, account: &str) -> Result<()> {
     let account_id = resolve_account_id(account)?;
-    let info = rpc.get_account(&account_id).await?;
+    let info = rpc.get_account(&account_to_base58(&account_id)).await?;
 
     println!("Account");
     println!("────────────────────────────────────────");
@@ -553,10 +553,7 @@ pub async fn cmd_transfer(
 ) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
-    let to_id = resolve_account_id(to)?;
-    let to_bytes = hex_decode(&to_id)?;
-    let mut to_arr = [0u8; 32];
-    to_arr.copy_from_slice(&to_bytes);
+    let to_arr = resolve_account_id(to)?;
 
     // Get current nonce.
     let sender_hex = account_to_base58(&sender_id);
@@ -589,7 +586,7 @@ pub async fn cmd_transfer(
     if result.accepted {
         println!("Transaction submitted successfully.");
         println!("  From:   {} ({})", from, sender_hex);
-        println!("  To:     {} ({})", to, to_id);
+        println!("  To:     {} ({})", to, account_to_base58(&to_arr));
         println!("  Amount: {}", amount);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -671,7 +668,7 @@ pub async fn cmd_call(
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
     let target_id = resolve_account_id(target)?;
-    let target_bytes = hex_decode(&target_id)?;
+    let target_bytes = target_id.to_vec();
     let mut target_arr = [0u8; 32];
     target_arr.copy_from_slice(&target_bytes);
 
@@ -709,7 +706,7 @@ pub async fn cmd_call(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Call submitted successfully.");
-        println!("  Target: {}", target_id);
+        println!("  Target: {}", account_to_base58(&target_id));
         println!("  Method: {}", method);
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -867,21 +864,26 @@ pub fn cmd_key_change_password() -> Result<()> {
 // ── Helpers ─────────────────────────────────────────────────────
 
 /// Resolve an account identifier — a key name, hex ID, or Base58 address.
-fn resolve_account_id(input: &str) -> Result<String> {
+/// Resolve an input to a 32-byte account ID. Accepts:
+/// - Base58 address
+/// - Hex address (with optional 0x prefix)
+/// - Key name from the local keystore
+/// - Arbitrary name (hashed to deterministic ID)
+fn resolve_account_id(input: &str) -> Result<[u8; 32]> {
     // Try parsing as an address (hex or Base58).
     if let Ok(id) = parse_address(input) {
-        return Ok(hex_encode(&id));
+        return Ok(id);
     }
 
     // Try loading from keystore.
     let ks = wallet::load_keystore()?;
     if let Some(key) = ks.keys.get(input) {
-        return Ok(key.account_id_hex.clone());
+        return parse_address(&key.account_id_hex)
+            .map_err(|e| anyhow::anyhow!("invalid stored account_id: {}", e));
     }
 
     // Treat as a name and convert to account ID.
-    let id = wallet::name_to_account_id(input);
-    Ok(hex_encode(&id))
+    Ok(wallet::name_to_account_id(input))
 }
 
 fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
@@ -986,7 +988,7 @@ pub async fn cmd_initiate_recovery(
     let info = rpc.get_account(&sender_hex).await?;
 
     let target_id = resolve_account_id(target)?;
-    let target_bytes = hex_decode(&target_id)?;
+    let target_bytes = target_id.to_vec();
 
     // Parse new public key.
     let new_pk_hex = new_public_key_hex.strip_prefix("0x").unwrap_or(new_public_key_hex);
@@ -1029,7 +1031,7 @@ pub async fn cmd_initiate_recovery(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Recovery initiated successfully.");
-        println!("  Target:     {}", target_id);
+        println!("  Target:     {}", account_to_base58(&target_id));
         println!("  New key:    {}", new_pk_hex);
         println!("  Timelock:   ~1 week (151,200 blocks)");
         println!("\nOther guardians must confirm with: confirm-recovery");

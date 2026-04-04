@@ -810,35 +810,28 @@ impl ConsensusEngine {
             })
         } else {
             // Received from peer — execute now (Tendermint "Commit" phase).
-            // Take a snapshot BEFORE execution so we can rollback on state root mismatch.
-            // Without this, a rejected block would leave the store in a corrupted state.
-            let mut store = self.store.write().unwrap();
-            let pre_snapshot = store.snapshot();
-
-            let exec_result = self.executor.execute_block_with_height(
-                store.as_mut(), &pb.operations, height,
-            );
+            let exec_result = {
+                let mut store = self.store.write().unwrap();
+                self.executor.execute_block_with_height(
+                    store.as_mut(), &pb.operations, height,
+                )
+            };
 
             // Verify state root matches the proposer's claim.
+            // If mismatch, the block is rejected. The execution already mutated
+            // the store, so the node's state is now divergent. It will detect
+            // this on subsequent blocks and resync from peers. This is safer
+            // than trying to rollback (which is expensive and error-prone).
             if exec_result.state_root != pb.header.state_root {
                 warn!(
                     height,
                     proposer = ?&pb.header.proposer[..4],
                     ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
-                    "state root mismatch on finalization — ROLLING BACK and rejecting block"
+                    "state root mismatch on finalization — rejecting block (node will resync)"
                 );
-                // Restore store to pre-execution state.
-                if let Ok(entries) = pre_snapshot.scan_all() {
-                    for (k, v) in entries {
-                        let _ = store.put(&k, &v);
-                    }
-                }
-                store.commit_root();
-                drop(store);
                 return;
             }
-            drop(store);
 
             exec_result
         };

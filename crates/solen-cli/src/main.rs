@@ -83,6 +83,16 @@ enum Commands {
         description: String,
     },
 
+    /// Propose changing the minimum validator stake (governance)
+    ProposeMinStake {
+        /// Your key name
+        from: String,
+        /// New minimum stake in SOLEN (e.g., 15000)
+        new_min_stake: String,
+        /// Description of the proposal
+        description: String,
+    },
+
     /// Vote on a governance proposal
     Vote {
         /// Your key name
@@ -318,6 +328,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::ProposeBlockTime { from, new_block_time_ms, description } => {
             commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, chain_id).await?
+        }
+        Commands::ProposeMinStake { from, new_min_stake, description } => {
+            let base = parse_solen_amount(&new_min_stake)?;
+            commands::cmd_propose_min_stake(&rpc, &from, base, &description, chain_id).await?
         }
         Commands::Vote { from, proposal_id, yes, weight } => {
             let base = parse_solen_amount(&weight)?;

@@ -701,29 +701,64 @@ impl ConsensusEngine {
                 let existing_hash = block_hash(&existing.header);
                 let existing_header = existing.header.clone();
                 let is_same_proposer = existing.header.proposer == header.proposer;
+                let new_hash = block_hash(header);
                 drop(pending);
 
-                if existing_hash != block_hash(header) {
-                    // Different block at same height from the same proposer = double-sign.
-                    if is_same_proposer {
-                        if let Some(evidence) = crate::slashing::check_double_sign(&existing_header, header) {
-                            warn!(
-                                height = header.height,
-                                proposer = ?&header.proposer[..4],
-                                "DOUBLE SIGN DETECTED — queuing slashing evidence"
-                            );
-                            self.process_slashing(&evidence);
-                        }
-                    } else {
-                        debug!(
-                            height = header.height,
-                            "conflicting block at same height from different proposers — keeping existing"
-                        );
-                    }
+                if existing_hash == new_hash {
+                    return false; // identical block, already have it
                 }
-                return false;
+
+                // Different block at same height from the same proposer = double-sign.
+                if is_same_proposer {
+                    if let Some(evidence) = crate::slashing::check_double_sign(&existing_header, header) {
+                        warn!(
+                            height = header.height,
+                            proposer = ?&header.proposer[..4],
+                            "DOUBLE SIGN DETECTED — queuing slashing evidence"
+                        );
+                        self.process_slashing(&evidence);
+                    }
+                    return false;
+                }
+
+                // Competing block from a different proposer. Use stake-weighted
+                // fork scoring: prefer the block from the higher-priority proposer
+                // (lower position in the proposer order for this height).
+                let seed = self.epoch_seed();
+                let vs = self.validator_set.read().unwrap();
+                let order = vs.proposer_order_for_height(header.height, &seed);
+                drop(vs);
+
+                let existing_rank = order.iter().position(|id| *id == existing_header.proposer)
+                    .unwrap_or(usize::MAX);
+                let new_rank = order.iter().position(|id| *id == header.proposer)
+                    .unwrap_or(usize::MAX);
+
+                if new_rank < existing_rank {
+                    // New block is from a higher-priority proposer — replace.
+                    info!(
+                        height = header.height,
+                        existing_rank,
+                        new_rank,
+                        "replacing pending block with higher-priority proposer's block"
+                    );
+
+                    // Remove old pending block and its attestations.
+                    self.pending_blocks.write().unwrap().remove(&header.height);
+                    self.pending_attestations.write().unwrap().remove(&header.height);
+                    // Fall through to accept the new block below.
+                } else {
+                    debug!(
+                        height = header.height,
+                        existing_rank,
+                        new_rank,
+                        "keeping existing block (higher priority proposer)"
+                    );
+                    return false;
+                }
+            } else {
+                drop(pending);
             }
-            drop(pending);
         }
 
         // Store as pending WITHOUT executing. Execution happens on finalization.

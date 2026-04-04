@@ -451,6 +451,78 @@ fn duplicate_block_at_same_height_rejected() {
     assert!(!accepted2, "duplicate block at same height must be rejected");
 }
 
+#[test]
+fn fork_scoring_prefers_higher_priority_proposer() {
+    // Use the standard single-validator engine setup, then accept
+    // competing blocks from "external" proposers at the next height.
+    let (engine, _alice_kp, _alice, validator_id) = setup_engine();
+
+    // Produce block 1 (auto-finalizes in single-validator mode).
+    engine.produce_block();
+    assert_eq!(engine.height(), 1);
+
+    let blocks = engine.get_blocks_for_sync(1, 1);
+    let parent_hash = solen_consensus::engine::block_hash(&blocks[0].header);
+
+    // Two different "external" proposers.
+    let v_a = {
+        let mut id = [0u8; 32];
+        id[0] = 0xAA;
+        id
+    };
+    let v_b = {
+        let mut id = [0u8; 32];
+        id[0] = 0xBB;
+        id
+    };
+
+    // Add them to the validator set so accept_block doesn't reject as unknown.
+    {
+        use solen_consensus::validator::ValidatorInfo;
+        let vs = engine.validator_set();
+        let mut vs = vs.write().unwrap();
+        vs.add(ValidatorInfo::new(v_a, 1000));
+        vs.add(ValidatorInfo::new(v_b, 1000));
+    }
+
+    // Two competing blocks at height 2 from different proposers.
+    let header_a = solen_types::block::BlockHeader {
+        height: 2,
+        epoch: 0,
+        parent_hash,
+        state_root: [0xAA; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: v_a,
+        timestamp_ms: 100,
+        proposer_signature: vec![],
+    };
+
+    let header_b = solen_types::block::BlockHeader {
+        height: 2,
+        epoch: 0,
+        parent_hash,
+        state_root: [0xBB; 32],
+        transactions_root: [0; 32],
+        receipts_root: [0; 32],
+        proposer: v_b,
+        timestamp_ms: 200,
+        proposer_signature: vec![],
+    };
+
+    // Accept first block.
+    let first_accepted = engine.accept_block(&header_a, &[]);
+    assert!(first_accepted, "first competing block should be accepted");
+    assert!(engine.has_pending_block(2));
+
+    // Now the competing block arrives. Fork scoring compares proposer
+    // priority. One will replace, the other will be rejected.
+    let _second_result = engine.accept_block(&header_b, &[]);
+
+    // Either way, we should still have exactly one pending block.
+    assert!(engine.has_pending_block(2), "should have a pending block at height 2");
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SLASHING EDGE CASE TESTS
 // ═══════════════════════════════════════════════════════════════

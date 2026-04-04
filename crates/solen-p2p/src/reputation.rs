@@ -117,7 +117,6 @@ impl PeerReputation {
     fn get_or_create(&mut self, peer: &PeerId) -> &mut PeerScore {
         // Prune if too many tracked peers.
         if self.peers.len() > MAX_TRACKED_PEERS {
-            let now = Instant::now();
             self.peers.retain(|_, s| {
                 s.last_decay.elapsed() < Duration::from_secs(600) || s.banned_until.is_some()
             });

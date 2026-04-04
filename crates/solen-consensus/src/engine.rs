@@ -1352,8 +1352,10 @@ impl ConsensusEngine {
             em.process_epoch_transition(&mut vs);
 
             // Sync new validators from staking contract into consensus set.
-            let store = self.store.read().unwrap();
-            let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+            let staking = {
+                let store = self.store.read().unwrap();
+                solen_system_contracts::staking::StakingContract::load(store.as_ref())
+            };
 
             // Build the set of active staking validators.
             let active_ids: std::collections::HashSet<_> = staking.validators
@@ -1421,6 +1423,10 @@ impl ConsensusEngine {
                     );
                 }
             }
+
+            // Drop validator_set write lock before checkpoint attestation.
+            // attest_checkpoint needs validator_set read lock — holding write would deadlock.
+            drop(vs);
 
             // Self-attest the checkpoint if we're a validator.
             {

@@ -7,7 +7,7 @@ Deployment configurations for running Solen network infrastructure.
 | Network | RPC | Faucet | API | Explorer | P2P Seeds |
 |---------|-----|--------|-----|----------|-----------|
 | **Mainnet** | `rpc.solenchain.io` | — | `api.solenchain.io` | `solenscan.io` | `seed1.solenchain.io` |
-| **Testnet** | `testnet-rpc.solenchain.io` | `testnet-faucet.solenchain.io` | `testnet-api.solenchain.io` | `explorer.solenchain.io` | `testnet-seed1.solenchain.io` |
+| **Testnet** | `testnet-rpc.solenchain.io` | `testnet-faucet.solenchain.io` | `testnet-api.solenchain.io` | `solenscan.io` | `testnet-seed1.solenchain.io` |
 
 ## Testnet
 

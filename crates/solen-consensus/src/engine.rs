@@ -131,6 +131,8 @@ pub struct ConsensusEngine {
     /// Epoch seed for randomized proposer selection. Derived from the last block
     /// hash of the previous epoch. Updated at each epoch boundary.
     epoch_seed: Arc<RwLock<[u8; 32]>>,
+    /// Dynamic finalized checkpoints — agreed by 2/3+ validators at epoch boundaries.
+    finalized_checkpoints: Arc<RwLock<crate::checkpoint::FinalizedCheckpointStore>>,
     /// Trusted checkpoints for long-range attack protection.
     trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
 }
@@ -206,6 +208,7 @@ impl ConsensusEngine {
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
             intent_pool: Arc::new(IntentPool::new(10_000)),
             epoch_seed: Arc::new(RwLock::new([0u8; 32])), // genesis epoch uses round-robin
+            finalized_checkpoints: Arc::new(RwLock::new(crate::checkpoint::FinalizedCheckpointStore::new())),
             proof_registry: {
                 let mut reg = ProofVerifierRegistry::new();
                 reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
@@ -237,6 +240,41 @@ impl ConsensusEngine {
     /// Current epoch seed for proposer selection randomization.
     pub fn epoch_seed(&self) -> [u8; 32] {
         *self.epoch_seed.read().unwrap()
+    }
+
+    /// Finalized checkpoint store.
+    pub fn finalized_checkpoints(&self) -> Arc<RwLock<crate::checkpoint::FinalizedCheckpointStore>> {
+        self.finalized_checkpoints.clone()
+    }
+
+    /// Get the pending checkpoint info for broadcasting our attestation.
+    pub fn pending_checkpoint(&self) -> Option<(u64, Hash, Hash)> {
+        let cp_store = self.finalized_checkpoints.read().unwrap();
+        cp_store.pending.as_ref().map(|p| (p.height, p.block_hash, p.state_root))
+    }
+
+    /// Add a checkpoint attestation from a validator.
+    pub fn attest_checkpoint(&self, validator_id: ValidatorId, signature: Vec<u8>) -> bool {
+        let vs = self.validator_set.read().unwrap();
+        let mut cp_store = self.finalized_checkpoints.write().unwrap();
+        let finalized = cp_store.add_attestation(validator_id, signature, &vs);
+        if finalized {
+            // Persist the finalized checkpoint.
+            let store = self.store.read().unwrap();
+            // Save to a non-state key so it doesn't affect state root.
+            if let Some(ref cp) = cp_store.latest {
+                if let Ok(data) = serde_json::to_vec(cp) {
+                    drop(store);
+                    let mut store = self.store.write().unwrap();
+                    let _ = store.put(b"__finalized_checkpoint__", &data);
+                }
+            }
+            info!(
+                height = cp_store.latest.as_ref().map(|c| c.height).unwrap_or(0),
+                "checkpoint FINALIZED (2/3+ quorum)"
+            );
+        }
+        finalized
     }
 
     pub fn store(&self) -> Arc<RwLock<Box<dyn StateStore>>> {
@@ -598,6 +636,20 @@ impl ConsensusEngine {
                 "block violates trusted checkpoint — rejecting (possible long-range attack)"
             );
             return false;
+        }
+
+        // Validate against dynamic finalized checkpoints.
+        {
+            let cp_store = self.finalized_checkpoints.read().unwrap();
+            if let Some(expected) = cp_store.validate_block(header.height, &bh) {
+                warn!(
+                    height = header.height,
+                    expected = ?&expected[..4],
+                    got = ?&bh[..4],
+                    "block conflicts with finalized checkpoint — rejecting"
+                );
+                return false;
+            }
         }
 
         if header.height > expected_height {
@@ -1312,6 +1364,44 @@ impl ConsensusEngine {
                     validator = ?&id[..4],
                     "validator removed from consensus set (exited staking)"
                 );
+            }
+
+            // Propose a new checkpoint at the epoch boundary.
+            // The block at this height becomes the checkpoint candidate.
+            {
+                let chain = self.chain.read().unwrap();
+                if let Some(last_block) = chain.last() {
+                    let bh = block_hash(&last_block.header);
+                    let mut cp_store = self.finalized_checkpoints.write().unwrap();
+                    cp_store.propose_checkpoint(
+                        last_block.header.height,
+                        em.current_epoch,
+                        bh,
+                        last_block.header.state_root,
+                    );
+                    info!(
+                        height = last_block.header.height,
+                        epoch = em.current_epoch,
+                        "checkpoint proposed at epoch boundary"
+                    );
+                }
+            }
+
+            // Self-attest the checkpoint if we're a validator.
+            {
+                let cp_store = self.finalized_checkpoints.read().unwrap();
+                if let Some(ref pending) = cp_store.pending {
+                    let msg = crate::checkpoint::FinalizedCheckpointStore::signing_message(
+                        pending.height,
+                        &pending.block_hash,
+                        &pending.state_root,
+                    );
+                    drop(cp_store);
+                    if let Some(ref kp) = self.signing_keypair {
+                        let sig = kp.sign(&msg).to_vec();
+                        self.attest_checkpoint(self.config.validator_id, sig);
+                    }
+                }
             }
 
             // Update epoch seed for randomized proposer selection.

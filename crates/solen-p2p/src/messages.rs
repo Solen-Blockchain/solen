@@ -45,6 +45,14 @@ pub enum NetworkMessage {
         height: u64,
         state_root: Hash,
     },
+    /// A validator's attestation of an epoch checkpoint.
+    CheckpointAttestation {
+        validator_id: ValidatorId,
+        height: u64,
+        block_hash: Hash,
+        state_root: Hash,
+        signature: Vec<u8>,
+    },
 }
 
 /// A block sent during sync (header + receipts for indexing).
@@ -67,6 +75,7 @@ impl NetworkMessage {
             NetworkMessage::SyncRequest { .. } => topic_sync(chain_id),
             NetworkMessage::SyncBlocks { .. } => topic_sync(chain_id),
             NetworkMessage::StatusAnnounce { .. } => topic_sync(chain_id),
+            NetworkMessage::CheckpointAttestation { .. } => topic_attestations(chain_id),
         }
     }
 

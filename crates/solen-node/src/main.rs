@@ -697,6 +697,28 @@ async fn main() -> anyhow::Result<()> {
                             net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
+                    NetworkMessage::CheckpointAttestation {
+                        validator_id,
+                        height,
+                        block_hash,
+                        state_root,
+                        signature,
+                    } => {
+                        // Verify the attestation signature.
+                        let msg = solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                            height, &block_hash, &state_root,
+                        );
+                        if signature.len() == 64 {
+                            let mut sig = [0u8; 64];
+                            sig.copy_from_slice(&signature);
+                            if solen_crypto::verify(&validator_id, &msg, &sig).is_ok() {
+                                let finalized = engine_for_p2p.attest_checkpoint(validator_id, signature);
+                                if finalized {
+                                    tracing::info!(height, "checkpoint finalized via peer attestation");
+                                }
+                            }
+                        }
+                    }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
                         // Rate-limit sync serving: ignore repeated requests for the
                         // same height range (stuck peer on old code).
@@ -988,6 +1010,25 @@ async fn main() -> anyhow::Result<()> {
                                 info!(old_ms = min_interval.as_millis(), new_ms = new_bt, "block time updated by governance");
                                 min_interval = std::time::Duration::from_millis(new_bt);
                             }
+                        }
+                    }
+                }
+
+                // At epoch boundaries, broadcast our checkpoint attestation.
+                if current_height % 100 == 0 {
+                    if let Some((cp_height, cp_block_hash, cp_state_root)) = engine_clone.pending_checkpoint() {
+                        let msg = solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                            cp_height, &cp_block_hash, &cp_state_root,
+                        );
+                        let sig = att_kp_for_consensus.sign(&msg);
+                        if let Some(ref handle) = net_for_blocks {
+                            handle.broadcast(NetworkMessage::CheckpointAttestation {
+                                validator_id: engine_clone.validator_id(),
+                                height: cp_height,
+                                block_hash: cp_block_hash,
+                                state_root: cp_state_root,
+                                signature: sig.to_vec(),
+                            });
                         }
                     }
                 }

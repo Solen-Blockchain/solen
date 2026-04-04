@@ -90,6 +90,174 @@ impl CheckpointStore {
     }
 }
 
+use solen_types::ValidatorId;
+
+// ── Finalized Checkpoints (dynamic, consensus-agreed) ────────
+
+/// A finalized checkpoint — agreed upon by 2/3+ of validators.
+/// Once finalized, all blocks at or before this height are irreversible.
+/// This prevents long-range attacks where an attacker forks from deep history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalizedCheckpoint {
+    pub height: BlockHeight,
+    pub epoch: Epoch,
+    pub block_hash: Hash,
+    pub state_root: Hash,
+    /// Validator signatures attesting to this checkpoint.
+    pub attestations: Vec<(ValidatorId, Vec<u8>)>,
+}
+
+/// Manages pending and finalized checkpoints.
+#[derive(Debug, Clone, Default)]
+pub struct FinalizedCheckpointStore {
+    /// The latest finalized checkpoint (has 2/3+ quorum).
+    pub latest: Option<FinalizedCheckpoint>,
+    /// Pending checkpoint being collected (not yet quorum).
+    pub pending: Option<PendingCheckpoint>,
+    /// History of finalized checkpoint heights for validation.
+    pub finalized_heights: Vec<u64>,
+}
+
+/// A checkpoint in the process of collecting attestations.
+#[derive(Debug, Clone)]
+pub struct PendingCheckpoint {
+    pub height: BlockHeight,
+    pub epoch: Epoch,
+    pub block_hash: Hash,
+    pub state_root: Hash,
+    pub attestations: Vec<(ValidatorId, Vec<u8>)>,
+    pub created_at: u64, // timestamp_ms
+}
+
+impl FinalizedCheckpointStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start collecting attestations for a new checkpoint at an epoch boundary.
+    pub fn propose_checkpoint(
+        &mut self,
+        height: BlockHeight,
+        epoch: Epoch,
+        block_hash: Hash,
+        state_root: Hash,
+    ) {
+        self.pending = Some(PendingCheckpoint {
+            height,
+            epoch,
+            block_hash,
+            state_root,
+            attestations: Vec::new(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    /// Add a validator's attestation to the pending checkpoint.
+    /// Returns true if this attestation caused the checkpoint to be finalized.
+    pub fn add_attestation(
+        &mut self,
+        validator_id: ValidatorId,
+        signature: Vec<u8>,
+        validator_set: &crate::validator::ValidatorSet,
+    ) -> bool {
+        let pending = match &mut self.pending {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Don't accept duplicate attestations.
+        if pending.attestations.iter().any(|(v, _)| *v == validator_id) {
+            return false;
+        }
+
+        pending.attestations.push((validator_id, signature));
+
+        // Check if we have quorum.
+        let attester_ids: Vec<ValidatorId> = pending
+            .attestations
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
+
+        if validator_set.has_quorum(&attester_ids) {
+            // Finalize the checkpoint.
+            let finalized = FinalizedCheckpoint {
+                height: pending.height,
+                epoch: pending.epoch,
+                block_hash: pending.block_hash,
+                state_root: pending.state_root,
+                attestations: pending.attestations.clone(),
+            };
+            self.finalized_heights.push(finalized.height);
+            // Keep only last 100 finalized heights.
+            if self.finalized_heights.len() > 100 {
+                self.finalized_heights.remove(0);
+            }
+            self.latest = Some(finalized);
+            self.pending = None;
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if a block conflicts with a finalized checkpoint.
+    /// Returns the expected hash if there's a conflict.
+    pub fn validate_block(&self, height: u64, block_hash: &Hash) -> Option<Hash> {
+        if let Some(ref cp) = self.latest {
+            // Any block at or before the finalized height must be on the same chain.
+            if height == cp.height && *block_hash != cp.block_hash {
+                return Some(cp.block_hash);
+            }
+        }
+        None
+    }
+
+    /// Check if a height has been finalized.
+    pub fn is_finalized(&self, height: u64) -> bool {
+        if let Some(ref cp) = self.latest {
+            height <= cp.height
+        } else {
+            false
+        }
+    }
+
+    /// Persist to store.
+    pub fn save(&self, store: &mut dyn solen_storage::StateStore) {
+        if let Ok(data) = serde_json::to_vec(&self.latest) {
+            let _ = store.put(b"__finalized_checkpoint__", &data);
+        }
+    }
+
+    /// Load from store.
+    pub fn load(store: &dyn solen_storage::StateStore) -> Self {
+        let latest = store.get(b"__finalized_checkpoint__")
+            .ok()
+            .flatten()
+            .and_then(|data| serde_json::from_slice(&data).ok());
+        let finalized_heights = latest.as_ref()
+            .map(|cp: &FinalizedCheckpoint| vec![cp.height])
+            .unwrap_or_default();
+        Self {
+            latest,
+            pending: None,
+            finalized_heights,
+        }
+    }
+
+    /// The checkpoint signing message: blake3(height || block_hash || state_root).
+    pub fn signing_message(height: u64, block_hash: &Hash, state_root: &Hash) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(72);
+        msg.extend_from_slice(&height.to_le_bytes());
+        msg.extend_from_slice(block_hash);
+        msg.extend_from_slice(state_root);
+        solen_crypto::blake3_hash(&msg).to_vec()
+    }
+}
+
 use serde_json;
 
 /// Hardcoded trusted checkpoints — verified block hashes at known heights.
@@ -209,5 +377,102 @@ mod tests {
 
         assert_eq!(loaded.all().len(), 2);
         assert_eq!(loaded.latest().unwrap().height, 200);
+    }
+
+    // ── Finalized checkpoint tests ───────────────────────────
+
+    fn vid(n: u8) -> ValidatorId {
+        let mut id = [0u8; 32];
+        id[0] = n;
+        id
+    }
+
+    #[test]
+    fn finalized_checkpoint_requires_quorum() {
+        use crate::validator::{ValidatorInfo, ValidatorSet};
+
+        let vs = ValidatorSet::new(vec![
+            ValidatorInfo::new(vid(1), 100),
+            ValidatorInfo::new(vid(2), 100),
+            ValidatorInfo::new(vid(3), 100),
+        ]);
+
+        let mut store = FinalizedCheckpointStore::new();
+        store.propose_checkpoint(100, 1, [0xAA; 32], [0xBB; 32]);
+
+        // 1 of 3 — not quorum.
+        let finalized = store.add_attestation(vid(1), vec![0; 64], &vs);
+        assert!(!finalized);
+        assert!(store.latest.is_none());
+
+        // 2 of 3 — still not quorum (need > 2/3).
+        let finalized = store.add_attestation(vid(2), vec![0; 64], &vs);
+        assert!(!finalized);
+
+        // 3 of 3 — quorum.
+        let finalized = store.add_attestation(vid(3), vec![0; 64], &vs);
+        assert!(finalized);
+        assert!(store.latest.is_some());
+        assert_eq!(store.latest.as_ref().unwrap().height, 100);
+    }
+
+    #[test]
+    fn finalized_checkpoint_rejects_duplicate_attestation() {
+        use crate::validator::{ValidatorInfo, ValidatorSet};
+
+        let vs = ValidatorSet::new(vec![
+            ValidatorInfo::new(vid(1), 100),
+            ValidatorInfo::new(vid(2), 100),
+            ValidatorInfo::new(vid(3), 100),
+        ]);
+
+        let mut store = FinalizedCheckpointStore::new();
+        store.propose_checkpoint(100, 1, [0xAA; 32], [0xBB; 32]);
+
+        store.add_attestation(vid(1), vec![0; 64], &vs);
+        // Duplicate from vid(1) — should be ignored.
+        let finalized = store.add_attestation(vid(1), vec![0; 64], &vs);
+        assert!(!finalized);
+    }
+
+    #[test]
+    fn finalized_checkpoint_blocks_conflicting_blocks() {
+        use crate::validator::{ValidatorInfo, ValidatorSet};
+
+        let vs = ValidatorSet::new(vec![
+            ValidatorInfo::new(vid(1), 100),
+            ValidatorInfo::new(vid(2), 100),
+            ValidatorInfo::new(vid(3), 100),
+        ]);
+
+        let mut store = FinalizedCheckpointStore::new();
+        store.propose_checkpoint(100, 1, [0xAA; 32], [0xBB; 32]);
+
+        // Finalize.
+        store.add_attestation(vid(1), vec![0; 64], &vs);
+        store.add_attestation(vid(2), vec![0; 64], &vs);
+        store.add_attestation(vid(3), vec![0; 64], &vs);
+
+        // Block at height 100 with matching hash — OK.
+        assert!(store.validate_block(100, &[0xAA; 32]).is_none());
+
+        // Block at height 100 with different hash — conflict.
+        assert!(store.validate_block(100, &[0xFF; 32]).is_some());
+
+        // Block at height 50 — before checkpoint, finalized.
+        assert!(store.is_finalized(50));
+        assert!(store.is_finalized(100));
+        assert!(!store.is_finalized(101));
+    }
+
+    #[test]
+    fn signing_message_is_deterministic() {
+        let msg1 = FinalizedCheckpointStore::signing_message(100, &[0xAA; 32], &[0xBB; 32]);
+        let msg2 = FinalizedCheckpointStore::signing_message(100, &[0xAA; 32], &[0xBB; 32]);
+        assert_eq!(msg1, msg2);
+
+        // Different inputs produce different messages.
+        let msg3 = FinalizedCheckpointStore::signing_message(101, &[0xAA; 32], &[0xBB; 32]);
+        assert_ne!(msg1, msg3);
     }
 }

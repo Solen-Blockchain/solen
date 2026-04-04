@@ -92,7 +92,7 @@ impl StateStore for CheckpointStore {
                 Ok(kv) => kv,
                 Err(_) => continue, // Skip corrupted entries.
             };
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") {
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();
@@ -176,7 +176,7 @@ impl StateStore for RocksStore {
             // Exclude non-execution keys from the state root.
             // Block storage and chain metadata differ across validators
             // based on timing, which would cause false state divergence.
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") {
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();

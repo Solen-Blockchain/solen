@@ -737,7 +737,9 @@ pub fn cmd_key_generate(name: &str) -> Result<()> {
         wallet::encrypt_new_key(&ks, &mut key, &password)?;
         println!("  Seed encrypted (wallet is locked)");
     } else {
-        println!("  Seed:        {} (SAVE THIS!)", key.seed_hex.as_deref().unwrap_or(""));
+        // Never print seeds to stdout — they persist in shell history and logs.
+        // Seeds are stored in the keystore file (~/.solen/keys.json).
+        println!("  Seed:        stored in keystore (use 'solen key lock' to encrypt)");
     }
 
     ks.keys.insert(name.to_string(), key);

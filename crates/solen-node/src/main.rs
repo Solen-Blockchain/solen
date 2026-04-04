@@ -162,7 +162,12 @@ async fn main() -> anyhow::Result<()> {
         match net {
             Network::Devnet => GenesisConfig::default_devnet(),
             Network::Testnet => GenesisConfig::default_testnet(),
-            Network::Mainnet => GenesisConfig::default_testnet(), // TODO: mainnet config
+            Network::Mainnet => {
+                anyhow::bail!(
+                    "mainnet requires an explicit genesis file via --genesis <path>. \
+                     Do NOT use testnet or devnet genesis for mainnet — those seeds are public."
+                );
+            }
         }
     };
 
@@ -1058,16 +1063,11 @@ fn attestation_payload(height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
 }
 
 fn rand_seed() -> [u8; 32] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let pid = std::process::id();
-    let mut input = Vec::new();
-    input.extend_from_slice(&nanos.to_le_bytes());
-    input.extend_from_slice(&pid.to_le_bytes());
-    // Add some additional entropy from the stack pointer.
-    let stack_var: u64 = 0;
-    input.extend_from_slice(&((&stack_var as *const u64) as u64).to_le_bytes());
-    solen_crypto::blake3_hash(&input)
+    // Use OS-provided cryptographic randomness. Never rely on timestamps,
+    // PIDs, or stack addresses — those are predictable.
+    let mut seed = [0u8; 32];
+    solen_crypto::random_bytes(&mut seed);
+    seed
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

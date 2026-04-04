@@ -107,8 +107,12 @@ impl StateStore for CheckpointStore {
         // Checkpoint of a checkpoint — just copy to memory.
         let mut mem = crate::memory::MemoryStore::new();
         for item in self.db.iterator(IteratorMode::Start) {
-            let (k, v) = item.unwrap();
-            mem.put(&k, &v).unwrap();
+            match item {
+                Ok((k, v)) => { let _ = mem.put(&k, &v); }
+                Err(e) => {
+                    tracing::error!(error = %e, "RocksDB iteration error in checkpoint snapshot — skipping entry");
+                }
+            }
         }
         Box::new(mem)
     }
@@ -194,8 +198,12 @@ impl StateStore for RocksStore {
         let mut mem = crate::memory::MemoryStore::new();
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
-            let (k, v) = item.unwrap();
-            mem.put(&k, &v).unwrap();
+            match item {
+                Ok((k, v)) => { let _ = mem.put(&k, &v); }
+                Err(e) => {
+                    tracing::error!(error = %e, "RocksDB iteration error in snapshot fallback — skipping entry");
+                }
+            }
         }
         Box::new(mem)
     }

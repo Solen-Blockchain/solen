@@ -35,8 +35,8 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:29944")]
     rpc: String,
 
-    /// Faucet account seed (32-byte hex).
-    #[arg(long, default_value = "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a")]
+    /// Faucet account seed (32-byte hex). Required — no default for security.
+    #[arg(long)]
     seed: String,
 
     /// Faucet account name (for ID derivation).

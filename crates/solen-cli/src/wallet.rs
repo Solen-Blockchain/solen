@@ -76,9 +76,21 @@ pub fn save_keystore(ks: &Keystore) -> Result<()> {
     let path = keystore_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Restrict directory permissions to owner only (Unix).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let data = serde_json::to_string_pretty(ks)?;
     std::fs::write(&path, data)?;
+    // Restrict file permissions to owner-read/write only (Unix).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 

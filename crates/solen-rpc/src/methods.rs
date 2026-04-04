@@ -358,7 +358,7 @@ impl RpcRateLimiter {
 
     /// Check and increment rate limit. Returns true if allowed.
     fn check(counter: &std::sync::Mutex<(u64, std::time::Instant)>, max_per_sec: u64) -> bool {
-        let mut guard = counter.lock().unwrap();
+        let mut guard = counter.lock().unwrap_or_else(|e| e.into_inner());
         if guard.1.elapsed() > std::time::Duration::from_secs(1) {
             *guard = (1, std::time::Instant::now());
             true
@@ -1236,6 +1236,15 @@ impl SolenApiServer for SolenRpc {
 
         let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
             .map_err(|e| internal_error(e.to_string()))?;
+
+        // Cap snapshot size to prevent OOM from base64 encoding huge states.
+        const MAX_SNAPSHOT_RESPONSE: usize = 100 * 1024 * 1024; // 100 MB
+        if data.len() > MAX_SNAPSHOT_RESPONSE {
+            return Err(internal_error(format!(
+                "snapshot too large ({} MB), use direct sync instead",
+                data.len() / (1024 * 1024)
+            )));
+        }
 
         let meta = solen_consensus::snapshot::read_snapshot_meta(&data)
             .map_err(|e| internal_error(e.to_string()))?;

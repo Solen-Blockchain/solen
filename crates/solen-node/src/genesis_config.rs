@@ -96,7 +96,30 @@ impl GenesisConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let data = std::fs::read_to_string(path)?;
         let config: Self = serde_json::from_str(&data)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate genesis configuration for dangerous or invalid values.
+    fn validate(&self) -> Result<()> {
+        if self.chain_id == 0 {
+            anyhow::bail!("genesis: chain_id must not be 0");
+        }
+        if self.block_time_ms == 0 {
+            anyhow::bail!("genesis: block_time_ms must not be 0");
+        }
+        if self.epoch_length == 0 {
+            anyhow::bail!("genesis: epoch_length must not be 0");
+        }
+        if self.validators.is_empty() {
+            anyhow::bail!("genesis: at least one validator required");
+        }
+        for v in &self.validators {
+            if v.stake == 0 {
+                anyhow::bail!("genesis: validator '{}' has zero stake", v.name);
+            }
+        }
+        Ok(())
     }
 
     /// Save to a JSON file.

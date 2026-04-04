@@ -70,6 +70,8 @@ struct AppState {
     chain_id: u64,
     /// Tracks last drip time per recipient hex.
     rate_limit: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Tracks last drip time per IP address (prevents faucet drain via unique accounts).
+    ip_rate_limit: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
     http_client: reqwest::Client,
 }
 
@@ -103,11 +105,55 @@ struct StatusResponse {
 
 async fn handle_drip(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<DripRequest>,
 ) -> (StatusCode, Json<DripResponse>) {
     let recipient_hex = resolve_account(&req.account);
 
-    // Rate limit check.
+    // Extract client IP from X-Forwarded-For (behind proxy) or fall back to "unknown".
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
+        .or_else(|| {
+            headers.get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Per-IP rate limit: max 5 drips per cooldown period per IP.
+    // Prevents draining by requesting to unlimited unique addresses.
+    {
+        const MAX_DRIPS_PER_IP: u32 = 5;
+        let mut ip_limits = state.ip_rate_limit.lock().unwrap();
+        let entry = ip_limits.entry(client_ip.clone()).or_insert((Instant::now(), 0));
+        if entry.0.elapsed() > state.cooldown {
+            // Reset window.
+            *entry = (Instant::now(), 1);
+        } else {
+            entry.1 += 1;
+            if entry.1 > MAX_DRIPS_PER_IP {
+                let remaining = (state.cooldown - entry.0.elapsed()).as_secs();
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(DripResponse {
+                        success: false,
+                        amount: "0".into(),
+                        recipient: recipient_hex,
+                        error: Some(format!("IP rate limited ({MAX_DRIPS_PER_IP} drips per {remaining}s), retry later")),
+                        retry_after_secs: Some(remaining),
+                    }),
+                );
+            }
+        }
+        // Prune old entries to prevent memory growth.
+        if ip_limits.len() > 10_000 {
+            ip_limits.retain(|_, (t, _)| t.elapsed() < state.cooldown * 2);
+        }
+    }
+
+    // Per-recipient rate limit.
     {
         let limits = state.rate_limit.lock().unwrap();
         if let Some(last) = limits.get(&recipient_hex) {
@@ -354,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
         cooldown: Duration::from_secs(cli.cooldown),
         chain_id: cli.chain_id,
         rate_limit: Arc::new(Mutex::new(HashMap::new())),
+        ip_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         http_client: reqwest::Client::new(),
     };
 

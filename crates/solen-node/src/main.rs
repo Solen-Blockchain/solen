@@ -559,6 +559,10 @@ async fn main() -> anyhow::Result<()> {
         let peer_heights_for_status = peer_heights_for_p2p.clone();
         let att_kp_for_p2p = attestation_kp.clone();
         tokio::spawn(async move {
+            // Track repeated sync requests to rate-limit stuck peers.
+            let mut sync_serve_tracker: std::collections::HashMap<u64, (std::time::Instant, u32)> =
+                std::collections::HashMap::new();
+
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
                     NetworkMessage::NewTransaction(op) => {
@@ -694,30 +698,51 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     NetworkMessage::SyncRequest { from_height, to_height } => {
-                        // Serve blocks to the requesting peer.
-                        let max_batch = 100;
-                        let _to = to_height.min(from_height + max_batch as u64 - 1);
-                        let blocks = engine_for_p2p.get_blocks_for_sync(from_height, max_batch);
+                        // Rate-limit sync serving: ignore repeated requests for the
+                        // same height range (stuck peer on old code).
+                        let now = std::time::Instant::now();
+                        let should_serve = {
+                            let entry = sync_serve_tracker.entry(from_height).or_insert((now, 0u32));
+                            if now.duration_since(entry.0) < std::time::Duration::from_secs(30) {
+                                entry.1 += 1;
+                                entry.1 <= 3 // serve max 3 times per 30s per height
+                            } else {
+                                *entry = (now, 1);
+                                true
+                            }
+                        };
+                        // Prune old tracker entries periodically.
+                        if sync_serve_tracker.len() > 1000 {
+                            sync_serve_tracker.retain(|_, (t, _)| now.duration_since(*t) < std::time::Duration::from_secs(60));
+                        }
 
-                        if !blocks.is_empty() {
-                            let sync_blocks: Vec<solen_p2p::messages::SyncBlock> = blocks
-                                .iter()
-                                .map(|b| solen_p2p::messages::SyncBlock {
-                                    header: b.header.clone(),
-                                    operations: b.operations.clone(),
-                                    receipts: b.result.receipts.clone(),
-                                })
-                                .collect();
+                        if !should_serve {
+                            tracing::debug!(from = from_height, "ignoring repeated sync request (rate limited)");
+                        } else {
+                            let max_batch = 100;
+                            let _to = to_height.min(from_height + max_batch as u64 - 1);
+                            let blocks = engine_for_p2p.get_blocks_for_sync(from_height, max_batch);
 
-                            tracing::info!(
-                                from = from_height,
-                                count = sync_blocks.len(),
-                                "serving sync blocks to peer"
-                            );
+                            if !blocks.is_empty() {
+                                let sync_blocks: Vec<solen_p2p::messages::SyncBlock> = blocks
+                                    .iter()
+                                    .map(|b| solen_p2p::messages::SyncBlock {
+                                        header: b.header.clone(),
+                                        operations: b.operations.clone(),
+                                        receipts: b.result.receipts.clone(),
+                                    })
+                                    .collect();
 
-                            net_for_attest.broadcast(NetworkMessage::SyncBlocks {
-                                blocks: sync_blocks,
-                            });
+                                tracing::info!(
+                                    from = from_height,
+                                    count = sync_blocks.len(),
+                                    "serving sync blocks to peer"
+                                );
+
+                                net_for_attest.broadcast(NetworkMessage::SyncBlocks {
+                                    blocks: sync_blocks,
+                                });
+                            }
                         }
                     }
                     NetworkMessage::SyncBlocks { mut blocks } => {

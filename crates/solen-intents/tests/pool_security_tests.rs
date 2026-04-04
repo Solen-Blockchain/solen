@@ -33,6 +33,7 @@ fn test_solution(intent_id: u64, score: u64) -> Solution {
         operations: vec![],
         claimed_tip: 25,
         score,
+        signature: vec![],
     }
 }
 

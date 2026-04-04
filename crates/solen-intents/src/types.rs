@@ -66,4 +66,8 @@ pub struct Solution {
     /// How much of the tip the solver claims.
     pub claimed_tip: u128,
     pub score: u64, // solver-reported quality score
+    /// Signature proving the solver controls the claimed solver account.
+    /// Signs: intent_id[8] + solver[32] + claimed_tip[16].
+    #[serde(default)]
+    pub signature: Vec<u8>,
 }

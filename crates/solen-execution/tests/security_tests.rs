@@ -481,3 +481,183 @@ fn system_signature_rejected_from_block_execution() {
         "[0xFF] signature on non-system call must be rejected"
     );
 }
+
+// ── Test #20: Governance vote weight capped at actual stake ──
+
+#[test]
+fn governance_vote_weight_capped_at_stake() {
+    let mut store = MemoryStore::new();
+    let voter_kp = Keypair::from_seed(&[0x0A; 32]);
+    let voter = voter_kp.public_key();
+    let proposer_kp = Keypair::from_seed(&[0x0B; 32]);
+    let proposer = proposer_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![
+            GenesisAccount {
+                id: voter,
+                balance: 1_000_000_000,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: voter }],
+            },
+            GenesisAccount {
+                id: proposer,
+                balance: 1_000_000_000,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: proposer }],
+            },
+        ],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+
+    // Voter has no stake (0 in staking contract). Voting should be rejected.
+    let gov_addr = solen_types::system::GOVERNANCE_ADDRESS;
+
+    // Build vote args: proposal_id[8] + support[1] + stake_weight[16]
+    // Use proposal_id=0 (won't exist but the weight check happens first for non-stakers)
+    let mut vote_args = Vec::new();
+    vote_args.extend_from_slice(&0u64.to_le_bytes()); // proposal_id
+    vote_args.push(1u8); // support = yes
+    vote_args.extend_from_slice(&u128::MAX.to_le_bytes()); // claim max weight
+
+    let mut op = UserOperation {
+        sender: voter,
+        nonce: 0,
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "vote".to_string(),
+            args: vote_args,
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    sign_op(&voter_kp, &executor, &mut op);
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "voter with 0 stake must not be able to vote"
+    );
+    assert!(
+        result.receipts[0].error.as_ref().unwrap().contains("no stake"),
+        "error should mention no stake"
+    );
+}
+
+// ── Test #21: Threshold multisig with all permutations ───────
+
+#[test]
+fn threshold_single_signer_insufficient_for_2of3() {
+    let mut store = MemoryStore::new();
+    let s1 = Keypair::from_seed(&[0x01; 32]);
+    let s2 = Keypair::from_seed(&[0x02; 32]);
+    let s3 = Keypair::from_seed(&[0x03; 32]);
+    let recipient = Keypair::from_seed(&[0x04; 32]).public_key();
+
+    let owner = s1.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![
+            GenesisAccount {
+                id: owner,
+                balance: 1_000_000_000,
+                auth_methods: vec![AuthMethod::Threshold {
+                    signers: vec![s1.public_key(), s2.public_key(), s3.public_key()],
+                    threshold: 2,
+                }],
+            },
+            GenesisAccount {
+                id: recipient,
+                balance: 0,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+            },
+        ],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+
+    // 1 of 3 — must fail.
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Transfer { to: recipient, amount: 1 }],
+        max_fee: 0,
+        signature: vec![],
+    };
+    let msg = executor.operation_signing_message(&op);
+    let sig1 = s1.sign(&msg);
+    let mut single_sig = Vec::with_capacity(96);
+    single_sig.extend_from_slice(&s1.public_key());
+    single_sig.extend_from_slice(&sig1);
+    op.signature = single_sig;
+
+    let result = executor.execute_block(&mut store, &[op.clone()]);
+    assert!(!result.receipts[0].success, "1-of-3 must fail for threshold 2");
+
+    // Unknown signer — must fail.
+    let rogue = Keypair::from_seed(&[0xFF; 32]);
+    let rogue_sig = rogue.sign(&msg);
+    let mut rogue_two = Vec::with_capacity(192);
+    rogue_two.extend_from_slice(&rogue.public_key());
+    rogue_two.extend_from_slice(&rogue_sig);
+    rogue_two.extend_from_slice(&s1.public_key());
+    rogue_two.extend_from_slice(&sig1);
+    op.signature = rogue_two;
+
+    let result2 = executor.execute_block(&mut store, &[op]);
+    assert!(!result2.receipts[0].success, "unknown signer + 1 valid must fail for threshold 2");
+}
+
+// ── Test #22: Session key cannot deploy contracts ────────────
+
+#[test]
+fn session_key_cannot_deploy() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x0A; 32]);
+    let session_kp = Keypair::from_seed(&[0x0B; 32]);
+    let owner = owner_kp.public_key();
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 1_000_000_000,
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 1_000_000_000,
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+
+    let mut op = UserOperation {
+        sender: owner,
+        nonce: 0,
+        actions: vec![Action::Deploy {
+            code: vec![0x00, 0x61, 0x73, 0x6D], // fake wasm
+            salt: [0u8; 32],
+        }],
+        max_fee: 0,
+        signature: vec![],
+    };
+
+    let msg = executor.operation_signing_message(&op);
+    op.signature = session_kp.sign(&msg).to_vec();
+
+    let result = executor.execute_block(&mut store, &[op]);
+    assert!(
+        !result.receipts[0].success,
+        "session key must NOT be able to deploy contracts"
+    );
+}

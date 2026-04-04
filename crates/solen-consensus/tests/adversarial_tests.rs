@@ -283,3 +283,68 @@ fn mempool_rejects_duplicate_nonce() {
     };
     assert!(!mempool.submit(op2), "duplicate (sender, nonce) must be rejected");
 }
+
+// ── Adversarial test: Attestation for unknown block rejected ─
+
+#[test]
+fn attestation_for_unknown_block_rejected() {
+    let (engine, kp, validator_id, _alice) = setup_engine();
+
+    // Produce a block so we have height 1.
+    engine.produce_block();
+
+    // Try to accept attestation for a block at height 2 that we don't have.
+    let fake_hash = [0xAB; 32];
+    let accepted = engine.accept_attestation(validator_id, 2, fake_hash);
+    assert!(!accepted, "attestation for unknown block must be rejected");
+}
+
+// ── Adversarial test: Synced block with wrong state root rejected ─
+
+#[test]
+fn synced_block_wrong_state_root_rejected() {
+    let (engine, kp, validator_id, alice) = setup_engine();
+
+    // Produce a real block to get height 1.
+    let produced = engine.produce_block();
+    let real_header = produced.header.clone();
+
+    // Create a fake header with wrong state root.
+    let mut fake_header = real_header.clone();
+    fake_header.height = 2;
+    fake_header.parent_hash = solen_consensus::engine::block_hash(&real_header);
+    fake_header.state_root = [0xFF; 32]; // wrong state root
+
+    let height_before = engine.height();
+    engine.replay_synced_block(&fake_header, &[], vec![]);
+
+    assert_eq!(
+        engine.height(),
+        height_before,
+        "block with wrong state root must be rejected during sync"
+    );
+}
+
+// ── Adversarial test: Mempool rejects [0xFF] system signature ─
+
+#[test]
+fn mempool_rejects_system_signature() {
+    let mempool = Mempool::new(100);
+
+    let op = solen_types::transaction::UserOperation {
+        sender: [0x01; 32],
+        nonce: 0,
+        actions: vec![solen_types::transaction::Action::Call {
+            target: solen_types::system::STAKING_ADDRESS,
+            method: "slash".to_string(),
+            args: vec![0; 40],
+        }],
+        max_fee: 0,
+        signature: vec![0xFF], // system marker
+    };
+
+    assert!(
+        !mempool.submit(op),
+        "[0xFF] system signature must be rejected from mempool"
+    );
+}

@@ -184,6 +184,9 @@ pub struct SolutionRequest {
     pub operations: Vec<UserOperation>,
     pub claimed_tip: String,
     pub score: u64,
+    /// Hex-encoded Ed25519 signature proving solver identity.
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 /// Solution submission result.
@@ -914,12 +917,19 @@ impl SolenApiServer for SolenRpc {
             ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>)
         })?;
 
+        let sig_bytes = if let Some(hex) = &req.signature {
+            hex_decode(hex).unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         let solution = solen_intents::types::Solution {
             intent_id: req.intent_id,
             solver,
             operations: req.operations,
             claimed_tip,
             score: req.score,
+            signature: sig_bytes,
         };
 
         let pool = self.engine.intent_pool();

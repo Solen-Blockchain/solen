@@ -216,6 +216,12 @@ impl NetworkService {
             let mut peer_msg_counts: std::collections::HashMap<libp2p::PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
             const MAX_MSGS_PER_PEER_PER_SEC: u64 = 50;
 
+            // Global inbound bytes rate limit: prevents aggregate flooding
+            // through multiple relay peers (each under per-peer limit).
+            const MAX_GLOBAL_BYTES_PER_SEC: usize = 50 * 1024 * 1024; // 50 MB/s
+            let mut global_bytes_window: usize = 0;
+            let mut global_bytes_reset = std::time::Instant::now();
+
             // Periodically run Kademlia bootstrap and redial if needed.
             let mut maintenance_interval = tokio::time::interval(Duration::from_secs(10));
             maintenance_interval.tick().await; // skip first immediate tick
@@ -258,6 +264,17 @@ impl NetworkService {
                             SwarmEvent::Behaviour(SolenBehaviourEvent::Gossipsub(
                                 gossipsub::Event::Message { message, propagation_source, .. },
                             )) => {
+                                // Global inbound bytes rate limit.
+                                if global_bytes_reset.elapsed() > Duration::from_secs(1) {
+                                    global_bytes_window = 0;
+                                    global_bytes_reset = std::time::Instant::now();
+                                }
+                                global_bytes_window += message.data.len();
+                                if global_bytes_window > MAX_GLOBAL_BYTES_PER_SEC {
+                                    debug!(bytes = global_bytes_window, "global rate limit exceeded — dropping message");
+                                    continue;
+                                }
+
                                 // Per-peer rate limiting.
                                 let entry = peer_msg_counts.entry(propagation_source).or_insert((0, std::time::Instant::now()));
                                 if entry.1.elapsed() > Duration::from_secs(1) {

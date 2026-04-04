@@ -59,6 +59,7 @@ impl IntentSolver for DirectTransferSolver {
             operations: vec![op],
             claimed_tip: intent.tip / 2, // claim half the tip
             score: 100,
+            signature: vec![], // built-in solver runs in-process, no signature needed
         })
     }
 

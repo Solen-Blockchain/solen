@@ -161,7 +161,13 @@ impl StateStore for RocksStore {
         for item in iter {
             let (k, v) = match item {
                 Ok(kv) => kv,
-                Err(_) => continue,
+                Err(e) => {
+                    // Fail loudly on RocksDB iteration errors. Silent skip would
+                    // produce an incomplete merkle root, causing state divergence
+                    // between nodes with partial disk corruption.
+                    tracing::error!(error = %e, "RocksDB iteration error during state_root — aborting");
+                    panic!("RocksDB iteration error in state_root: {e}");
+                }
             };
             // Exclude non-execution keys from the state root.
             // Block storage and chain metadata differ across validators

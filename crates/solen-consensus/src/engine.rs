@@ -660,21 +660,34 @@ impl ConsensusEngine {
         block_height: u64,
         attested_hash: Hash,
     ) -> bool {
-        // Verify attestation is for a block we know about.
+        // Only accept attestations for blocks we already have in pending.
+        // Accepting attestations without the block enables split-quorum attacks
+        // where an attacker sends attestations for a block that doesn't exist
+        // or differs from what honest nodes have.
         {
             let pending = self.pending_blocks.read().unwrap();
-            if let Some(pb) = pending.get(&block_height) {
-                let expected_hash = block_hash(&pb.header);
-                if expected_hash != attested_hash {
-                    warn!(
+            match pending.get(&block_height) {
+                Some(pb) => {
+                    let expected_hash = block_hash(&pb.header);
+                    if expected_hash != attested_hash {
+                        warn!(
+                            height = block_height,
+                            "attestation block hash mismatch — ignoring"
+                        );
+                        return false;
+                    }
+                }
+                None => {
+                    // We don't have this block yet. Reject the attestation.
+                    // The attestation will be re-sent when we receive the actual block,
+                    // or we'll get the block and self-attest + broadcast.
+                    debug!(
                         height = block_height,
-                        "attestation block hash mismatch — ignoring"
+                        "attestation for unknown block — ignoring (block not yet received)"
                     );
                     return false;
                 }
             }
-            // If we don't have the block yet, still accept the attestation
-            // (it may arrive before the block in gossip ordering).
         }
 
         // Add to pending attestations.

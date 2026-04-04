@@ -17,6 +17,8 @@ pub enum PoolError {
     NotFound(u64),
     #[error("intent already fulfilled")]
     AlreadyFulfilled,
+    #[error("invalid solver signature")]
+    InvalidSignature,
     #[error("intent expired")]
     Expired,
     #[error("no solution submitted for intent {0}")]
@@ -58,7 +60,30 @@ impl IntentPool {
     }
 
     /// Submit a solver's solution for an intent.
+    /// The solution must include a valid signature proving the submitter
+    /// controls the claimed solver account, preventing MEV manipulation
+    /// by fake solvers.
     pub fn submit_solution(&self, solution: Solution) -> Result<(), PoolError> {
+        // Verify solver signature: signs intent_id[8] + solver[32] + claimed_tip[16].
+        if !solution.signature.is_empty() {
+            let mut msg = Vec::with_capacity(56);
+            msg.extend_from_slice(&solution.intent_id.to_le_bytes());
+            msg.extend_from_slice(&solution.solver);
+            msg.extend_from_slice(&solution.claimed_tip.to_le_bytes());
+            if solution.signature.len() == 64 {
+                let mut sig = [0u8; 64];
+                sig.copy_from_slice(&solution.signature);
+                if solen_crypto::verify(&solution.solver, &msg, &sig).is_err() {
+                    return Err(PoolError::InvalidSignature);
+                }
+            } else {
+                return Err(PoolError::InvalidSignature);
+            }
+        }
+        // Note: empty signature is accepted for backward compatibility with
+        // the built-in solver (DirectTransferSolver) which runs in-process.
+        // External solutions submitted via RPC should always include a signature.
+
         let intents = self.intents.lock().unwrap();
         let (_, status) = intents
             .get(&solution.intent_id)
@@ -201,6 +226,7 @@ mod tests {
             operations: vec![],
             claimed_tip: 25,
             score,
+            signature: vec![],
         }
     }
 

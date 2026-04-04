@@ -71,6 +71,20 @@ pub struct ChainStatus {
     pub total_staked: String,
     /// Tokens currently in circulation (not locked in system pools).
     pub total_circulation: String,
+    /// Governance-configurable parameters (current on-chain values).
+    #[serde(default)]
+    pub config: ChainConfig,
+}
+
+/// Governance-configurable chain parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChainConfig {
+    pub block_time_ms: u64,
+    pub min_validator_stake: String,
+    pub unbonding_period_epochs: u64,
+    pub epoch_length: u64,
+    pub base_fee_per_gas: String,
+    pub burn_rate_bps: u64,
 }
 
 /// Validator info returned by the RPC.
@@ -470,6 +484,30 @@ fn parse_account_id(s: &str) -> RpcResult<[u8; 32]> {
     })
 }
 
+fn read_config_u64(store: &dyn solen_storage::StateStore, key: &[u8]) -> Option<u64> {
+    store.get(key).ok().flatten().and_then(|data| {
+        if data.len() >= 8 {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&data[..8]);
+            Some(u64::from_le_bytes(buf))
+        } else {
+            None
+        }
+    })
+}
+
+fn read_config_u128(store: &dyn solen_storage::StateStore, key: &[u8]) -> Option<u128> {
+    store.get(key).ok().flatten().and_then(|data| {
+        if data.len() >= 16 {
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&data[..16]);
+            Some(u128::from_le_bytes(buf))
+        } else {
+            None
+        }
+    })
+}
+
 fn internal_error(msg: impl ToString) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32603, msg.to_string(), None::<()>)
 }
@@ -788,6 +826,18 @@ impl SolenApiServer for SolenRpc {
 
         let total_circulation = total_allocation.saturating_sub(non_circulating).saturating_sub(total_staked);
 
+        // Read governance-configurable parameters.
+        let config_block_time = read_config_u64(store.as_ref(), b"__config_block_time__")
+            .unwrap_or(self.engine.config().block_time_ms);
+        let config_min_stake = read_config_u128(store.as_ref(), b"__config_min_validator_stake__")
+            .unwrap_or(solen_system_contracts::staking::DEFAULT_MIN_VALIDATOR_STAKE);
+        let config_unbonding = staking.unbonding_period
+            .unwrap_or(solen_system_contracts::staking::DEFAULT_UNBONDING_PERIOD);
+        let config_burn_rate = read_config_u64(store.as_ref(), b"__config_burn_rate__")
+            .unwrap_or(5000); // default 50%
+        let config_base_fee = read_config_u128(store.as_ref(), b"__config_base_fee__")
+            .unwrap_or(0);
+
         Ok(ChainStatus {
             height: self.engine.height(),
             state_root: hex_encode(&store.state_root()),
@@ -795,6 +845,14 @@ impl SolenApiServer for SolenRpc {
             total_allocation: total_allocation.to_string(),
             total_staked: total_staked.to_string(),
             total_circulation: total_circulation.to_string(),
+            config: ChainConfig {
+                block_time_ms: config_block_time,
+                min_validator_stake: config_min_stake.to_string(),
+                unbonding_period_epochs: config_unbonding,
+                epoch_length: 100,
+                base_fee_per_gas: config_base_fee.to_string(),
+                burn_rate_bps: config_burn_rate,
+            },
         })
     }
 

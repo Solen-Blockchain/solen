@@ -226,6 +226,10 @@ impl ConsensusEngine {
         self.signing_keypair = Some(kp);
     }
 
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     pub fn store(&self) -> Arc<RwLock<Box<dyn StateStore>>> {
         self.store.clone()
     }

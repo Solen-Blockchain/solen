@@ -88,7 +88,7 @@ pub async fn cmd_claim_vesting(rpc: &RpcClient, from: &str, chain_id: u64) -> Re
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: vesting_addr,
             method: "claim".to_string(),
@@ -135,7 +135,7 @@ pub async fn cmd_propose_block_time(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: gov_addr,
             method: "propose_set_block_time".to_string(),
@@ -180,7 +180,7 @@ pub async fn cmd_vote(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: gov_addr,
             method: "vote".to_string(),
@@ -216,7 +216,7 @@ pub async fn cmd_finalize_proposal(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: gov_addr,
             method: "finalize".to_string(),
@@ -252,7 +252,7 @@ pub async fn cmd_execute_proposal(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: gov_addr,
             method: "execute".to_string(),
@@ -297,7 +297,7 @@ pub async fn cmd_register_validator(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: staking_addr,
             method: "register".to_string(),
@@ -345,7 +345,7 @@ pub async fn cmd_stake(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: {
                 let mut t = [0xFFu8; 32];
@@ -395,7 +395,7 @@ pub async fn cmd_unstake(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: {
                 let mut t = [0xFFu8; 32];
@@ -438,7 +438,7 @@ pub async fn cmd_withdraw_stake(rpc: &RpcClient, from: &str, chain_id: u64) -> R
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: staking_addr,
             method: "withdraw".to_string(),
@@ -475,7 +475,7 @@ pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: staking_addr,
             method: "unjail".to_string(),
@@ -555,13 +555,13 @@ pub async fn cmd_transfer(
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
     let to_arr = resolve_account_id(to)?;
 
-    // Get current nonce.
+    // Get next nonce (accounts for pending mempool transactions).
     let sender_hex = account_to_base58(&sender_id);
-    let info = rpc.get_account(&sender_hex).await?;
+    let nonce = rpc.get_next_nonce(&sender_hex).await?;
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce,
         actions: vec![Action::Transfer {
             to: to_arr,
             amount,
@@ -623,7 +623,7 @@ pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str, chain_id: 
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Deploy {
             code,
             salt,
@@ -682,7 +682,7 @@ pub async fn cmd_call(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: target_arr,
             method: method.to_string(),
@@ -939,7 +939,7 @@ pub async fn cmd_multisig(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::SetAuth { auth_methods }],
         max_fee: 100_000,
         signature: vec![],
@@ -1016,7 +1016,7 @@ pub async fn cmd_initiate_recovery(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: guardian_addr,
             method: "initiate_recovery".to_string(),
@@ -1063,7 +1063,7 @@ pub async fn cmd_confirm_recovery(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: guardian_addr,
             method: "confirm_recovery".to_string(),
@@ -1105,7 +1105,7 @@ pub async fn cmd_cancel_recovery(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: guardian_addr,
             method: "cancel_recovery".to_string(),
@@ -1147,7 +1147,7 @@ pub async fn cmd_execute_recovery(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: guardian_addr,
             method: "execute_recovery".to_string(),
@@ -1215,7 +1215,7 @@ pub async fn cmd_register_rollup(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: bridge_addr,
             method: "register_rollup".to_string(),
@@ -1261,7 +1261,7 @@ pub async fn cmd_register_paymaster(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: paymaster_addr,
             method: "register".to_string(),
@@ -1304,7 +1304,7 @@ pub async fn cmd_unregister_paymaster(
 
     let mut op = UserOperation {
         sender: sender_id,
-        nonce: info.nonce,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
         actions: vec![Action::Call {
             target: paymaster_addr,
             method: "unregister".to_string(),

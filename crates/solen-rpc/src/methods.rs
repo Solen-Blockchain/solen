@@ -264,6 +264,12 @@ pub trait SolenApi {
     #[method(name = "solen_getAccount")]
     fn get_account(&self, account_id: String) -> RpcResult<AccountInfo>;
 
+    /// Get the next usable nonce for an account, accounting for pending
+    /// transactions in the mempool. Clients should use this instead of
+    /// reading the nonce from getAccount when sending multiple transactions.
+    #[method(name = "solen_getNextNonce")]
+    fn get_next_nonce(&self, account_id: String) -> RpcResult<u64>;
+
     #[method(name = "solen_getBlock")]
     fn get_block(&self, height: u64) -> RpcResult<BlockInfo>;
 
@@ -496,6 +502,21 @@ impl SolenApiServer for SolenRpc {
             nonce: account.nonce,
             code_hash: hex_encode(&account.code_hash),
         })
+    }
+
+    fn get_next_nonce(&self, account_id: String) -> RpcResult<u64> {
+        let id = parse_account_id(&account_id)?;
+        let store = self.engine.store();
+        let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+        let state = ReadonlyStateManager::new(store.as_ref());
+        let on_chain_nonce = state
+            .get_account(&id)
+            .map_err(|e| internal_error(e))?
+            .map(|a| a.nonce)
+            .unwrap_or(0);
+
+        let pending = self.engine.mempool().pending_count_for_sender(&id) as u64;
+        Ok(on_chain_nonce + pending)
     }
 
     fn get_block(&self, height: u64) -> RpcResult<BlockInfo> {

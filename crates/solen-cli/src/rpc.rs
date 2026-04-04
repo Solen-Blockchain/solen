@@ -79,6 +79,12 @@ impl RpcClient {
             .await
     }
 
+    /// Get the next usable nonce accounting for pending mempool transactions.
+    pub async fn get_next_nonce(&self, account_id: &str) -> Result<u64> {
+        self.call("solen_getNextNonce", serde_json::json!([account_id]))
+            .await
+    }
+
     pub async fn get_block(&self, height: u64) -> Result<BlockInfo> {
         self.call("solen_getBlock", serde_json::json!([height]))
             .await

@@ -169,6 +169,11 @@ impl Mempool {
         self.inner.lock().unwrap().entries.len()
     }
 
+    /// Number of pending operations for a specific sender.
+    pub fn pending_count_for_sender(&self, sender: &[u8; 32]) -> usize {
+        self.inner.lock().unwrap().sender_counts.get(sender).copied().unwrap_or(0)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

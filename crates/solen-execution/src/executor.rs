@@ -599,7 +599,9 @@ impl BlockExecutor {
                 sender_acct.balance = sender_acct.balance.saturating_sub(total_fee);
                 save_or_warn(&mut state, &sender_acct);
 
-                // Credit treasury (non-burned portion).
+                // Credit treasury with the non-burned portion.
+                // The burned portion (total_fee - treasury_share) is permanently
+                // removed from circulation by not being credited to any account.
                 let treasury_share = fee_config.treasury_amount(total_fee);
                 if treasury_share > 0 {
                     if let Ok(Some(mut treasury)) =

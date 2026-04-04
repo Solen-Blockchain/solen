@@ -62,7 +62,7 @@ pub struct SubmitResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainStatus {
     pub height: u64,
-    pub latest_state_root: String,
+    pub state_root: String,
     pub pending_ops: usize,
     /// Total tokens allocated at genesis (base units).
     pub total_allocation: String,
@@ -794,7 +794,7 @@ impl SolenApiServer for SolenRpc {
 
         Ok(ChainStatus {
             height: self.engine.height(),
-            latest_state_root: hex_encode(&store.state_root()),
+            state_root: hex_encode(&store.state_root()),
             pending_ops: self.engine.mempool().len(),
             total_allocation: total_allocation.to_string(),
             total_staked: total_staked.to_string(),

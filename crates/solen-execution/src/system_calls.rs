@@ -1056,38 +1056,51 @@ fn execute_intent_call(
                 });
             }
 
-            // Pay solver tip.
+            // Pay solver tip (pre-validated — sender has sufficient balance).
             if claimed_tip > 0 {
                 match state.require_account(sender) {
                     Ok(mut sender_acct) => {
-                        if sender_acct.balance >= claimed_tip {
-                            sender_acct.balance -= claimed_tip;
-                            let _ = state.save_account(&sender_acct);
-
-                            let mut solver_acct = state.get_account(&solver)
-                                .ok()
-                                .flatten()
-                                .unwrap_or_else(|| solen_types::account::Account {
-                                    id: solver,
-                                    code_hash: [0u8; 32],
-                                    auth_methods: vec![],
-                                    nonce: 0,
-                                    balance: 0,
-                                });
-                            solver_acct.balance += claimed_tip;
-                            let _ = state.save_account(&solver_acct);
-
-                            let mut tip_data = Vec::with_capacity(48);
-                            tip_data.extend_from_slice(&solver);
-                            tip_data.extend_from_slice(&claimed_tip.to_le_bytes());
-                            events.push(Event {
-                                emitter: *sender,
-                                topic: b"solver_tip".to_vec(),
-                                data: tip_data,
-                            });
+                        if sender_acct.balance < claimed_tip {
+                            // Should never happen due to pre-validation, but fail
+                            // the entire fulfill rather than silently skipping the tip.
+                            return SystemCallResult {
+                                gas_used: SYSTEM_CALL_GAS,
+                                events,
+                                error: Some("insufficient balance for solver tip (unexpected)".to_string()),
+                            };
                         }
+                        sender_acct.balance -= claimed_tip;
+                        let _ = state.save_account(&sender_acct);
+
+                        let mut solver_acct = state.get_account(&solver)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| solen_types::account::Account {
+                                id: solver,
+                                code_hash: [0u8; 32],
+                                auth_methods: vec![],
+                                nonce: 0,
+                                balance: 0,
+                            });
+                        solver_acct.balance += claimed_tip;
+                        let _ = state.save_account(&solver_acct);
+
+                        let mut tip_data = Vec::with_capacity(48);
+                        tip_data.extend_from_slice(&solver);
+                        tip_data.extend_from_slice(&claimed_tip.to_le_bytes());
+                        events.push(Event {
+                            emitter: *sender,
+                            topic: b"solver_tip".to_vec(),
+                            data: tip_data,
+                        });
                     }
-                    Err(_) => {} // sender depleted, skip tip
+                    Err(e) => {
+                        return SystemCallResult {
+                            gas_used: SYSTEM_CALL_GAS,
+                            events,
+                            error: Some(format!("solver tip payment failed: {e}")),
+                        };
+                    }
                 }
             }
 
@@ -1116,7 +1129,8 @@ fn execute_paymaster_call(
     match method {
         "register" => {
             // Register the sender's contract as a paymaster.
-            // The contract must implement a `willSponsor` view method.
+            // The contract should implement a `willSponsor` view method
+            // (checked at sponsorship query time, not at registration).
             // args: (none — sender registers themselves)
             //
             // Verify sender has contract code deployed.

@@ -864,7 +864,6 @@ impl ConsensusEngine {
         );
     }
 
-    /// Legacy — rewards now handled by executor. Kept as unused for reference.
     /// Force-finalize a pending block immediately. Used after sync when
     /// accepting a live block that the network has already agreed on —
     /// no need to wait for attestations.
@@ -872,6 +871,8 @@ impl ConsensusEngine {
         self.finalize_pending_block(height);
     }
 
+    /// Legacy rewards distribution — now handled by the executor via
+    /// execute_block_with_height at epoch boundaries. Kept for reference only.
     #[allow(dead_code)]
     fn _distribute_epoch_rewards_legacy(&self) {
         // Distribute staking rewards from the staking pool account.

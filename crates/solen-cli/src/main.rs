@@ -24,13 +24,18 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "solen", version = "0.1.0", about = "Solen CLI — interact with the Solen network")]
 struct Cli {
-    /// JSON-RPC endpoint URL (default: devnet port)
-    #[arg(long, default_value = "http://127.0.0.1:29944", global = true)]
-    rpc: String,
+    /// JSON-RPC endpoint URL (overrides --network default)
+    #[arg(long, global = true)]
+    rpc: Option<String>,
 
-    /// Chain ID for transaction signing (devnet=1337, testnet=9000)
-    #[arg(long, default_value = "1337", global = true)]
-    chain_id: u64,
+    /// Chain ID for transaction signing (overrides --network default)
+    #[arg(long, global = true)]
+    chain_id: Option<u64>,
+
+    /// Network preset: devnet, testnet, or mainnet.
+    /// Sets default RPC endpoint and chain ID.
+    #[arg(long, global = true)]
+    network: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -288,7 +293,19 @@ enum KeyAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let rpc = rpc::RpcClient::new(&cli.rpc);
+
+    // Resolve network defaults. Explicit --rpc and --chain-id override.
+    let (default_rpc, default_chain_id) = match cli.network.as_deref() {
+        Some("mainnet") => ("https://rpc.solenchain.io", 1u64),
+        Some("testnet") => ("https://testnet-rpc.solenchain.io", 9000u64),
+        Some("devnet") | None => ("http://127.0.0.1:29944", 1337u64),
+        Some(other) => anyhow::bail!("unknown network '{}' (use devnet, testnet, or mainnet)", other),
+    };
+
+    let rpc_url = cli.rpc.as_deref().unwrap_or(default_rpc);
+    let chain_id = cli.chain_id.unwrap_or(default_chain_id);
+
+    let rpc = rpc::RpcClient::new(rpc_url);
 
     match cli.command {
         Commands::Status => commands::cmd_status(&rpc).await?,
@@ -297,45 +314,45 @@ async fn main() -> anyhow::Result<()> {
         Commands::Block { height } => commands::cmd_block(&rpc, height).await?,
         Commands::Validators => commands::cmd_validators(&rpc).await?,
         Commands::ClaimVesting { from } => {
-            commands::cmd_claim_vesting(&rpc, &from, cli.chain_id).await?
+            commands::cmd_claim_vesting(&rpc, &from, chain_id).await?
         }
         Commands::ProposeBlockTime { from, new_block_time_ms, description } => {
-            commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, cli.chain_id).await?
+            commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, chain_id).await?
         }
         Commands::Vote { from, proposal_id, yes, weight } => {
             let base = parse_solen_amount(&weight)?;
-            commands::cmd_vote(&rpc, &from, proposal_id, yes, base, cli.chain_id).await?
+            commands::cmd_vote(&rpc, &from, proposal_id, yes, base, chain_id).await?
         }
         Commands::FinalizeProposal { from, proposal_id } => {
-            commands::cmd_finalize_proposal(&rpc, &from, proposal_id, cli.chain_id).await?
+            commands::cmd_finalize_proposal(&rpc, &from, proposal_id, chain_id).await?
         }
         Commands::ExecuteProposal { from, proposal_id } => {
-            commands::cmd_execute_proposal(&rpc, &from, proposal_id, cli.chain_id).await?
+            commands::cmd_execute_proposal(&rpc, &from, proposal_id, chain_id).await?
         }
         Commands::RegisterValidator { from, amount } => {
             let base = parse_solen_amount(&amount)?;
-            commands::cmd_register_validator(&rpc, &from, base, cli.chain_id).await?
+            commands::cmd_register_validator(&rpc, &from, base, chain_id).await?
         }
         Commands::Stake { from, validator, amount } => {
             let base = parse_solen_amount(&amount)?;
-            commands::cmd_stake(&rpc, &from, &validator, base, cli.chain_id).await?
+            commands::cmd_stake(&rpc, &from, &validator, base, chain_id).await?
         }
         Commands::Unstake { from, validator, amount } => {
             let base = parse_solen_amount(&amount)?;
-            commands::cmd_unstake(&rpc, &from, &validator, base, cli.chain_id).await?
+            commands::cmd_unstake(&rpc, &from, &validator, base, chain_id).await?
         }
         Commands::WithdrawStake { from } => {
-            commands::cmd_withdraw_stake(&rpc, &from, cli.chain_id).await?
+            commands::cmd_withdraw_stake(&rpc, &from, chain_id).await?
         }
         Commands::Unjail { from } => {
-            commands::cmd_unjail(&rpc, &from, cli.chain_id).await?
+            commands::cmd_unjail(&rpc, &from, chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
             let base = parse_solen_amount(&amount)?;
-            commands::cmd_transfer(&rpc, &from, &to, base, cli.chain_id).await?
+            commands::cmd_transfer(&rpc, &from, &to, base, chain_id).await?
         }
         Commands::Deploy { from, wasm_file } => {
-            commands::cmd_deploy(&rpc, &from, &wasm_file, cli.chain_id).await?
+            commands::cmd_deploy(&rpc, &from, &wasm_file, chain_id).await?
         }
         Commands::Call {
             from,
@@ -343,31 +360,31 @@ async fn main() -> anyhow::Result<()> {
             method,
             args,
         } => {
-            commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), cli.chain_id).await?
+            commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), chain_id).await?
         }
         Commands::InitiateRecovery { from, target, new_public_key } => {
-            commands::cmd_initiate_recovery(&rpc, &from, &target, &new_public_key, cli.chain_id).await?
+            commands::cmd_initiate_recovery(&rpc, &from, &target, &new_public_key, chain_id).await?
         }
         Commands::ConfirmRecovery { from, recovery_id } => {
-            commands::cmd_confirm_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
+            commands::cmd_confirm_recovery(&rpc, &from, recovery_id, chain_id).await?
         }
         Commands::CancelRecovery { from, recovery_id } => {
-            commands::cmd_cancel_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
+            commands::cmd_cancel_recovery(&rpc, &from, recovery_id, chain_id).await?
         }
         Commands::ExecuteRecovery { from, recovery_id } => {
-            commands::cmd_execute_recovery(&rpc, &from, recovery_id, cli.chain_id).await?
+            commands::cmd_execute_recovery(&rpc, &from, recovery_id, chain_id).await?
         }
         Commands::RegisterRollup { from, rollup_id, name, proof_type, genesis_state_root } => {
-            commands::cmd_register_rollup(&rpc, &from, rollup_id, &name, &proof_type, &genesis_state_root, cli.chain_id).await?
+            commands::cmd_register_rollup(&rpc, &from, rollup_id, &name, &proof_type, &genesis_state_root, chain_id).await?
         }
         Commands::RegisterPaymaster { from } => {
-            commands::cmd_register_paymaster(&rpc, &from, cli.chain_id).await?
+            commands::cmd_register_paymaster(&rpc, &from, chain_id).await?
         }
         Commands::UnregisterPaymaster { from } => {
-            commands::cmd_unregister_paymaster(&rpc, &from, cli.chain_id).await?
+            commands::cmd_unregister_paymaster(&rpc, &from, chain_id).await?
         }
         Commands::Multisig { from, threshold, signers } => {
-            commands::cmd_multisig(&rpc, &from, threshold, &signers, cli.chain_id).await?
+            commands::cmd_multisig(&rpc, &from, threshold, &signers, chain_id).await?
         }
         Commands::Key { action } => match action {
             KeyAction::Generate { name } => commands::cmd_key_generate(&name)?,

@@ -22,7 +22,7 @@
 //!     val_len[4]    = u32 LE
 //!     val[val_len]
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;

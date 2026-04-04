@@ -968,7 +968,7 @@ fn execute_intent_call(
             let claimed_tip = read_u128(args, 40).unwrap_or(0);
             let num_transfers = u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
 
-            let mut offset = 60;
+            let offset = 60;
 
             // Pre-validate: parse all transfers and check total balance BEFORE
             // executing any. This prevents partial execution where transfers 1..N

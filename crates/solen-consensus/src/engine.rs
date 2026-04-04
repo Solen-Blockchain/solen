@@ -128,6 +128,9 @@ pub struct ConsensusEngine {
     /// Buffered attestations for blocks not yet received. Bounded and time-limited
     /// to prevent memory exhaustion while allowing out-of-order gossip delivery.
     early_attestations: Arc<RwLock<Vec<(ValidatorId, u64, Hash, std::time::Instant)>>>,
+    /// Epoch seed for randomized proposer selection. Derived from the last block
+    /// hash of the previous epoch. Updated at each epoch boundary.
+    epoch_seed: Arc<RwLock<[u8; 32]>>,
     /// Trusted checkpoints for long-range attack protection.
     trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
 }
@@ -202,6 +205,7 @@ impl ConsensusEngine {
             pending_blocks: Arc::new(RwLock::new(HashMap::new())),
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
             intent_pool: Arc::new(IntentPool::new(10_000)),
+            epoch_seed: Arc::new(RwLock::new([0u8; 32])), // genesis epoch uses round-robin
             proof_registry: {
                 let mut reg = ProofVerifierRegistry::new();
                 reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
@@ -228,6 +232,11 @@ impl ConsensusEngine {
 
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Current epoch seed for proposer selection randomization.
+    pub fn epoch_seed(&self) -> [u8; 32] {
+        *self.epoch_seed.read().unwrap()
     }
 
     pub fn store(&self) -> Arc<RwLock<Box<dyn StateStore>>> {
@@ -489,8 +498,9 @@ impl ConsensusEngine {
     /// Check if this node is the proposer for the next block.
     pub fn is_next_proposer(&self) -> bool {
         let next_height = self.height() + 1;
+        let seed = self.epoch_seed();
         let vs = self.validator_set.read().unwrap();
-        vs.proposer_for_height(next_height)
+        vs.proposer_for_height_with_seed(next_height, &seed)
             .map(|id| id == self.config.validator_id)
             .unwrap_or(false)
     }
@@ -514,31 +524,25 @@ impl ConsensusEngine {
         }
 
         let next_height = self.height() + 1;
+        let seed = self.epoch_seed();
         let vs = self.validator_set.read().unwrap();
-        let active = vs.active();
-        if active.len() <= 1 {
+        let order = vs.proposer_order_for_height(next_height, &seed);
+        if order.len() <= 1 {
             return false;
         }
 
-        // Find the designated proposer's position.
-        let designated_idx = (next_height as usize) % active.len();
-
-        // Compute backup order: skip the designated proposer, then iterate
-        // through remaining validators in order.
+        // Compute which backup round we're in based on elapsed time.
         let elapsed_past_min = stalled_for.as_millis() as u64 - min_wait.as_millis() as u64;
         let round_interval_ms = (self.config.block_time_ms * 2).max(4000);
         let round = (elapsed_past_min / round_interval_ms) as usize;
 
-        // The backup at position `round` after the designated proposer.
-        // Round 0 = first backup (designated + 1), round 1 = second backup, etc.
-        let backup_idx = (designated_idx + 1 + round) % active.len();
-
-        // Don't wrap back to the designated proposer.
-        if backup_idx == designated_idx {
-            return false;
+        // Position in the proposer order: 0 = designated, 1 = first backup, etc.
+        let backup_position = round + 1;
+        if backup_position >= order.len() {
+            return false; // all validators have had their turn
         }
 
-        active[backup_idx].id == self.config.validator_id
+        order[backup_position] == self.config.validator_id
     }
 
     /// Accept a block proposed by another validator.
@@ -854,8 +858,9 @@ impl ConsensusEngine {
         // If the actual proposer differs from the designated proposer,
         // the designated one missed their slot.
         {
+            let seed = self.epoch_seed();
             let vs = self.validator_set.read().unwrap();
-            let designated = vs.proposer_for_height(height);
+            let designated = vs.proposer_for_height_with_seed(height, &seed);
             drop(vs);
 
             if let Some(designated_id) = designated {
@@ -1306,6 +1311,22 @@ impl ConsensusEngine {
                 tracing::info!(
                     validator = ?&id[..4],
                     "validator removed from consensus set (exited staking)"
+                );
+            }
+
+            // Update epoch seed for randomized proposer selection.
+            // Seed = blake3(last block hash of the epoch that just ended).
+            // This is unpredictable until the epoch boundary block is finalized.
+            let chain = self.chain.read().unwrap();
+            if let Some(last_block) = chain.last() {
+                let new_seed = solen_crypto::blake3_hash(
+                    &block_hash(&last_block.header)
+                );
+                *self.epoch_seed.write().unwrap() = new_seed;
+                tracing::info!(
+                    epoch = em.current_epoch,
+                    seed = ?&new_seed[..4],
+                    "epoch seed updated for proposer selection"
                 );
             }
         }

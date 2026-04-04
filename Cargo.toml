@@ -4,6 +4,7 @@ exclude = [
     "examples/contracts/counter",
     "examples/contracts/token",
     "examples/contracts/nft",
+    "fuzz",
 ]
 members = [
     "crates/solen-types",

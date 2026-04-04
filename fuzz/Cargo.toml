@@ -15,6 +15,9 @@ solen-crypto = { path = "../crates/solen-crypto" }
 solen-execution = { path = "../crates/solen-execution" }
 solen-storage = { path = "../crates/solen-storage" }
 solen-vm = { path = "../crates/solen-vm" }
+solen-p2p = { path = "../crates/solen-p2p" }
+solen-consensus = { path = "../crates/solen-consensus" }
+serde_json = "1"
 
 [[bin]]
 name = "fuzz_executor"
@@ -29,4 +32,29 @@ doc = false
 [[bin]]
 name = "fuzz_tx_decode"
 path = "fuzz_targets/fuzz_tx_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_passkey"
+path = "fuzz_targets/fuzz_passkey.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_p2p_message"
+path = "fuzz_targets/fuzz_p2p_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_snapshot"
+path = "fuzz_targets/fuzz_snapshot.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_threshold_auth"
+path = "fuzz_targets/fuzz_threshold_auth.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_system_call_args"
+path = "fuzz_targets/fuzz_system_call_args.rs"
 doc = false

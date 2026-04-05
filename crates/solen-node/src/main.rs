@@ -661,7 +661,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             // Send our signed attestation back.
                             let bh = solen_consensus::engine::block_hash(&header);
-                            let att_payload = attestation_payload(header.height, &bh);
+                            let att_payload = attestation_payload(engine_for_p2p.config().chain_id, header.height, &bh);
                             let att_sig = att_kp_for_p2p.sign(&att_payload);
                             let att_msg = NetworkMessage::Attestation {
                                 validator_id: engine_for_p2p.validator_id(),
@@ -685,8 +685,8 @@ async fn main() -> anyhow::Result<()> {
                         block_hash,
                         signature,
                     } => {
-                        // Verify attestation signature.
-                        let payload = attestation_payload(block_height, &block_hash);
+                        // Verify attestation signature with domain separation.
+                        let payload = attestation_payload(engine_for_p2p.config().chain_id, block_height, &block_hash);
                         if signature.len() == 64 {
                             let mut sig = [0u8; 64];
                             sig.copy_from_slice(&signature);
@@ -1139,7 +1139,7 @@ async fn main() -> anyhow::Result<()> {
                     // collect 2/4 = 50% of stake — below the 2/3 quorum threshold —
                     // causing every backup-proposed block to force-finalize.
                     let bh = solen_consensus::engine::block_hash(&header_for_att);
-                    let att_payload = attestation_payload(header_for_att.height, &bh);
+                    let att_payload = attestation_payload(engine_clone.config().chain_id, header_for_att.height, &bh);
                     let att_sig = att_kp_for_consensus.sign(&att_payload);
                     handle.broadcast(NetworkMessage::Attestation {
                         validator_id: engine_clone.validator_id(),
@@ -1187,11 +1187,9 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Build the deterministic payload for attestation signing/verification.
-fn attestation_payload(height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(40);
-    payload.extend_from_slice(&height.to_le_bytes());
-    payload.extend_from_slice(block_hash);
-    payload
+fn attestation_payload(chain_id: u64, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
+    // Use the engine's domain-separated payload to ensure consistency.
+    solen_consensus::engine::ConsensusEngine::attestation_signing_payload(chain_id, height, block_hash)
 }
 
 fn rand_seed() -> [u8; 32] {

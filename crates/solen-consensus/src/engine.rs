@@ -861,8 +861,43 @@ impl ConsensusEngine {
         true
     }
 
-    /// Accept an attestation from a validator. If quorum is reached,
-    /// finalize the block.
+    /// Accept an attestation with signature verification.
+    /// This is the preferred entry point — enforces cryptographic authentication
+    /// at the consensus boundary, not just the P2P layer.
+    pub fn accept_verified_attestation(
+        &self,
+        validator_id: ValidatorId,
+        block_height: u64,
+        attested_hash: Hash,
+        signature: &[u8; 64],
+    ) -> bool {
+        // Verify signature over the domain-separated attestation payload.
+        let payload = Self::attestation_signing_payload(
+            self.config.chain_id, block_height, &attested_hash,
+        );
+        if solen_crypto::verify(&validator_id, &payload, signature).is_err() {
+            warn!(
+                height = block_height,
+                "attestation signature verification failed — rejecting"
+            );
+            return false;
+        }
+        self.accept_attestation(validator_id, block_height, attested_hash)
+    }
+
+    /// Domain-separated attestation payload for signing/verification.
+    /// Includes chain_id to prevent cross-network replay.
+    pub fn attestation_signing_payload(chain_id: u64, height: u64, block_hash: &Hash) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(56);
+        payload.extend_from_slice(b"SOLEN_ATT");  // domain separator
+        payload.extend_from_slice(&chain_id.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.extend_from_slice(block_hash);
+        payload
+    }
+
+    /// Accept an attestation (already verified by caller).
+    /// Prefer accept_verified_attestation() for external inputs.
     pub fn accept_attestation(
         &self,
         validator_id: ValidatorId,

@@ -47,20 +47,43 @@ pub struct SlashingEvidence {
 pub const DOWNTIME_THRESHOLD: u64 = 50;
 
 /// Check for double-sign: two different block headers signed by the same proposer
-/// at the same height.
+/// at the same height. Verifies proposer signatures when present to prevent
+/// false slashing from fabricated headers.
 pub fn check_double_sign(a: &BlockHeader, b: &BlockHeader) -> Option<SlashingEvidence> {
-    if a.height == b.height && a.proposer == b.proposer && a.state_root != b.state_root {
-        Some(SlashingEvidence {
-            offender: a.proposer,
-            reason: SlashingReason::DoubleSign {
-                height: a.height,
-                block_a: a.state_root,
-                block_b: b.state_root,
-            },
-        })
-    } else {
-        None
+    if a.height != b.height || a.proposer != b.proposer || a.state_root == b.state_root {
+        return None;
     }
+
+    // If both headers have proposer signatures, verify them.
+    // This prevents false slashing from fabricated evidence.
+    if !a.proposer_signature.is_empty() && !b.proposer_signature.is_empty() {
+        let hash_a = crate::engine::block_hash(a);
+        let hash_b = crate::engine::block_hash(b);
+
+        if a.proposer_signature.len() == 64 {
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(&a.proposer_signature);
+            if solen_crypto::verify(&a.proposer, &hash_a, &sig).is_err() {
+                return None; // signature A invalid — not real evidence
+            }
+        }
+        if b.proposer_signature.len() == 64 {
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(&b.proposer_signature);
+            if solen_crypto::verify(&b.proposer, &hash_b, &sig).is_err() {
+                return None; // signature B invalid — not real evidence
+            }
+        }
+    }
+
+    Some(SlashingEvidence {
+        offender: a.proposer,
+        reason: SlashingReason::DoubleSign {
+            height: a.height,
+            block_a: a.state_root,
+            block_b: b.state_root,
+        },
+    })
 }
 
 /// Result of processing slashing evidence.

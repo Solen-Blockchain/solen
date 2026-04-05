@@ -237,6 +237,33 @@ impl ConsensusEngine {
         &self.config
     }
 
+    /// Persist the last attested block to prevent amnesia after crash.
+    /// A restarted validator must not attest to a different block at the same height.
+    pub fn persist_last_attestation(&self, height: u64, block_hash: &Hash) {
+        let mut data = Vec::with_capacity(40);
+        data.extend_from_slice(&height.to_le_bytes());
+        data.extend_from_slice(block_hash);
+        let mut store = self.store.write().unwrap();
+        let _ = store.put(b"__last_attestation__", &data);
+    }
+
+    /// Check if we already attested at this height (crash recovery).
+    pub fn last_attested_block(&self) -> Option<(u64, Hash)> {
+        let store = self.store.read().unwrap();
+        store.get(b"__last_attestation__").ok().flatten().and_then(|data| {
+            if data.len() >= 40 {
+                let mut h = [0u8; 8];
+                h.copy_from_slice(&data[..8]);
+                let height = u64::from_le_bytes(h);
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&data[8..40]);
+                Some((height, hash))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Current epoch seed for proposer selection randomization.
     pub fn epoch_seed(&self) -> [u8; 32] {
         *self.epoch_seed.read().unwrap()
@@ -520,6 +547,9 @@ impl ConsensusEngine {
                 },
             );
 
+            // Persist attestation WAL before attesting (prevents amnesia on crash).
+            self.persist_last_attestation(height, &bh);
+
             // Self-attest.
             self.accept_attestation(self.config.validator_id, height, bh);
 
@@ -658,6 +688,39 @@ impl ConsensusEngine {
                 block_height = header.height,
                 gap = header.height - expected_height,
                 "block ahead of our height — waiting for sync"
+            );
+            return false;
+        }
+
+        // Validate block timestamp.
+        // Must be monotonically increasing and within 30s of local time.
+        // Prevents proposers from manipulating time-dependent logic.
+        {
+            let chain = self.chain.read().unwrap();
+            if let Some(last) = chain.last() {
+                if header.timestamp_ms <= last.header.timestamp_ms {
+                    warn!(
+                        height = header.height,
+                        block_ts = header.timestamp_ms,
+                        prev_ts = last.header.timestamp_ms,
+                        "block timestamp not monotonically increasing — rejecting"
+                    );
+                    return false;
+                }
+            }
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        const MAX_TIMESTAMP_DRIFT_MS: u64 = 30_000; // 30 seconds
+        if header.timestamp_ms > now_ms + MAX_TIMESTAMP_DRIFT_MS {
+            warn!(
+                height = header.height,
+                block_ts = header.timestamp_ms,
+                local_ts = now_ms,
+                drift_ms = header.timestamp_ms - now_ms,
+                "block timestamp too far in the future — rejecting"
             );
             return false;
         }
@@ -1364,12 +1427,28 @@ impl ConsensusEngine {
                 .map(|sv| sv.id)
                 .collect();
 
+            // Limit validator set changes to 1/3 of current total stake per epoch.
+            // This preserves BFT safety — the validator set can't change faster
+            // than honest validators can detect and respond.
+            // Exception: during bootstrapping (< 4 validators), allow unlimited changes.
+            let active_count = vs.active_count();
+            let current_total_stake: u128 = vs.all().iter()
+                .filter(|v| v.is_active())
+                .map(|v| v.stake)
+                .sum();
+            let max_stake_change = if active_count >= 4 { current_total_stake / 3 } else { u128::MAX };
+            let mut stake_changed: u128 = 0;
+
             // Add new validators and reactivate unjailed ones.
             for sv in &staking.validators {
                 if !sv.is_active { continue; }
                 if let Some(v) = vs.get_mut(&sv.id) {
                     // Update stake and reactivate if unjailed on-chain.
+                    let old_stake = v.stake;
                     v.stake = sv.total_stake();
+                    stake_changed = stake_changed.saturating_add(
+                        (v.stake as i128 - old_stake as i128).unsigned_abs()
+                    );
                     if !v.is_active() {
                         v.status = crate::validator::ValidatorStatus::Active;
                         v.missed_blocks = 0;
@@ -1380,6 +1459,17 @@ impl ConsensusEngine {
                         );
                     }
                 } else {
+                    // New validator — check if adding them exceeds the change limit.
+                    let new_stake = sv.total_stake();
+                    if stake_changed.saturating_add(new_stake) > max_stake_change && max_stake_change > 0 {
+                        tracing::warn!(
+                            validator = ?&sv.id[..4],
+                            stake = new_stake,
+                            "validator set change limit reached — deferring to next epoch"
+                        );
+                        continue;
+                    }
+                    stake_changed = stake_changed.saturating_add(new_stake);
                     let new_info = crate::validator::ValidatorInfo::new(sv.id, sv.total_stake());
                     vs.add(new_info);
                     tracing::info!(
@@ -1390,12 +1480,20 @@ impl ConsensusEngine {
                 }
             }
 
-            // Remove validators that exited from staking.
+            // Remove validators that exited from staking (also bounded by change limit).
             let to_remove: Vec<_> = vs.all().iter()
                 .filter(|v| !active_ids.contains(&v.id))
-                .map(|v| v.id)
+                .map(|v| (v.id, v.stake))
                 .collect();
-            for id in &to_remove {
+            for (id, stake) in &to_remove {
+                if stake_changed.saturating_add(*stake) > max_stake_change && max_stake_change > 0 {
+                    tracing::warn!(
+                        validator = ?&id[..4],
+                        "validator removal deferred — change limit reached"
+                    );
+                    continue;
+                }
+                stake_changed = stake_changed.saturating_add(*stake);
                 vs.remove(id);
                 tracing::info!(
                     validator = ?&id[..4],

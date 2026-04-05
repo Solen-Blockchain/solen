@@ -368,7 +368,7 @@ fn block_at_wrong_height_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: [0x01; 32],
-        timestamp_ms: 0,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 
@@ -390,7 +390,7 @@ fn block_from_invalid_proposer_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: fake_proposer,
-        timestamp_ms: 0,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 
@@ -411,7 +411,7 @@ fn block_with_wrong_epoch_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: engine.validator_id(),
-        timestamp_ms: 0,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 
@@ -438,7 +438,7 @@ fn duplicate_block_at_same_height_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: engine.validator_id(),
-        timestamp_ms: 0,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 
@@ -494,7 +494,7 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: v_a,
-        timestamp_ms: 100,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
         proposer_signature: vec![],
     };
 
@@ -506,7 +506,7 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: v_b,
-        timestamp_ms: 200,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 1,
         proposer_signature: vec![],
     };
 
@@ -575,7 +575,7 @@ fn double_sign_detection_requires_different_state_roots() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer,
-        timestamp_ms: 100,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 
@@ -696,7 +696,7 @@ fn state_root_mismatch_does_not_corrupt_store() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: validator_id,
-        timestamp_ms: 0,
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
             proposer_signature: vec![],
     };
 

@@ -620,6 +620,14 @@ async fn main() -> anyhow::Result<()> {
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
                     NetworkMessage::NewTransaction(op) => {
+                        // Deprioritize transactions when the channel is congested.
+                        // This ensures consensus messages (blocks, attestations) aren't
+                        // starved by transaction flooding.
+                        if inbound_rx.len() > 2048 {
+                            // Channel >50% full — drop transactions to preserve
+                            // bandwidth for consensus-critical messages.
+                            continue;
+                        }
                         engine_for_p2p.mempool().submit(op);
                     }
                     NetworkMessage::NewBlock {

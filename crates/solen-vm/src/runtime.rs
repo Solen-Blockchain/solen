@@ -33,6 +33,10 @@ impl VmRuntime {
     pub fn new() -> Result<Self, VmError> {
         let mut config = Config::new();
         config.consume_fuel(true);
+        // Canonicalize NaN values to ensure deterministic float behavior
+        // across all platforms. Without this, different validators could
+        // produce different state roots from the same WASM execution.
+        config.cranelift_nan_canonicalization(true);
         let engine =
             Engine::new(&config).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
 
@@ -131,6 +135,7 @@ pub fn execute(
 ) -> Result<ExecutionResult, VmError> {
     let mut config = Config::new();
     config.consume_fuel(true);
+    config.cranelift_nan_canonicalization(true);
 
     let engine = Engine::new(&config).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
     let module =

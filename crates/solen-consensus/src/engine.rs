@@ -1207,6 +1207,7 @@ impl ConsensusEngine {
                 gas_used: 0,
                 error: None,
                 events: reward_events,
+                auth_method: "system".to_string(),
             };
             self.pending_reward_receipts.write().unwrap().push(receipt);
         }

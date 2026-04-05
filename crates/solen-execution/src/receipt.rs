@@ -12,6 +12,13 @@ pub struct ExecutionReceipt {
     pub gas_used: u64,
     pub error: Option<String>,
     pub events: Vec<Event>,
+    /// Which auth method was used to sign this operation (e.g. "ed25519", "passkey", "session", "threshold").
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+}
+
+fn default_auth_method() -> String {
+    "ed25519".to_string()
 }
 
 /// An event emitted during execution.

@@ -28,28 +28,30 @@ fn save_or_warn(state: &mut StateManager<'_>, account: &solen_types::account::Ac
 }
 
 /// Verify a signature against an auth method.
+/// Returns the method name (e.g. "ed25519", "passkey", "session", "threshold")
+/// if verification succeeds, None otherwise.
 ///
 /// For `Ed25519`: expects a 64-byte signature.
 /// For `Threshold`: expects concatenated (pubkey[32] + sig[64]) pairs.
 /// At least `threshold` valid signatures from the signers list are required.
-fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
+fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'static str> {
     match method {
         AuthMethod::Ed25519 { public_key } => {
             if signature.len() != 64 {
-                return false;
+                return None;
             }
             let mut sig = [0u8; 64];
             sig.copy_from_slice(signature);
-            solen_crypto::verify(public_key, msg, &sig).is_ok()
+            solen_crypto::verify(public_key, msg, &sig).ok().map(|_| "ed25519")
         }
         AuthMethod::Threshold { signers, threshold } => {
             // Reject invalid threshold (0 would accept empty signatures).
             if *threshold == 0 || signers.is_empty() {
-                return false;
+                return None;
             }
             // Each sub-signature is pubkey[32] + sig[64] = 96 bytes.
             if signature.len() % 96 != 0 || signature.is_empty() {
-                return false;
+                return None;
             }
             let mut valid_count = 0u16;
             let mut counted_signers = std::collections::HashSet::new();
@@ -69,22 +71,26 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> bool {
                     valid_count += 1;
                 }
             }
-            valid_count >= *threshold
+            if valid_count >= *threshold { Some("threshold") } else { None }
         }
         AuthMethod::Passkey { public_key_x, public_key_y, .. } => {
-            verify_passkey(public_key_x, public_key_y, msg, signature)
+            if verify_passkey(public_key_x, public_key_y, msg, signature) {
+                Some("passkey")
+            } else {
+                None
+            }
         }
         AuthMethod::Session { session_key, .. } => {
             // Session keys use Ed25519 signatures. Restriction checks
             // (expiry, spending, targets, methods) are done in execute_operation.
             if signature.len() != 64 {
-                return false;
+                return None;
             }
             let mut sig = [0u8; 64];
             sig.copy_from_slice(signature);
-            solen_crypto::verify(session_key, msg, &sig).is_ok()
+            solen_crypto::verify(session_key, msg, &sig).ok().map(|_| "session")
         }
-        AuthMethod::Guardian { .. } => false, // Guardians don't sign transactions.
+        AuthMethod::Guardian { .. } => None, // Guardians don't sign transactions.
     }
 }
 
@@ -391,22 +397,23 @@ impl BlockExecutor {
             .collect();
 
         // Phase 2: parallel signature verification (Ed25519 + Threshold).
-        let validations: Vec<bool> = operations
+        // Returns the auth method name if valid, or None if invalid.
+        let validations: Vec<Option<&'static str>> = operations
             .par_iter()
             .zip(pre.par_iter())
             .map(|(op, (msg, auth))| {
                 // System-authorized ops (intent fulfillment, slashing) bypass signature checks.
                 if is_system_authorized(op) {
-                    return true;
+                    return Some("system");
                 }
                 let auth_methods = match auth {
                     Some(methods) => methods,
-                    None => return false,
+                    None => return None,
                 };
                 if auth_methods.is_empty() {
-                    return false; // no auth methods = reject (accounts must have auth)
+                    return None; // no auth methods = reject (accounts must have auth)
                 }
-                auth_methods.iter().any(|method| verify_auth(method, msg, &op.signature))
+                auth_methods.iter().find_map(|method| verify_auth(method, msg, &op.signature))
             })
             .collect();
 
@@ -415,19 +422,24 @@ impl BlockExecutor {
         let mut total_gas = 0u64;
 
         for (i, op) in operations.iter().enumerate() {
-            if !validations[i] {
-                receipts.push(ExecutionReceipt {
-                    sender: op.sender,
-                    nonce: op.nonce,
-                    success: false,
-                    gas_used: 0,
-                    error: Some("signature verification failed".into()),
-                    events: vec![],
-                });
-                continue;
-            }
+            let auth_method_name = match validations[i] {
+                Some(name) => name,
+                None => {
+                    receipts.push(ExecutionReceipt {
+                        sender: op.sender,
+                        nonce: op.nonce,
+                        success: false,
+                        gas_used: 0,
+                        error: Some("signature verification failed".into()),
+                        events: vec![],
+                        auth_method: "none".to_string(),
+                    });
+                    continue;
+                }
+            };
 
-            let receipt = self.execute_operation(store, op);
+            let mut receipt = self.execute_operation(store, op);
+            receipt.auth_method = auth_method_name.to_string();
             total_gas += receipt.gas_used;
             receipts.push(receipt);
         }
@@ -461,6 +473,7 @@ impl BlockExecutor {
                 gas_used: 0,
                 error: Some(format!("too many actions: {} (max {})", op.actions.len(), MAX_ACTIONS_PER_OP)),
                 events: vec![],
+                auth_method: "ed25519".to_string(),
             };
         }
 
@@ -475,6 +488,7 @@ impl BlockExecutor {
                         gas_used: 0,
                         error: Some(format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE)),
                         events: vec![],
+                        auth_method: "ed25519".to_string(),
                     };
                 }
                 // Pre-validate WASM bytecode structure at deploy time.
@@ -486,6 +500,7 @@ impl BlockExecutor {
                         gas_used: 0,
                         error: Some(format!("invalid WASM bytecode: {}", e)),
                         events: vec![],
+                        auth_method: "ed25519".to_string(),
                     };
                 }
             }
@@ -502,6 +517,7 @@ impl BlockExecutor {
                 gas_used: 0,
                 error: Some(e.to_string()),
                 events: vec![],
+                auth_method: "ed25519".to_string(),
             };
         }
 
@@ -578,6 +594,7 @@ impl BlockExecutor {
                 gas_used,
                 error: Some(err),
                 events: vec![], // discard events from failed operation
+                auth_method: "ed25519".to_string(),
             };
         }
 
@@ -630,6 +647,7 @@ impl BlockExecutor {
             gas_used,
             error: None,
             events,
+            auth_method: "ed25519".to_string(),
         }
     }
 
@@ -654,7 +672,7 @@ impl BlockExecutor {
             // Verify signature against one of the account's auth methods.
             let msg = self.operation_signing_message(op);
             let sig_valid = account.auth_methods.iter().any(|method| {
-                verify_auth(method, &msg, &op.signature)
+                verify_auth(method, &msg, &op.signature).is_some()
             });
 
             if !sig_valid {
@@ -1152,6 +1170,7 @@ fn distribute_epoch_rewards_in_executor(
         gas_used: 0,
         error: None,
         events,
+        auth_method: "system".to_string(),
     }]
 }
 

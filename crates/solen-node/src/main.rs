@@ -533,10 +533,11 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(engine_raw);
 
     // Reconcile in-memory validator set with on-chain staking state.
-    // After a restart, the in-memory set is from genesis and doesn't know
-    // about slashing/jailing that happened on-chain while this node was offline.
+    // After a restart, the in-memory set is from genesis and doesn't reflect
+    // validators that registered, got slashed/jailed, or changed stake on-chain.
     {
         use solen_system_contracts::staking::StakingContract;
+        use solen_consensus::validator::ValidatorInfo;
         let store_lock = engine.store();
         let store_guard = store_lock.read().unwrap();
         let staking = StakingContract::load(&**store_guard);
@@ -544,8 +545,9 @@ async fn main() -> anyhow::Result<()> {
         let vs_lock = engine.validator_set();
         let mut vs = vs_lock.write().unwrap();
         for on_chain in &staking.validators {
+            let total_stake = on_chain.self_stake.saturating_add(on_chain.total_delegated);
             if let Some(v) = vs.get_mut(&on_chain.id) {
-                v.stake = on_chain.self_stake.saturating_add(on_chain.total_delegated);
+                v.stake = total_stake;
                 if !on_chain.is_active {
                     v.status = solen_consensus::validator::ValidatorStatus::Jailed;
                     info!(
@@ -553,7 +555,31 @@ async fn main() -> anyhow::Result<()> {
                         "validator is jailed on-chain — marking inactive in consensus set"
                     );
                 }
+            } else if on_chain.is_active && total_stake > 0 {
+                // Validator registered after genesis — add to consensus set.
+                let vi = ValidatorInfo::new(on_chain.id, total_stake);
+                vs.add(vi);
+                info!(
+                    validator = account_to_base58(&on_chain.id),
+                    stake = total_stake,
+                    "added post-genesis validator to consensus set from on-chain state"
+                );
             }
+        }
+        // Remove genesis validators that exited on-chain (self_stake == 0 and not in staking list).
+        let on_chain_ids: std::collections::HashSet<[u8; 32]> =
+            staking.validators.iter().map(|v| v.id).collect();
+        let to_remove: Vec<[u8; 32]> = vs.all()
+            .iter()
+            .filter(|v| !on_chain_ids.contains(&v.id))
+            .map(|v| v.id)
+            .collect();
+        for id in to_remove {
+            vs.remove(&id);
+            info!(
+                validator = account_to_base58(&id),
+                "removed validator not present in on-chain staking state"
+            );
         }
     }
 

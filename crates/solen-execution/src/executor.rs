@@ -13,6 +13,7 @@ use crate::receipt::{BlockResult, Event, ExecutionReceipt};
 use crate::state::{StateError, StateManager};
 
 const TRANSFER_GAS: u64 = 100;
+const ACCOUNT_CREATION_GAS: u64 = 25_000; // surcharge for auto-creating recipient
 const CALL_BASE_GAS: u64 = 500;
 const DEPLOY_BASE_GAS: u64 = 1000;
 const SET_AUTH_GAS: u64 = 200;
@@ -824,6 +825,9 @@ impl BlockExecutor {
     ) -> Result<u64, ExecutionError> {
         match action {
             Action::Transfer { to, amount } => {
+                // Check if recipient exists — account creation incurs a gas surcharge.
+                let is_new_account = state.get_account(to)?.is_none();
+
                 state.transfer(sender, to, *amount)?;
                 // Emit event with recipient + amount in data.
                 let mut data = Vec::with_capacity(32 + 16);
@@ -834,7 +838,13 @@ impl BlockExecutor {
                     topic: b"transfer".to_vec(),
                     data,
                 });
-                Ok(TRANSFER_GAS)
+
+                let gas = if is_new_account {
+                    TRANSFER_GAS + ACCOUNT_CREATION_GAS
+                } else {
+                    TRANSFER_GAS
+                };
+                Ok(gas)
             }
             Action::Call {
                 target,

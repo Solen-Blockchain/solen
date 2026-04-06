@@ -157,6 +157,33 @@ enum Commands {
         from: String,
     },
 
+    /// Set the vesting admin account (one-time setup or transfer)
+    SetVestingAdmin {
+        /// Your key name (current admin or first-time setter)
+        from: String,
+        /// New admin account name or address
+        new_admin: String,
+    },
+
+    /// Add a vesting schedule for a recipient (admin only)
+    AddVesting {
+        /// Your key name (must be vesting admin)
+        from: String,
+        /// Recipient account name or address
+        recipient: String,
+        /// Amount in SOLEN (e.g., 100000)
+        amount: String,
+        /// Vesting type: team, investor, validator, or custom
+        #[arg(long, default_value = "investor")]
+        vesting_type: String,
+        /// Custom cliff in months (only for --vesting-type custom)
+        #[arg(long)]
+        cliff_months: Option<u64>,
+        /// Custom total vest in months (only for --vesting-type custom)
+        #[arg(long)]
+        vest_months: Option<u64>,
+    },
+
     /// Reactivate a jailed validator after downtime slash
     Unjail {
         /// Your validator key name
@@ -357,6 +384,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::WithdrawStake { from } => {
             commands::cmd_withdraw_stake(&rpc, &from, chain_id).await?
+        }
+        Commands::SetVestingAdmin { from, new_admin } => {
+            commands::cmd_set_vesting_admin(&rpc, &from, &new_admin, chain_id).await?
+        }
+        Commands::AddVesting { from, recipient, amount, vesting_type, cliff_months, vest_months } => {
+            let base = parse_solen_amount(&amount)?;
+            commands::cmd_add_vesting(&rpc, &from, &recipient, base, &vesting_type, cliff_months, vest_months, chain_id).await?
         }
         Commands::Unjail { from } => {
             commands::cmd_unjail(&rpc, &from, chain_id).await?

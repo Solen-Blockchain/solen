@@ -40,7 +40,7 @@ pub fn execute_system_call(
     } else if *target == TREASURY_ADDRESS {
         execute_treasury_call(store, sender, method)
     } else if *target == solen_types::system::VESTING_ADDRESS {
-        execute_vesting_call(store, sender, method)
+        execute_vesting_call(store, sender, method, args)
     } else if *target == INTENT_ADDRESS {
         execute_intent_call(store, sender, method, args)
     } else if *target == PAYMASTER_REGISTRY_ADDRESS {
@@ -1442,8 +1442,9 @@ fn execute_vesting_call(
     store: &mut dyn StateStore,
     sender: &AccountId,
     method: &str,
+    args: &[u8],
 ) -> SystemCallResult {
-    use solen_system_contracts::vesting::VestingContract;
+    use solen_system_contracts::vesting::{VestingContract, VestingType};
 
     let mut vesting = VestingContract::load(store);
     let mut events = Vec::new();
@@ -1501,6 +1502,73 @@ fn execute_vesting_call(
                     Ok(())
                 }
                 None => Err("no vesting schedule for this account".into()),
+            }
+        }
+        // Admin: add a new vesting schedule post-genesis.
+        // Args: recipient[32] + amount[16] + vesting_type[1] + (optional for Custom: cliff_epochs[8] + total_epochs[8])
+        // vesting_type: 0=Team, 1=Investor, 2=Validator, 3=Custom
+        "add_vesting" => {
+            if args.len() < 49 {
+                return err("add_vesting: invalid args (need recipient[32] + amount[16] + type[1])");
+            }
+            let mut recipient = [0u8; 32];
+            recipient.copy_from_slice(&args[0..32]);
+            let mut amt_buf = [0u8; 16];
+            amt_buf.copy_from_slice(&args[32..48]);
+            let amount = u128::from_le_bytes(amt_buf);
+            let vtype = match args[48] {
+                0 => VestingType::Team,
+                1 => VestingType::Investor,
+                2 => VestingType::Validator,
+                3 => {
+                    if args.len() < 65 {
+                        return err("add_vesting: Custom type needs cliff_epochs[8] + total_epochs[8]");
+                    }
+                    let mut cliff_buf = [0u8; 8];
+                    cliff_buf.copy_from_slice(&args[49..57]);
+                    let mut total_buf = [0u8; 8];
+                    total_buf.copy_from_slice(&args[57..65]);
+                    VestingType::Custom {
+                        cliff_epochs: u64::from_le_bytes(cliff_buf),
+                        total_epochs: u64::from_le_bytes(total_buf),
+                    }
+                }
+                _ => return err("add_vesting: invalid vesting type"),
+            };
+            let current_epoch = read_current_epoch(store);
+            match vesting.add_schedule_admin(sender, recipient, amount, vtype, current_epoch) {
+                Ok(()) => {
+                    let mut data = Vec::with_capacity(48);
+                    data.extend_from_slice(&recipient);
+                    data.extend_from_slice(&amount.to_le_bytes());
+                    events.push(Event {
+                        emitter: solen_types::system::VESTING_ADDRESS,
+                        topic: b"vesting_added".to_vec(),
+                        data,
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        // Admin: set or transfer the vesting admin.
+        // Args: new_admin[32]
+        "set_vesting_admin" => {
+            if args.len() < 32 {
+                return err("set_vesting_admin: need new_admin[32]");
+            }
+            let mut new_admin = [0u8; 32];
+            new_admin.copy_from_slice(&args[0..32]);
+            match vesting.set_admin(sender, new_admin) {
+                Ok(()) => {
+                    events.push(Event {
+                        emitter: solen_types::system::VESTING_ADDRESS,
+                        topic: b"vesting_admin_set".to_vec(),
+                        data: new_admin.to_vec(),
+                    });
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
             }
         }
         _ => Err(format!("unknown vesting method: {method}")),

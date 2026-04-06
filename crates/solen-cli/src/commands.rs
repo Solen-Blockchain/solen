@@ -503,6 +503,109 @@ pub async fn cmd_withdraw_stake(rpc: &RpcClient, from: &str, chain_id: u64) -> R
     Ok(())
 }
 
+pub async fn cmd_set_vesting_admin(rpc: &RpcClient, from: &str, new_admin: &str, chain_id: u64) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let admin_id = resolve_account_id(new_admin)?;
+
+    let sender_hex = account_to_base58(&sender_id);
+
+    let vesting_addr = solen_types::system::VESTING_ADDRESS;
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
+        actions: vec![Action::Call {
+            target: vesting_addr,
+            method: "set_vesting_admin".to_string(),
+            args: admin_id.to_vec(),
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Vesting admin set to {}", account_to_base58(&admin_id));
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
+pub async fn cmd_add_vesting(
+    rpc: &RpcClient,
+    from: &str,
+    recipient: &str,
+    amount: u128,
+    vesting_type: &str,
+    cliff_months: Option<u64>,
+    vest_months: Option<u64>,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let recipient_id = resolve_account_id(recipient)?;
+
+    let sender_hex = account_to_base58(&sender_id);
+
+    // Epochs per month (~13,140 at 100 blocks/epoch, 2s block time)
+    const EPOCHS_PER_MONTH: u64 = 157_680 / 12;
+
+    // Build args: recipient[32] + amount[16] + type[1] + (optional custom: cliff[8] + total[8])
+    let mut args = Vec::with_capacity(65);
+    args.extend_from_slice(&recipient_id);
+    args.extend_from_slice(&amount.to_le_bytes());
+
+    let type_name = match vesting_type {
+        "team" => { args.push(0); "Team (1yr cliff, 3yr vest)" }
+        "investor" => { args.push(1); "Investor (6mo cliff, 2yr vest)" }
+        "validator" => { args.push(2); "Validator (3mo cliff, 1yr vest)" }
+        "custom" => {
+            let cliff = cliff_months.unwrap_or(3);
+            let vest = vest_months.unwrap_or(12);
+            let cliff_ep = cliff * EPOCHS_PER_MONTH;
+            let total_ep = cliff_ep + vest * EPOCHS_PER_MONTH;
+            args.push(3);
+            args.extend_from_slice(&cliff_ep.to_le_bytes());
+            args.extend_from_slice(&total_ep.to_le_bytes());
+            "Custom"
+        }
+        _ => anyhow::bail!("invalid vesting type: {vesting_type} (use team, investor, validator, or custom)"),
+    };
+
+    let vesting_addr = solen_types::system::VESTING_ADDRESS;
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
+        actions: vec![Action::Call {
+            target: vesting_addr,
+            method: "add_vesting".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let solen_amount = amount as f64 / 1e8;
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Vesting schedule added:");
+        println!("  Recipient: {}", account_to_base58(&recipient_id));
+        println!("  Amount:    {:.2} SOLEN", solen_amount);
+        println!("  Type:      {}", type_name);
+        println!("  Starts:    current epoch (vesting clock begins now)");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
 pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;

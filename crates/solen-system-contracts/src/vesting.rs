@@ -23,6 +23,8 @@ pub enum VestingError {
     CliffNotReached,
     #[error("nothing to claim (already fully claimed)")]
     FullyClaimed,
+    #[error("not authorized (admin only)")]
+    NotAdmin,
 }
 
 /// A vesting schedule category.
@@ -32,6 +34,10 @@ pub enum VestingType {
     Team,
     /// 6-month cliff, 2-year linear vest.
     Investor,
+    /// 3-month cliff, 1-year linear vest (for validator token sales).
+    Validator,
+    /// Custom cliff and vesting duration.
+    Custom { cliff_epochs: u64, total_epochs: u64 },
 }
 
 impl VestingType {
@@ -40,14 +46,18 @@ impl VestingType {
         match self {
             VestingType::Team => EPOCHS_PER_YEAR,           // 1 year
             VestingType::Investor => EPOCHS_PER_MONTH * 6,  // 6 months
+            VestingType::Validator => EPOCHS_PER_MONTH * 3, // 3 months
+            VestingType::Custom { cliff_epochs, .. } => *cliff_epochs,
         }
     }
 
-    /// Total vesting duration in epochs (from genesis, including cliff).
+    /// Total vesting duration in epochs (including cliff).
     pub fn total_epochs(&self) -> u64 {
         match self {
             VestingType::Team => EPOCHS_PER_YEAR * 4,       // 4 years total
             VestingType::Investor => EPOCHS_PER_MONTH * 30, // 2.5 years total
+            VestingType::Validator => EPOCHS_PER_MONTH * 15, // 1.25 years total (3mo cliff + 12mo vest)
+            VestingType::Custom { total_epochs, .. } => *total_epochs,
         }
     }
 }
@@ -100,6 +110,10 @@ impl VestingSchedule {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VestingContract {
     pub schedules: Vec<VestingSchedule>,
+    /// Admin account that can add new vesting schedules post-genesis.
+    /// Typically the foundation multisig. If empty, only genesis can add schedules.
+    #[serde(default)]
+    pub admin: Option<AccountId>,
 }
 
 impl VestingContract {
@@ -151,6 +165,41 @@ impl VestingContract {
     /// Get a recipient's vesting info.
     pub fn get_schedule(&self, recipient: &AccountId) -> Option<&VestingSchedule> {
         self.schedules.iter().find(|s| s.recipient == *recipient)
+    }
+
+    /// Set the admin account (can only be done once, or by current admin).
+    pub fn set_admin(&mut self, caller: &AccountId, new_admin: AccountId) -> Result<(), VestingError> {
+        if let Some(ref current) = self.admin {
+            if current != caller {
+                return Err(VestingError::NotAdmin);
+            }
+        }
+        self.admin = Some(new_admin);
+        Ok(())
+    }
+
+    /// Add a vesting schedule (admin only, for post-genesis allocations).
+    /// The tokens must be transferred to the vesting pool separately.
+    pub fn add_schedule_admin(
+        &mut self,
+        caller: &AccountId,
+        recipient: AccountId,
+        total_amount: u128,
+        vesting_type: VestingType,
+        start_epoch: u64,
+    ) -> Result<(), VestingError> {
+        match &self.admin {
+            Some(admin) if admin == caller => {},
+            _ => return Err(VestingError::NotAdmin),
+        }
+        self.schedules.push(VestingSchedule {
+            recipient,
+            total_amount,
+            claimed: 0,
+            vesting_type,
+            start_epoch,
+        });
+        Ok(())
     }
 
     /// Total tokens still locked across all schedules.

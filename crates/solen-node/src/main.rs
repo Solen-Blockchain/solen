@@ -834,8 +834,9 @@ async fn main() -> anyhow::Result<()> {
                             let total_peers = peer_h.len();
                             drop(peer_h);
 
-                            // Need at least 2 peers ahead, or if only 1 peer total, trust it.
-                            if peers_ahead >= 2 || total_peers <= 1 {
+                            // Need at least 2 peers ahead to enter sync.
+                            // Only trust a single peer if we're at genesis (no blocks yet).
+                            if peers_ahead >= 2 || (total_peers <= 1 && our_height == 0) {
                                 net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
                                 syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
                                 tracing::info!(

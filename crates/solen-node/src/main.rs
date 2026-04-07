@@ -912,7 +912,7 @@ async fn main() -> anyhow::Result<()> {
                         } else if !blocks.is_empty() {
                             // Received blocks but none applied — likely a fork mismatch.
                             sync_fail_count += 1;
-                            if sync_fail_count >= 5 {
+                            if sync_fail_count >= 1 {
                                 tracing::warn!(
                                     failures = sync_fail_count,
                                     our_height,

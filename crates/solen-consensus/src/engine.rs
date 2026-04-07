@@ -1396,23 +1396,29 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Execute operations (including epoch rewards if applicable).
+        // Execute on a snapshot first to verify state root before committing.
+        // This prevents state corruption from blocks on a different fork.
         let exec_result = {
+            let store = self.store.read().unwrap();
+            let mut trial = store.snapshot();
+            let result = self.executor.execute_block_with_height(trial.as_mut(), operations, height);
+
+            // Verify state root matches before applying to real store.
+            if result.state_root != header.state_root {
+                warn!(
+                    height,
+                    ours = ?&result.state_root[..4],
+                    theirs = ?&header.state_root[..4],
+                    "state root mismatch in synced block — rejecting (possible poisoned peer)"
+                );
+                return false;
+            }
+            drop(store);
+
+            // State root matches — execute on the real store.
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_with_height(store.as_mut(), operations, height)
         };
-
-        // Verify our computed state root matches the block header.
-        // Reject mismatched blocks to prevent state corruption from poisoned peers.
-        if exec_result.state_root != header.state_root {
-            warn!(
-                height,
-                ours = ?&exec_result.state_root[..4],
-                theirs = ?&header.state_root[..4],
-                "state root mismatch in synced block — rejecting (possible poisoned peer)"
-            );
-            return false;
-        }
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).

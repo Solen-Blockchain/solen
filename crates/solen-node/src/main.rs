@@ -691,6 +691,7 @@ async fn main() -> anyhow::Result<()> {
                 std::collections::HashMap::new();
             let mut sync_fail_count: u32 = 0;
             let mut fork_mismatch_detected = false;
+            let mut bad_state_roots: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
             let _p2p_genesis_hash = expected_genesis_hash;
 
             while let Some(msg) = inbound_rx.recv().await {
@@ -936,13 +937,14 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
-                        // Fork isolation: once we've detected bad peers, only accept
-                        // sync blocks that start at our exact next height.
-                        // This is cheap (no execution) and filters out all old-chain noise.
+                        // Fork isolation: drop blocks with known-bad state roots
+                        // and blocks we can't apply (wrong height).
                         if fork_mismatch_detected {
                             let our_h = engine_for_p2p.height();
-                            // Keep only blocks we can actually apply sequentially.
-                            blocks.retain(|b| b.header.height >= our_h + 1);
+                            blocks.retain(|b| {
+                                b.header.height >= our_h + 1
+                                    && !bad_state_roots.contains(&b.header.state_root)
+                            });
                             if blocks.is_empty() {
                                 continue;
                             }
@@ -962,6 +964,10 @@ async fn main() -> anyhow::Result<()> {
                         // Sort and feed blocks in order. replay_synced_block returns
                         // false on gap/duplicate, true on success.
                         for sync_block in &blocks {
+                            // Skip blocks with known-bad state roots (faster than executing).
+                            if bad_state_roots.contains(&sync_block.header.state_root) {
+                                continue;
+                            }
                             let applied = engine_for_p2p.replay_synced_block(
                                 &sync_block.header,
                                 &sync_block.operations,
@@ -969,6 +975,13 @@ async fn main() -> anyhow::Result<()> {
                             );
                             if applied {
                                 synced += 1;
+                            } else if sync_block.header.height == engine_for_p2p.height() + 1 {
+                                // Block was at the right height but failed — remember its state root.
+                                bad_state_roots.insert(sync_block.header.state_root);
+                                // Cap the set to prevent unbounded growth.
+                                if bad_state_roots.len() > 1000 {
+                                    bad_state_roots.clear();
+                                }
                             } else if sync_block.header.height > engine_for_p2p.height() + 1 {
                                 had_gap = true;
                             }
@@ -989,11 +1002,12 @@ async fn main() -> anyhow::Result<()> {
                             // Received blocks but none applied — likely a fork mismatch.
                             sync_fail_count += 1;
                             if sync_fail_count >= 1 {
-                                tracing::warn!(
-                                    failures = sync_fail_count,
-                                    our_height,
-                                    "sync blocks repeatedly rejected — peers on a different fork, disabling sync from announcements"
-                                );
+                                if !fork_mismatch_detected {
+                                    tracing::warn!(
+                                        our_height,
+                                        "sync blocks rejected — peers on a different fork, disabling sync from announcements"
+                                    );
+                                }
                                 syncing_for_p2p.store(false, std::sync::atomic::Ordering::Relaxed);
                                 sync_fail_count = 0;
                                 fork_mismatch_detected = true;

@@ -1410,11 +1410,11 @@ impl ConsensusEngine {
         };
 
         if exec_result.state_root != header.state_root {
-            warn!(
+            debug!(
                 height,
                 ours = ?&exec_result.state_root[..4],
                 theirs = ?&header.state_root[..4],
-                "state root mismatch in synced block — rejecting (possible poisoned peer)"
+                "state root mismatch in synced block — rejecting"
             );
             return false;
         }

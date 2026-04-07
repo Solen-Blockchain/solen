@@ -691,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
                 std::collections::HashMap::new();
             let mut sync_fail_count: u32 = 0;
             let mut fork_mismatch_detected = false;
-            let p2p_genesis_hash = expected_genesis_hash;
+            let _p2p_genesis_hash = expected_genesis_hash;
 
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {

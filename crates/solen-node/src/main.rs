@@ -1275,15 +1275,18 @@ async fn main() -> anyhow::Result<()> {
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
             if engine_clone.is_likely_partitioned() {
-                // Still check for dropped blocks to trigger sync recovery.
-                if let Some(dropped_height) = engine_clone.take_dropped_block_height() {
-                    if let Some(ref handle) = net_for_blocks {
-                        handle.broadcast(NetworkMessage::SyncRequest {
-                            from_height: dropped_height,
-                            to_height: dropped_height + 10,
-                        });
-                    }
+                // Clear all peer bans to allow reconnection.
+                if let Some(ref handle) = net_for_blocks {
+                    handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
+                    // Also request sync to try to reconnect.
+                    let our_h = engine_clone.height();
+                    handle.broadcast(NetworkMessage::SyncRequest {
+                        from_height: our_h + 1,
+                        to_height: our_h + 10,
+                    });
                 }
+                // Still check for dropped blocks.
+                let _ = engine_clone.take_dropped_block_height();
                 continue;
             }
 

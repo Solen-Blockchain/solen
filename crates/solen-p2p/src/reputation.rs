@@ -18,6 +18,8 @@ pub enum ReputationEvent {
     InvalidAttestation(PeerId),
     /// Peer sent blocks from a different fork (state root mismatch).
     ForkMismatch(PeerId),
+    /// Clear all bans (partition recovery).
+    ClearAllBans,
 }
 
 /// Score thresholds and timing.
@@ -181,6 +183,16 @@ impl PeerReputation {
     pub fn score(&mut self, peer: &PeerId) -> i64 {
         self.get_or_create(peer).apply_decay();
         self.get_or_create(peer).score
+    }
+
+    /// Clear all bans. Used when partition is detected to allow reconnection.
+    pub fn clear_all_bans(&mut self) {
+        for (_, score) in self.peers.iter_mut() {
+            score.banned_until = None;
+            if score.score < 0 {
+                score.score = 0;
+            }
+        }
     }
 
     /// Get summary stats.

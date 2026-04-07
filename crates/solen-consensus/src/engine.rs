@@ -308,6 +308,10 @@ impl ConsensusEngine {
         self.store.clone()
     }
 
+    pub fn executor(&self) -> &BlockExecutor {
+        &self.executor
+    }
+
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
         self.chain.clone()
     }

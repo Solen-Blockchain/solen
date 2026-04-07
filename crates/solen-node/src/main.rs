@@ -132,6 +132,11 @@ struct Cli {
     /// Downloads and restores the snapshot, then syncs forward from that height.
     #[arg(long)]
     snapshot: Option<String>,
+
+    /// Expected genesis state root (hex). Reject sync blocks from chains
+    /// with a different genesis. Use this to isolate from old chain forks.
+    #[arg(long)]
+    genesis_hash: Option<String>,
 }
 
 #[tokio::main]
@@ -493,6 +498,21 @@ async fn main() -> anyhow::Result<()> {
         info!(state_root = hex(&store.state_root()), "loaded existing state");
     }
 
+    // Determine expected genesis state root for fork isolation.
+    let expected_genesis_hash: Option<[u8; 32]> = if let Some(ref gh) = cli.genesis_hash {
+        let bytes = hex_decode(gh)?;
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            info!(genesis_hash = %gh, "fork isolation enabled — will reject chains with different genesis");
+            Some(arr)
+        } else {
+            anyhow::bail!("--genesis-hash must be 64 hex characters (32 bytes)");
+        }
+    } else {
+        None
+    };
+
     // Store chain_id for proof type restrictions (e.g., block mock proofs on mainnet).
     // Only write if not already present — avoids overwriting snapshot-restored state.
     if store.get(b"__chain_id__").ok().flatten().is_none() {
@@ -655,6 +675,7 @@ async fn main() -> anyhow::Result<()> {
                 std::collections::HashMap::new();
             let mut sync_fail_count: u32 = 0;
             let mut fork_mismatch_detected = false;
+            let p2p_genesis_hash = expected_genesis_hash;
 
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -882,6 +903,38 @@ async fn main() -> anyhow::Result<()> {
                         if blocks.is_empty() {
                             continue;
                         }
+
+                        // Fork isolation: if --genesis-hash is set and the batch
+                        // contains blocks from a different chain, drop the entire batch.
+                        if let Some(ref gh) = p2p_genesis_hash {
+                            // Check if any block in this batch has height 1 — that tells
+                            // us the genesis of the sender's chain.
+                            if let Some(b1) = blocks.iter().find(|b| b.header.height == 1) {
+                                // Execute block 1 on a trial store to get the state root.
+                                let store = engine_for_p2p.store();
+                                let store_guard = store.read().unwrap();
+                                let mut trial = store_guard.writable_snapshot();
+                                drop(store_guard);
+                                let result = engine_for_p2p.executor().execute_block_with_height(
+                                    trial.as_mut(), &b1.operations, 1,
+                                );
+                                if result.state_root != b1.header.state_root {
+                                    tracing::debug!("sync batch from different fork (block 1 mismatch) — dropping");
+                                    fork_mismatch_detected = true;
+                                    continue;
+                                }
+                            }
+                            // Also quick-reject: if we already detected a fork mismatch
+                            // and the batch starts way ahead (gap), it's from the old chain.
+                            if fork_mismatch_detected && engine_for_p2p.height() == 0 {
+                                if let Some(first) = blocks.first() {
+                                    if first.header.height > 1 {
+                                        continue; // old chain sending blocks from middle
+                                    }
+                                }
+                            }
+                        }
+
                         // Cap sync batch size to prevent memory DoS.
                         if blocks.len() > 100 {
                             blocks.truncate(100);

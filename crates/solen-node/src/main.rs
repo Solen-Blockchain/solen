@@ -906,7 +906,7 @@ async fn main() -> anyhow::Result<()> {
 
                         // Fork isolation: if --genesis-hash is set and the batch
                         // contains blocks from a different chain, drop the entire batch.
-                        if let Some(ref gh) = p2p_genesis_hash {
+                        if let Some(ref _gh) = p2p_genesis_hash {
                             // Check if any block in this batch has height 1 — that tells
                             // us the genesis of the sender's chain.
                             if let Some(b1) = blocks.iter().find(|b| b.header.height == 1) {

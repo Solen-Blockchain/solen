@@ -137,6 +137,9 @@ pub struct ConsensusEngine {
     finalized_checkpoints: Arc<RwLock<crate::checkpoint::FinalizedCheckpointStore>>,
     /// Trusted checkpoints for long-range attack protection.
     trusted_checkpoints: crate::checkpoint::TrustedCheckpoints,
+    /// Height of a dropped block (our proposal that had attestation mismatches).
+    /// The node layer reads and clears this to trigger a sync request.
+    dropped_block_height: Arc<RwLock<Option<u64>>>,
 }
 
 impl ConsensusEngine {
@@ -220,9 +223,10 @@ impl ConsensusEngine {
             early_attestations: Arc::new(RwLock::new(Vec::new())),
             trusted_checkpoints: match chain_id {
                 1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
-                9000 => crate::checkpoint::TrustedCheckpoints::testnet(),
+                9000 | 9001 => crate::checkpoint::TrustedCheckpoints::testnet(),
                 _ => crate::checkpoint::TrustedCheckpoints::devnet(),
             },
+            dropped_block_height: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -312,6 +316,11 @@ impl ConsensusEngine {
 
     pub fn executor(&self) -> &BlockExecutor {
         &self.executor
+    }
+
+    /// Check if a block was dropped due to attestation mismatch. Returns and clears the height.
+    pub fn take_dropped_block_height(&self) -> Option<u64> {
+        self.dropped_block_height.write().unwrap().take()
     }
 
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
@@ -1686,6 +1695,8 @@ impl ConsensusEngine {
             if should_drop {
                 info!(height, "dropping own block — other validators have a different block at this height");
                 self.pending_blocks.write().unwrap().remove(&height);
+                // Signal that we need sync by storing the dropped height.
+                *self.dropped_block_height.write().unwrap() = Some(height);
                 continue;
             }
 

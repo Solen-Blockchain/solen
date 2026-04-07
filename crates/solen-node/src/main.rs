@@ -1267,6 +1267,18 @@ async fn main() -> anyhow::Result<()> {
                 || (engine_clone.is_next_proposer() && !already_pending)
                 || (!already_pending && engine_clone.is_backup_proposer(stalled_for));
 
+            // Check if a block was dropped due to attestation mismatch.
+            // If so, request sync for that height to get the correct block from peers.
+            if let Some(dropped_height) = engine_clone.take_dropped_block_height() {
+                if let Some(ref handle) = net_for_blocks {
+                    tracing::info!(height = dropped_height, "requesting sync after dropping mismatched block");
+                    handle.broadcast(NetworkMessage::SyncRequest {
+                        from_height: dropped_height,
+                        to_height: dropped_height + 10,
+                    });
+                }
+            }
+
             if should_propose {
                 let produced = engine_clone.produce_block();
                 last_finalized_at = std::time::Instant::now();

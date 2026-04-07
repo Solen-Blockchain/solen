@@ -16,11 +16,14 @@ pub enum ReputationEvent {
     InvalidBlock(PeerId),
     ValidAttestation(PeerId),
     InvalidAttestation(PeerId),
+    /// Peer sent blocks from a different fork (state root mismatch).
+    ForkMismatch(PeerId),
 }
 
 /// Score thresholds and timing.
 const BAN_THRESHOLD: i64 = -50;
-const BAN_DURATION_SECS: u64 = 300; // 5 minutes
+const BASE_BAN_DURATION_SECS: u64 = 300; // 5 minutes base
+const MAX_BAN_DURATION_SECS: u64 = 3600; // 1 hour max
 const DECAY_INTERVAL_SECS: u64 = 60;
 const DECAY_AMOUNT: i64 = 5; // score decays toward 0 every interval
 const MAX_TRACKED_PEERS: usize = 500;
@@ -32,6 +35,7 @@ const INVALID_BLOCK_SCORE: i64 = -10;
 const INVALID_ATTESTATION_SCORE: i64 = -5;
 const DECODE_FAILURE_SCORE: i64 = -3;
 const RATE_LIMITED_SCORE: i64 = -1;
+const FORK_MISMATCH_SCORE: i64 = -100; // instant ban, different fork
 
 /// Per-peer reputation state.
 #[derive(Debug, Clone)]
@@ -39,6 +43,7 @@ struct PeerScore {
     score: i64,
     last_decay: Instant,
     banned_until: Option<Instant>,
+    ban_count: u32,
     valid_messages: u64,
     invalid_messages: u64,
 }
@@ -49,6 +54,7 @@ impl PeerScore {
             score: 0,
             last_decay: Instant::now(),
             banned_until: None,
+            ban_count: 0,
             valid_messages: 0,
             invalid_messages: 0,
         }
@@ -77,10 +83,15 @@ impl PeerScore {
 
         // Check ban threshold.
         if self.score <= BAN_THRESHOLD && self.banned_until.is_none() {
-            self.banned_until = Some(Instant::now() + Duration::from_secs(BAN_DURATION_SECS));
+            // Escalating bans: each successive ban doubles the duration.
+            let ban_secs = (BASE_BAN_DURATION_SECS * 2u64.saturating_pow(self.ban_count))
+                .min(MAX_BAN_DURATION_SECS);
+            self.ban_count = self.ban_count.saturating_add(1);
+            self.banned_until = Some(Instant::now() + Duration::from_secs(ban_secs));
             tracing::warn!(
                 score = self.score,
-                ban_secs = BAN_DURATION_SECS,
+                ban_secs,
+                ban_count = self.ban_count,
                 "peer banned due to low reputation"
             );
         }
@@ -89,9 +100,10 @@ impl PeerScore {
     fn is_banned(&mut self) -> bool {
         if let Some(until) = self.banned_until {
             if Instant::now() >= until {
-                // Ban expired — reset.
+                // Ban expired — lift ban but keep negative score.
+                // Next offense will re-ban immediately with longer duration.
                 self.banned_until = None;
-                self.score = 0;
+                self.score = BAN_THRESHOLD / 2; // start halfway to next ban
                 false
             } else {
                 true
@@ -157,6 +169,12 @@ impl PeerReputation {
     /// Record that this peer was rate-limited.
     pub fn record_rate_limited(&mut self, peer: &PeerId) {
         self.get_or_create(peer).adjust(RATE_LIMITED_SCORE);
+    }
+
+    /// Record that this peer sent blocks from a different fork.
+    /// This is a severe offense — instant ban with heavy penalty.
+    pub fn record_fork_mismatch(&mut self, peer: &PeerId) {
+        self.get_or_create(peer).adjust(FORK_MISMATCH_SCORE);
     }
 
     /// Get the score for a peer (for diagnostics).

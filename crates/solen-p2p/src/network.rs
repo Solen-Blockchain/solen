@@ -268,6 +268,7 @@ impl NetworkService {
                             ReputationEvent::InvalidBlock(peer) => peer_reputation.record_invalid_block(&peer),
                             ReputationEvent::ValidAttestation(peer) => peer_reputation.record_valid_attestation(&peer),
                             ReputationEvent::InvalidAttestation(peer) => peer_reputation.record_invalid_attestation(&peer),
+                            ReputationEvent::ForkMismatch(peer) => peer_reputation.record_fork_mismatch(&peer),
                         }
                     }
                     // Handle outbound messages.

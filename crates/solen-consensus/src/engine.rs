@@ -1372,7 +1372,7 @@ impl ConsensusEngine {
                     return false; // Already have this height.
                 }
                 if height != last.header.height + 1 {
-                    warn!(
+                    debug!(
                         height,
                         our_height = last.header.height,
                         "sync block has gap — skipping"

@@ -754,6 +754,22 @@ async fn main() -> anyhow::Result<()> {
                                 header.height,
                                 bh,
                             );
+                        } else {
+                            // Block not accepted — if it's ahead of us, request sync.
+                            let our_h = engine_for_p2p.height();
+                            if header.height > our_h + 1 && !fork_mismatch_detected {
+                                tracing::info!(
+                                    our_height = our_h,
+                                    block_height = header.height,
+                                    "live block ahead of us — requesting sync"
+                                );
+                                syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
+                                net_height_for_p2p.fetch_max(header.height, std::sync::atomic::Ordering::Relaxed);
+                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                    from_height: our_h + 1,
+                                    to_height: header.height,
+                                });
+                            }
                         }
                     }
                     NetworkMessage::Attestation {

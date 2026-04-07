@@ -766,10 +766,10 @@ async fn main() -> anyhow::Result<()> {
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
-                            // After detecting a fork mismatch, ignore sync from
-                            // StatusAnnounce entirely. Sync will only resume if
-                            // we accept a valid live block from a same-fork peer.
-                            if fork_mismatch_detected {
+                            // After detecting a fork mismatch at genesis, ignore sync from
+                            // StatusAnnounce. Once we have blocks (e.g. from snapshot),
+                            // allow sync again — trial execution protects state.
+                            if fork_mismatch_detected && our_height == 0 {
                                 continue;
                             }
 

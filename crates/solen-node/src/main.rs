@@ -834,7 +834,9 @@ async fn main() -> anyhow::Result<()> {
                             let _to = to_height.min(from_height + max_batch as u64 - 1);
                             let blocks = engine_for_p2p.get_blocks_for_sync(from_height, max_batch);
 
-                            if !blocks.is_empty() {
+                            // Only serve if the first block matches what was requested.
+                            // Prevents sending wrong blocks when we don't have the requested range.
+                            if !blocks.is_empty() && blocks[0].header.height == from_height {
                                 let sync_blocks: Vec<solen_p2p::messages::SyncBlock> = blocks
                                     .iter()
                                     .map(|b| solen_p2p::messages::SyncBlock {

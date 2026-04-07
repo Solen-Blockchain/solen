@@ -294,7 +294,8 @@ async fn main() -> anyhow::Result<()> {
                     if let Ok(json) = resp.json::<serde_json::Value>() {
                         if let (Some(h), Some(sr)) = (
                             json["result"]["height"].as_u64(),
-                            json["result"]["latest_state_root"].as_str(),
+                            json["result"]["state_root"].as_str()
+                                .or(json["result"]["latest_state_root"].as_str()),
                         ) {
                             info!(url = %url, height = h, state_root = %sr, "seed status");
                             state_roots.push((url.clone(), h, sr.to_string()));
@@ -327,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Require 2+ agreeing seeds when multiple are available.
             // Fall back to 1 if only 1 unique URL was reachable.
-            let need_consensus = if matches!(net, Network::Devnet) || state_roots.len() <= 1 { 1 } else { 2 };
+            let need_consensus = if matches!(net, Network::Mainnet) && state_roots.len() > 1 { 2 } else { 1 };
 
             if count >= need_consensus {
                 info!(

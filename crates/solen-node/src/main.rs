@@ -722,7 +722,16 @@ async fn main() -> anyhow::Result<()> {
                         // accept_block handles fast-forward for gaps.
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {
-                            // Block accepted (stored as pending, not yet executed).
+                            // Block accepted from a peer — we have connectivity.
+                            // Reset partition state so block production can resume.
+                            if engine_for_p2p.is_likely_partitioned() {
+                                tracing::info!(
+                                    height = header.height,
+                                    "received valid block from peer — clearing partition state"
+                                );
+                                engine_for_p2p.reset_partition_state();
+                            }
+
                             // If we were syncing, this live block verifies our state.
                             // Force-finalize it immediately — the network already has
                             // consensus on this block, no need to wait for attestations.
@@ -1263,6 +1272,21 @@ async fn main() -> anyhow::Result<()> {
             // 3. We're the backup proposer AND no block pending from any source.
             //    The `already_pending` check prevents competing blocks at the same
             //    height, which causes attestation hash mismatches.
+            // Don't produce blocks if we appear to be partitioned from the network.
+            // This prevents divergent chains from force-finalization during partitions.
+            if engine_clone.is_likely_partitioned() {
+                // Still check for dropped blocks to trigger sync recovery.
+                if let Some(dropped_height) = engine_clone.take_dropped_block_height() {
+                    if let Some(ref handle) = net_for_blocks {
+                        handle.broadcast(NetworkMessage::SyncRequest {
+                            from_height: dropped_height,
+                            to_height: dropped_height + 10,
+                        });
+                    }
+                }
+                continue;
+            }
+
             let should_propose = engine_clone.active_validator_count() <= 1
                 || (engine_clone.is_next_proposer() && !already_pending)
                 || (!already_pending && engine_clone.is_backup_proposer(stalled_for));

@@ -127,6 +127,9 @@ pub struct ConsensusEngine {
     proof_registry: Arc<RwLock<ProofVerifierRegistry>>,
     /// Queued slashing evidence to include in the next block.
     pending_slashing: Arc<std::sync::Mutex<Vec<crate::slashing::SlashingEvidence>>>,
+    /// Consecutive force-finalizations without quorum. When this exceeds a
+    /// threshold, the validator stops producing blocks (likely partitioned).
+    consecutive_force_finalizes: Arc<std::sync::atomic::AtomicU32>,
     /// Buffered attestations for blocks not yet received. Bounded and time-limited
     /// to prevent memory exhaustion while allowing out-of-order gossip delivery.
     early_attestations: Arc<RwLock<Vec<(ValidatorId, u64, Hash, std::time::Instant)>>>,
@@ -220,6 +223,7 @@ impl ConsensusEngine {
                 Arc::new(RwLock::new(reg))
             },
             pending_slashing: Arc::new(std::sync::Mutex::new(Vec::new())),
+            consecutive_force_finalizes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             early_attestations: Arc::new(RwLock::new(Vec::new())),
             trusted_checkpoints: match chain_id {
                 1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
@@ -321,6 +325,17 @@ impl ConsensusEngine {
     /// Check if a block was dropped due to attestation mismatch. Returns and clears the height.
     pub fn take_dropped_block_height(&self) -> Option<u64> {
         self.dropped_block_height.write().unwrap().take()
+    }
+
+    /// Returns true if the validator appears to be partitioned from the network
+    /// (too many consecutive force-finalizations without quorum).
+    pub fn is_likely_partitioned(&self) -> bool {
+        self.consecutive_force_finalizes.load(std::sync::atomic::Ordering::Relaxed) > 3
+    }
+
+    /// Reset partition state — called when connectivity is restored.
+    pub fn reset_partition_state(&self) {
+        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
@@ -1090,6 +1105,9 @@ impl ConsensusEngine {
 
         self.try_epoch_transition(height);
 
+        // Reset force-finalization counter — we have healthy quorum.
+        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+
         info!(
             height,
             epoch = pb.header.epoch,
@@ -1700,7 +1718,23 @@ impl ConsensusEngine {
                 continue;
             }
 
-            warn!(height, "quorum timeout — force-finalizing block");
+            let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+
+            // If we've force-finalized too many blocks in a row, we're likely
+            // partitioned from the network. Stop finalizing to prevent divergence.
+            // The node will resume when it receives a valid block with quorum from peers.
+            const MAX_CONSECUTIVE_FORCE_FINALIZES: u32 = 3;
+            if force_count > MAX_CONSECUTIVE_FORCE_FINALIZES {
+                warn!(
+                    height,
+                    force_count,
+                    "too many consecutive force-finalizations — stopping production (likely partitioned)"
+                );
+                self.pending_blocks.write().unwrap().remove(&height);
+                continue;
+            }
+
+            warn!(height, force_count, "quorum timeout — force-finalizing block");
             self.finalize_pending_block(height);
             count += 1;
         }

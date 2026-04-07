@@ -1029,6 +1029,7 @@ impl ConsensusEngine {
             .unwrap()
             .remove(&height)
             .unwrap_or_default();
+        let had_quorum_attestations = !attestations.is_empty();
 
         let Some(pb) = pending_block else { return };
 
@@ -1105,8 +1106,11 @@ impl ConsensusEngine {
 
         self.try_epoch_transition(height);
 
-        // Reset force-finalization counter — we have healthy quorum.
-        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        // Only reset force-finalization counter if we actually had quorum
+        // (attestations present). Force-finalized blocks have no attestations.
+        if had_quorum_attestations {
+            self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
 
         info!(
             height,

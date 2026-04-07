@@ -57,4 +57,17 @@ pub trait StateStore: Send + Sync {
 
     /// Iterate all key-value pairs in the store.
     fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+
+    /// Create a writable in-memory snapshot for trial execution.
+    /// Unlike `snapshot()` which may be read-only, this always returns a
+    /// fully writable store suitable for speculative execution.
+    fn writable_snapshot(&self) -> Box<dyn StateStore> {
+        let mut mem = crate::memory::MemoryStore::new();
+        if let Ok(entries) = self.scan_all() {
+            for (k, v) in entries {
+                let _ = mem.put(&k, &v);
+            }
+        }
+        Box::new(mem)
+    }
 }

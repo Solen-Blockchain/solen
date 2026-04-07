@@ -806,8 +806,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     NetworkMessage::StatusAnnounce { height, state_root: _sr } => {
-                        // Track peer heights to prevent a single rogue node from
-                        // stalling the network with a fake longer chain.
+                        // Track peer heights — use a set of unique heights so that
+                        // repeated announcements from the same stale node don't
+                        // accumulate and falsely trigger sync mode.
                         {
                             let mut ph = peer_heights_for_p2p.lock().unwrap();
                             ph.push(height);
@@ -820,21 +821,19 @@ async fn main() -> anyhow::Result<()> {
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
-                            // After detecting a fork mismatch at genesis, ignore sync from
-                            // StatusAnnounce. Once we have blocks (e.g. from snapshot),
-                            // allow sync again — trial execution protects state.
-                            if fork_mismatch_detected && our_height == 0 {
+                            // After detecting a fork mismatch, completely ignore
+                            // StatusAnnounce sync triggers. Legitimate catch-up
+                            // is handled by the live block handler (NewBlock gap detection).
+                            if fork_mismatch_detected {
                                 continue;
                             }
 
-                            // Check if multiple peers agree we're behind before
-                            // entering sync mode. A single rogue peer can't stall us.
                             let peer_h = peer_heights_for_p2p.lock().unwrap();
                             let peers_ahead = peer_h.iter().filter(|&&h| h > our_height + 1).count();
                             let total_peers = peer_h.len();
                             drop(peer_h);
 
-                            // Need at least 2 peers ahead to enter sync.
+                            // Need at least 2 UNIQUE heights ahead to enter sync.
                             // Only trust a single peer if we're at genesis (no blocks yet).
                             if peers_ahead >= 2 || (total_peers <= 1 && our_height == 0) {
                                 net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);

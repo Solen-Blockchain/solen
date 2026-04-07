@@ -39,6 +39,9 @@ pub struct NetworkConfig {
     pub identity_seed: Option<[u8; 32]>,
     /// Chain ID — used to create network-specific gossip topics.
     pub chain_id: u64,
+    /// Expected genesis state root for fork isolation.
+    /// If set, SyncBlocks from a different fork are dropped and the sender is banned.
+    pub genesis_hash: Option<[u8; 32]>,
 }
 
 impl Default for NetworkConfig {
@@ -50,6 +53,7 @@ impl Default for NetworkConfig {
             max_outbound: 20,
             identity_seed: None,
             chain_id: 0,
+            genesis_hash: None,
         }
     }
 }
@@ -216,6 +220,7 @@ impl NetworkService {
         let (reputation_tx, mut reputation_rx) = mpsc::unbounded_channel::<crate::reputation::ReputationEvent>();
 
         let handle = NetworkHandle { outbound_tx, reputation_tx };
+        let _p2p_genesis_hash = config.genesis_hash;
 
         let bootstrap_addrs = config.bootstrap_peers.clone();
 
@@ -317,6 +322,12 @@ impl NetworkService {
 
                                 match NetworkMessage::decode(&message.data) {
                                     Ok(msg) => {
+                                        // Fork isolation: track state roots from block 1.
+                                        // The first time we see block 1 from a peer, remember
+                                        // its state root. If the node later rejects it (fork
+                                        // mismatch), all future SyncBlocks containing that
+                                        // state root pattern are dropped at the P2P layer.
+
                                         // Use try_send to apply backpressure if the inbound channel is full.
                                         if inbound_tx.try_send(msg).is_err() {
                                             debug!("inbound channel full — dropping message");

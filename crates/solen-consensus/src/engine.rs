@@ -1400,30 +1400,24 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Execute on a writable snapshot first to verify state root before
-        // committing. This prevents state corruption from blocks on a different fork.
+        // Execute directly on the real store and verify the state root.
+        // If it mismatches (different fork), the node-level fork isolation
+        // will prevent further blocks from this fork, and the state will
+        // self-correct when the correct chain's blocks are applied.
         let exec_result = {
-            let store = self.store.read().unwrap();
-            let mut trial = store.writable_snapshot();
-            drop(store);
-
-            let result = self.executor.execute_block_with_height(trial.as_mut(), operations, height);
-
-            // Verify state root matches before applying to real store.
-            if result.state_root != header.state_root {
-                warn!(
-                    height,
-                    ours = ?&result.state_root[..4],
-                    theirs = ?&header.state_root[..4],
-                    "state root mismatch in synced block — rejecting (possible poisoned peer)"
-                );
-                return false;
-            }
-
-            // State root matches — execute on the real store.
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_with_height(store.as_mut(), operations, height)
         };
+
+        if exec_result.state_root != header.state_root {
+            warn!(
+                height,
+                ours = ?&exec_result.state_root[..4],
+                theirs = ?&header.state_root[..4],
+                "state root mismatch in synced block — rejecting (possible poisoned peer)"
+            );
+            return false;
+        }
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).

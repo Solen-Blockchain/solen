@@ -936,17 +936,15 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
-                        // Fork isolation: instantly reject blocks from different forks.
-                        if p2p_genesis_hash.is_some() {
-                            if fork_mismatch_detected {
-                                // Already know there are bad peers — drop all sync blocks
-                                // unless they start exactly where we need them.
-                                let our_h = engine_for_p2p.height();
-                                let dominated_by_bad = blocks.iter()
-                                    .all(|b| b.header.height != our_h + 1);
-                                if dominated_by_bad {
-                                    continue;
-                                }
+                        // Fork isolation: once we've detected bad peers, only accept
+                        // sync blocks that start at our exact next height.
+                        // This is cheap (no execution) and filters out all old-chain noise.
+                        if fork_mismatch_detected {
+                            let our_h = engine_for_p2p.height();
+                            // Keep only blocks we can actually apply sequentially.
+                            blocks.retain(|b| b.header.height >= our_h + 1);
+                            if blocks.is_empty() {
+                                continue;
                             }
                         }
 

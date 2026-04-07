@@ -1351,12 +1351,13 @@ impl ConsensusEngine {
     /// If `synced_receipts` are provided (from the peer's persisted block),
     /// they are used for indexing instead of the re-execution receipts.
     /// This preserves transaction history during sync.
+    /// Replay a synced block. Returns `true` if applied, `false` if skipped (gap or duplicate).
     pub fn replay_synced_block(
         &self,
         header: &BlockHeader,
         operations: &[UserOperation],
         synced_receipts: Vec<solen_execution::receipt::ExecutionReceipt>,
-    ) {
+    ) -> bool {
         let height = header.height;
 
         // Reject if we already have this block or there's a gap.
@@ -1364,7 +1365,7 @@ impl ConsensusEngine {
             let chain = self.chain.read().unwrap();
             if let Some(last) = chain.last() {
                 if height <= last.header.height {
-                    return; // Already have this height.
+                    return false; // Already have this height.
                 }
                 if height != last.header.height + 1 {
                     warn!(
@@ -1372,7 +1373,7 @@ impl ConsensusEngine {
                         our_height = last.header.height,
                         "sync block has gap — skipping"
                     );
-                    return; // Gap — can't apply.
+                    return false; // Gap — can't apply.
                 }
                 // Note: we intentionally do NOT check parent_hash during sync.
                 // Synced blocks are authoritative from peers. A wiped node may
@@ -1392,7 +1393,7 @@ impl ConsensusEngine {
                 got = header.epoch,
                 "invalid epoch in synced block — skipping"
             );
-            return;
+            return false;
         }
 
         // Execute operations (including epoch rewards if applicable).
@@ -1410,7 +1411,7 @@ impl ConsensusEngine {
                 theirs = ?&header.state_root[..4],
                 "state root mismatch in synced block — rejecting (possible poisoned peer)"
             );
-            return;
+            return false;
         }
 
         // Use synced receipts if available (they include user tx events).
@@ -1439,6 +1440,7 @@ impl ConsensusEngine {
 
         // Advance epoch counter (rewards already handled by executor).
         self.try_epoch_transition(height);
+        true
     }
 
     /// Process epoch transition if at a boundary. Syncs the consensus

@@ -868,53 +868,53 @@ async fn main() -> anyhow::Result<()> {
                         blocks.sort_by_key(|b| b.header.height);
 
                         let mut synced = 0u64;
-                        let mut highest_peer_height = 0u64;
+                        let mut had_gap = false;
 
-                        // Snapshot height once at start — replay_synced_block does its
-                        // own internal height check, so we just feed blocks in order.
+                        // Sort and feed blocks in order. replay_synced_block returns
+                        // false on gap/duplicate, true on success.
                         for sync_block in &blocks {
-                            if sync_block.header.height > highest_peer_height {
-                                highest_peer_height = sync_block.header.height;
-                            }
-                            // replay_synced_block internally checks height and rejects
-                            // duplicates/gaps, so we can safely call it for every block.
-                            let before = engine_for_p2p.height();
-                            engine_for_p2p.replay_synced_block(
+                            let applied = engine_for_p2p.replay_synced_block(
                                 &sync_block.header,
                                 &sync_block.operations,
                                 sync_block.receipts.clone(),
                             );
-                            if engine_for_p2p.height() > before {
+                            if applied {
                                 synced += 1;
+                            } else if sync_block.header.height > engine_for_p2p.height() + 1 {
+                                had_gap = true;
                             }
                         }
 
+                        let our_height = engine_for_p2p.height();
+                        let known_net_height = net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
+
                         if synced > 0 {
-                            let our_height = engine_for_p2p.height();
-                            let known_net_height = net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
                             tracing::info!(
                                 synced,
                                 new_height = our_height,
                                 network_height = known_net_height,
                                 "synced blocks from peer"
                             );
+                        }
 
-                            // Check if we've caught up to the known network height.
-                            if our_height + 1 >= known_net_height {
-                                // Don't resume production yet — wait for a live block
-                                // to verify our state root matches the network.
-                                // The syncing flag stays true; it'll be cleared when
-                                // we successfully accept a live block (state root matches).
+                        // Re-request if we're still behind (whether we synced some or hit a gap).
+                        if our_height + 1 >= known_net_height {
+                            tracing::info!(
+                                height = our_height,
+                                "sync caught up, waiting to verify state with live block"
+                            );
+                        } else if synced > 0 || had_gap {
+                            // Still behind — request missing range.
+                            net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                from_height: our_height + 1,
+                                to_height: known_net_height,
+                            });
+                            if had_gap {
                                 tracing::info!(
-                                    height = our_height,
-                                    "sync caught up, waiting to verify state with live block"
+                                    from = our_height + 1,
+                                    to = known_net_height,
+                                    "detected gap in sync — re-requesting missing blocks"
                                 );
-                            } else {
-                                // Still behind — request more blocks.
-                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
-                                    from_height: our_height + 1,
-                                    to_height: known_net_height,
-                                });
                             }
                         }
                     }

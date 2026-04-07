@@ -1402,17 +1402,16 @@ impl ConsensusEngine {
             self.executor.execute_block_with_height(store.as_mut(), operations, height)
         };
 
-        // Log state root comparison but don't reject during sync.
-        // After a binary upgrade, replayed blocks may produce different state roots
-        // than the original headers due to serialization changes. The state will be
-        // verified when the first live block arrives after sync completes.
+        // Verify our computed state root matches the block header.
+        // Reject mismatched blocks to prevent state corruption from poisoned peers.
         if exec_result.state_root != header.state_root {
-            debug!(
+            warn!(
                 height,
                 ours = ?&exec_result.state_root[..4],
                 theirs = ?&header.state_root[..4],
-                "state root differs from synced block header (expected after binary upgrade)"
+                "state root mismatch in synced block — rejecting (possible poisoned peer)"
             );
+            return false;
         }
 
         // Use synced receipts if available (they include user tx events).

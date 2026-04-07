@@ -499,18 +499,34 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Determine expected genesis state root for fork isolation.
+    // Priority: CLI flag > persisted > computed from current genesis.
     let expected_genesis_hash: Option<[u8; 32]> = if let Some(ref gh) = cli.genesis_hash {
         let bytes = hex_decode(gh)?;
         if bytes.len() == 32 {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
-            info!(genesis_hash = %gh, "fork isolation enabled — will reject chains with different genesis");
+            // Persist for future restarts.
+            let _ = store.put(b"__genesis_hash__", &arr);
+            info!(genesis_hash = %gh, "fork isolation from CLI flag");
             Some(arr)
         } else {
             anyhow::bail!("--genesis-hash must be 64 hex characters (32 bytes)");
         }
+    } else if let Ok(Some(data)) = store.get(b"__genesis_hash__") {
+        if data.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&data);
+            info!(genesis_hash = hex(&arr), "fork isolation from persisted genesis hash");
+            Some(arr)
+        } else {
+            None
+        }
     } else {
-        None
+        // First run — compute and persist the genesis state root.
+        let root = store.state_root();
+        let _ = store.put(b"__genesis_hash__", &root);
+        info!(genesis_hash = hex(&root), "fork isolation — genesis hash persisted");
+        Some(root)
     };
 
     // Store chain_id for proof type restrictions (e.g., block mock proofs on mainnet).
@@ -904,33 +920,16 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
 
-                        // Fork isolation: if --genesis-hash is set and the batch
-                        // contains blocks from a different chain, drop the entire batch.
-                        if let Some(ref _gh) = p2p_genesis_hash {
-                            // Check if any block in this batch has height 1 — that tells
-                            // us the genesis of the sender's chain.
-                            if let Some(b1) = blocks.iter().find(|b| b.header.height == 1) {
-                                // Execute block 1 on a trial store to get the state root.
-                                let store = engine_for_p2p.store();
-                                let store_guard = store.read().unwrap();
-                                let mut trial = store_guard.writable_snapshot();
-                                drop(store_guard);
-                                let result = engine_for_p2p.executor().execute_block_with_height(
-                                    trial.as_mut(), &b1.operations, 1,
-                                );
-                                if result.state_root != b1.header.state_root {
-                                    tracing::debug!("sync batch from different fork (block 1 mismatch) — dropping");
-                                    fork_mismatch_detected = true;
+                        // Fork isolation: instantly reject blocks from different forks.
+                        if p2p_genesis_hash.is_some() {
+                            if fork_mismatch_detected {
+                                // Already know there are bad peers — drop all sync blocks
+                                // unless they start exactly where we need them.
+                                let our_h = engine_for_p2p.height();
+                                let dominated_by_bad = blocks.iter()
+                                    .all(|b| b.header.height != our_h + 1);
+                                if dominated_by_bad {
                                     continue;
-                                }
-                            }
-                            // Also quick-reject: if we already detected a fork mismatch
-                            // and the batch starts way ahead (gap), it's from the old chain.
-                            if fork_mismatch_detected && engine_for_p2p.height() == 0 {
-                                if let Some(first) = blocks.first() {
-                                    if first.header.height > 1 {
-                                        continue; // old chain sending blocks from middle
-                                    }
                                 }
                             }
                         }

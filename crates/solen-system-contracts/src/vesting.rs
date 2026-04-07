@@ -112,7 +112,7 @@ pub struct VestingContract {
     pub schedules: Vec<VestingSchedule>,
     /// Admin account that can add new vesting schedules post-genesis.
     /// Typically the foundation multisig. If empty, only genesis can add schedules.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<AccountId>,
 }
 

@@ -962,10 +962,14 @@ async fn main() -> anyhow::Result<()> {
                         // We've heard from a peer AND we're at their height,
                         // but haven't accepted a live block yet.
                         // Safety fallback after 60s.
-                        // Clear stale pending blocks to prevent old blocks from
-                        // being force-finalized and rolling the chain backwards.
                         status_engine.clear_stale_pending(height);
                         tracing::info!(height, network_height = known, "timeout — resuming block production");
+                        syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if height > 0 && known == 0 && ticks_since_start >= 5 {
+                        // We replayed the chain but no peer has announced a height yet.
+                        // We're likely the most advanced node — resume production.
+                        status_engine.clear_stale_pending(height);
+                        tracing::info!(height, "no peer heights received — resuming as lead validator");
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                     // Otherwise: keep waiting for a live block to verify state.

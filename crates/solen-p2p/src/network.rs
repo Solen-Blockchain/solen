@@ -308,13 +308,15 @@ impl NetworkService {
                                 }
 
                                 // Per-peer rate limiting.
+                                // Drop excess messages but DON'T penalize reputation.
+                                // Gossipsub relays messages through peers, so a validator
+                                // relaying old-chain traffic would get unfairly penalized.
                                 let entry = peer_msg_counts.entry(propagation_source).or_insert((0, std::time::Instant::now()));
                                 if entry.1.elapsed() > Duration::from_secs(1) {
                                     *entry = (1, std::time::Instant::now());
                                 } else {
                                     entry.0 += 1;
                                     if entry.0 >= MAX_MSGS_PER_PEER_PER_SEC {
-                                        peer_reputation.record_rate_limited(&propagation_source);
                                         debug!(peer = %propagation_source, count = entry.0, "rate-limited peer — dropping message");
                                         continue;
                                     }

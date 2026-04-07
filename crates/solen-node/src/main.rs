@@ -644,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
             let mut sync_serve_tracker: std::collections::HashMap<u64, (std::time::Instant, u32)> =
                 std::collections::HashMap::new();
             let mut sync_fail_count: u32 = 0;
-            let mut sync_cooldown_until: Option<std::time::Instant> = None;
+            let mut fork_mismatch_detected = false;
 
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -679,6 +679,7 @@ async fn main() -> anyhow::Result<()> {
                             // Force-finalize it immediately — the network already has
                             // consensus on this block, no need to wait for attestations.
                             if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                fork_mismatch_detected = false; // valid peer found
                                 // Clear stale pending blocks from BEFORE this height.
                                 engine_for_p2p.clear_stale_pending(header.height.saturating_sub(1));
                                 // Immediately finalize the accepted block (executes it).
@@ -755,12 +756,11 @@ async fn main() -> anyhow::Result<()> {
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
-                            // Skip sync if in cooldown (after fork mismatch rejection).
-                            if let Some(until) = sync_cooldown_until {
-                                if std::time::Instant::now() < until {
-                                    continue;
-                                }
-                                sync_cooldown_until = None;
+                            // After detecting a fork mismatch, ignore sync from
+                            // StatusAnnounce entirely. Sync will only resume if
+                            // we accept a valid live block from a same-fork peer.
+                            if fork_mismatch_detected {
+                                continue;
                             }
 
                             // Check if multiple peers agree we're behind before
@@ -916,11 +916,14 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::warn!(
                                     failures = sync_fail_count,
                                     our_height,
-                                    "sync blocks repeatedly rejected — peers may be on a different fork, exiting sync mode (2min cooldown)"
+                                    "sync blocks repeatedly rejected — peers on a different fork, disabling sync from announcements"
                                 );
                                 syncing_for_p2p.store(false, std::sync::atomic::Ordering::Relaxed);
                                 sync_fail_count = 0;
-                                sync_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(120));
+                                fork_mismatch_detected = true;
+                                // Reset tracked peer heights so we don't think we're behind.
+                                peer_heights_for_p2p.lock().unwrap().clear();
+                                net_height_for_p2p.store(0, std::sync::atomic::Ordering::Relaxed);
                                 continue;
                             }
                         }

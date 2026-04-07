@@ -644,6 +644,7 @@ async fn main() -> anyhow::Result<()> {
             let mut sync_serve_tracker: std::collections::HashMap<u64, (std::time::Instant, u32)> =
                 std::collections::HashMap::new();
             let mut sync_fail_count: u32 = 0;
+            let mut sync_cooldown_until: Option<std::time::Instant> = None;
 
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -754,6 +755,14 @@ async fn main() -> anyhow::Result<()> {
 
                         let our_height = engine_for_p2p.height();
                         if height > our_height + 1 {
+                            // Skip sync if in cooldown (after fork mismatch rejection).
+                            if let Some(until) = sync_cooldown_until {
+                                if std::time::Instant::now() < until {
+                                    continue;
+                                }
+                                sync_cooldown_until = None;
+                            }
+
                             // Check if multiple peers agree we're behind before
                             // entering sync mode. A single rogue peer can't stall us.
                             let peer_h = peer_heights_for_p2p.lock().unwrap();
@@ -907,10 +916,11 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::warn!(
                                     failures = sync_fail_count,
                                     our_height,
-                                    "sync blocks repeatedly rejected — peers may be on a different fork, exiting sync mode"
+                                    "sync blocks repeatedly rejected — peers may be on a different fork, exiting sync mode (2min cooldown)"
                                 );
                                 syncing_for_p2p.store(false, std::sync::atomic::Ordering::Relaxed);
                                 sync_fail_count = 0;
+                                sync_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(120));
                                 continue;
                             }
                         }

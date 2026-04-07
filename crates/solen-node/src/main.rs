@@ -444,12 +444,22 @@ async fn main() -> anyhow::Result<()> {
         if store.is_empty() {
             info!(source = %snapshot_source, "loading state snapshot...");
             let snapshot_data = if snapshot_source.starts_with("http://") || snapshot_source.starts_with("https://") {
-                // Download snapshot from RPC endpoint.
-                let body = reqwest::blocking::get(snapshot_source)
+                // Download snapshot via JSON-RPC from the node.
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("http client failed: {e}"))?;
+                let rpc_body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "solen_getSnapshot", "params": []
+                });
+                let body = client.post(snapshot_source.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(rpc_body.to_string())
+                    .send()
                     .map_err(|e| anyhow::anyhow!("snapshot download failed: {e}"))?
                     .text()
                     .map_err(|e| anyhow::anyhow!("snapshot read failed: {e}"))?;
-                // Response is JSON with base64-encoded data field.
                 let json: serde_json::Value = serde_json::from_str(&body)?;
                 let b64 = json["result"]["data"].as_str()
                     .ok_or_else(|| anyhow::anyhow!("snapshot response missing data field"))?;

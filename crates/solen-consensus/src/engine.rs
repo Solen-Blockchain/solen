@@ -100,6 +100,8 @@ struct PendingBlock {
     already_executed: bool,
     /// Execution result, only present if already_executed.
     result: Option<BlockResult>,
+    /// Count of attestation hash mismatches — other validators have a different block.
+    mismatch_count: u32,
 }
 
 /// The consensus engine manages block production, validation, and finality.
@@ -548,6 +550,7 @@ impl ConsensusEngine {
                     proposed_at: std::time::Instant::now(),
                     already_executed: true,
                     result: Some(result),
+                    mismatch_count: 0,
                 },
             );
 
@@ -838,6 +841,7 @@ impl ConsensusEngine {
                 proposed_at: std::time::Instant::now(),
                 already_executed: false,
                 result: None,
+                mismatch_count: 0,
             },
         );
 
@@ -922,6 +926,12 @@ impl ConsensusEngine {
                             height = block_height,
                             "attestation block hash mismatch — ignoring"
                         );
+                        drop(pending);
+                        // Track that other validators have a different block.
+                        let mut pending_w = self.pending_blocks.write().unwrap();
+                        if let Some(pb) = pending_w.get_mut(&block_height) {
+                            pb.mismatch_count += 1;
+                        }
                         return false;
                     }
                 }
@@ -1659,6 +1669,26 @@ impl ConsensusEngine {
                 debug!(height, our_height = self.height(), "skipping stale pending block");
                 continue;
             }
+
+            // Before force-finalizing, check if the pending block was proposed by us
+            // and we've seen attestation mismatches. If other validators are attesting
+            // to a different block at this height, drop ours and wait for sync —
+            // this prevents divergent force-finalization.
+            let should_drop = {
+                let pending = self.pending_blocks.read().unwrap();
+                if let Some(pb) = pending.get(&height) {
+                    pb.header.proposer == self.config.validator_id && pb.mismatch_count > 0
+                } else {
+                    false
+                }
+            };
+
+            if should_drop {
+                info!(height, "dropping own block — other validators have a different block at this height");
+                self.pending_blocks.write().unwrap().remove(&height);
+                continue;
+            }
+
             warn!(height, "quorum timeout — force-finalizing block");
             self.finalize_pending_block(height);
             count += 1;

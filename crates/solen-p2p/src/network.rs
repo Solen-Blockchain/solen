@@ -1,5 +1,6 @@
 //! Network service: manages libp2p swarm, gossip subscriptions, and message handling.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -126,11 +127,35 @@ impl NetworkService {
             .build()
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
-        let gossipsub = gossipsub::Behaviour::new(
+        // Enable gossipsub peer scoring to automatically prune peers that
+        // send invalid messages (e.g. blocks from a different fork).
+        // Peers with negative application scores get removed from the mesh.
+        let peer_score_params = {
+            let mut params = gossipsub::PeerScoreParams::default();
+            // Application-specific scoring: our node sets negative scores on
+            // peers that relay fork-mismatched blocks.
+            params.app_specific_weight = 1.0;
+            // Disable IP colocation penalty (our validators may share subnets).
+            params.ip_colocation_factor_weight = 0.0;
+            params
+        };
+        let peer_score_thresholds = gossipsub::PeerScoreThresholds {
+            gossip_threshold: -100.0,      // suppress gossip below this
+            publish_threshold: -200.0,     // suppress publish below this
+            graylist_threshold: -300.0,    // completely ignore messages below this
+            accept_px_threshold: 0.0,
+            opportunistic_graft_threshold: 0.5,
+        };
+
+        let mut gossipsub = gossipsub::Behaviour::new(
             MessageAuthenticity::Signed(local_key.clone()),
             gossipsub_config,
         )
         .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
+
+        gossipsub
+            .with_peer_score(peer_score_params, peer_score_thresholds)
+            .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
         // Kademlia DHT for peer discovery across the internet.
         let kad_store = libp2p::kad::store::MemoryStore::new(local_peer_id);
@@ -221,6 +246,8 @@ impl NetworkService {
 
         let handle = NetworkHandle { outbound_tx, reputation_tx };
         let _p2p_genesis_hash = config.genesis_hash;
+        // Track peers that recently relayed SyncBlocks messages.
+        let mut recent_sync_senders: HashMap<libp2p::PeerId, std::time::Instant> = HashMap::new();
 
         let bootstrap_addrs = config.bootstrap_peers.clone();
 
@@ -273,10 +300,28 @@ impl NetworkService {
                             ReputationEvent::InvalidBlock(peer) => peer_reputation.record_invalid_block(&peer),
                             ReputationEvent::ValidAttestation(peer) => peer_reputation.record_valid_attestation(&peer),
                             ReputationEvent::InvalidAttestation(peer) => peer_reputation.record_invalid_attestation(&peer),
-                            ReputationEvent::ForkMismatch(peer) => peer_reputation.record_fork_mismatch(&peer),
+                            ReputationEvent::ForkMismatch(peer) => {
+                                peer_reputation.record_fork_mismatch(&peer);
+                                // Penalize the specific peer at gossipsub level.
+                                swarm.behaviour_mut().gossipsub
+                                    .set_application_score(&peer, -500.0);
+                                // Also penalize all recent sync block senders —
+                                // they likely relayed fork-mismatched blocks.
+                                for (sender, _) in recent_sync_senders.drain() {
+                                    swarm.behaviour_mut().gossipsub
+                                        .set_application_score(&sender, -500.0);
+                                    tracing::debug!(%sender, "gossipsub penalized (recent sync sender during fork mismatch)");
+                                }
+                                tracing::info!(%peer, "gossipsub score set to -500 (fork mismatch)");
+                            }
                             ReputationEvent::ClearAllBans => {
                                 peer_reputation.clear_all_bans();
                                 tracing::info!("all peer bans cleared (partition recovery)");
+                            }
+                            ReputationEvent::GossipsubPenalize(peer) => {
+                                swarm.behaviour_mut().gossipsub
+                                    .set_application_score(&peer, -500.0);
+                                tracing::info!(%peer, "gossipsub score set to -500 (penalized)");
                             }
                         }
                     }
@@ -328,11 +373,16 @@ impl NetworkService {
 
                                 match NetworkMessage::decode(&message.data) {
                                     Ok(msg) => {
-                                        // Fork isolation: track state roots from block 1.
-                                        // The first time we see block 1 from a peer, remember
-                                        // its state root. If the node later rejects it (fork
-                                        // mismatch), all future SyncBlocks containing that
-                                        // state root pattern are dropped at the P2P layer.
+                                        // Track peers that relay SyncBlocks — if the node
+                                        // later detects a fork mismatch, we penalize them
+                                        // at the gossipsub level.
+                                        if matches!(msg, NetworkMessage::SyncBlocks { .. }) {
+                                            recent_sync_senders.insert(propagation_source, std::time::Instant::now());
+                                            // Prune old entries.
+                                            if recent_sync_senders.len() > 50 {
+                                                recent_sync_senders.retain(|_, t| t.elapsed() < Duration::from_secs(30));
+                                            }
+                                        }
 
                                         // Use try_send to apply backpressure if the inbound channel is full.
                                         if inbound_tx.try_send(msg).is_err() {

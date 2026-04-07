@@ -20,6 +20,9 @@ pub enum ReputationEvent {
     ForkMismatch(PeerId),
     /// Clear all bans (partition recovery).
     ClearAllBans,
+    /// Set negative gossipsub application score on a peer.
+    /// This causes gossipsub to prune the peer from the mesh.
+    GossipsubPenalize(PeerId),
 }
 
 /// Score thresholds and timing.

@@ -643,6 +643,7 @@ async fn main() -> anyhow::Result<()> {
             // Track repeated sync requests to rate-limit stuck peers.
             let mut sync_serve_tracker: std::collections::HashMap<u64, (std::time::Instant, u32)> =
                 std::collections::HashMap::new();
+            let mut sync_fail_count: u32 = 0;
 
             while let Some(msg) = inbound_rx.recv().await {
                 match msg {
@@ -738,7 +739,7 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    NetworkMessage::StatusAnnounce { height, .. } => {
+                    NetworkMessage::StatusAnnounce { height, state_root: _sr } => {
                         // Track peer heights to prevent a single rogue node from
                         // stalling the network with a fake longer chain.
                         {
@@ -892,12 +893,26 @@ async fn main() -> anyhow::Result<()> {
                         let known_net_height = net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
 
                         if synced > 0 {
+                            sync_fail_count = 0; // reset on any success
                             tracing::info!(
                                 synced,
                                 new_height = our_height,
                                 network_height = known_net_height,
                                 "synced blocks from peer"
                             );
+                        } else if !blocks.is_empty() {
+                            // Received blocks but none applied — likely a fork mismatch.
+                            sync_fail_count += 1;
+                            if sync_fail_count >= 5 {
+                                tracing::warn!(
+                                    failures = sync_fail_count,
+                                    our_height,
+                                    "sync blocks repeatedly rejected — peers may be on a different fork, exiting sync mode"
+                                );
+                                syncing_for_p2p.store(false, std::sync::atomic::Ordering::Relaxed);
+                                sync_fail_count = 0;
+                                continue;
+                            }
                         }
 
                         // Re-request if we're still behind (whether we synced some or hit a gap).

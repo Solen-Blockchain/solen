@@ -26,6 +26,8 @@ extern "C" {
     fn get_caller(out_ptr: i32);
     fn get_block_height() -> i64;
     fn set_return_data(ptr: i32, len: i32);
+    fn transfer_native(to_ptr: i32, amount_ptr: i32) -> i32;
+    fn get_self_id(out_ptr: i32);
 }
 
 /// Low-level SDK functions for input/output.
@@ -58,6 +60,22 @@ pub mod sdk {
     /// Get the current block height.
     pub fn block_height() -> u64 {
         unsafe { get_block_height() as u64 }
+    }
+
+    /// Transfer native SOLEN from this contract to another account.
+    /// Returns true on success, false on failure.
+    /// The transfer is queued and executed after WASM completes.
+    pub fn transfer(to: &[u8; 32], amount: u128) -> bool {
+        unsafe { transfer_native(to.as_ptr() as i32, amount.to_le_bytes().as_ptr() as i32) == 0 }
+    }
+
+    /// Get this contract's own account ID.
+    pub fn self_id() -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        unsafe {
+            get_self_id(buf.as_mut_ptr() as i32);
+        }
+        buf
     }
 }
 

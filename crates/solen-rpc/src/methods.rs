@@ -770,10 +770,12 @@ impl SolenApiServer for SolenRpc {
         // Execute in VM with read-only context (caller = zero address for view calls).
         let ctx = solen_vm::host::HostContext {
             caller: [0u8; 32],
+            contract_id: target,
             block_height: self.engine.height(),
             storage: contract_storage,
             events: Vec::new(),
             return_data: Vec::new(),
+            native_transfers: Vec::new(),
         };
 
         let vm = solen_vm::runtime::VmRuntime::new()
@@ -1127,10 +1129,12 @@ impl SolenApiServer for SolenRpc {
 
             let ctx = solen_vm::host::HostContext {
                 caller: [0u8; 32],
+                contract_id: [0u8; 32],
                 block_height: self.engine.height(),
                 storage: std::collections::HashMap::new(),
                 events: Vec::new(),
                 return_data: Vec::new(),
+                native_transfers: Vec::new(),
             };
 
             let vm = match solen_vm::runtime::VmRuntime::new() {

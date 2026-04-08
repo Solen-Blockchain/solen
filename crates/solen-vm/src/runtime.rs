@@ -194,6 +194,7 @@ fn run_instance(
         return_data: data.ctx.return_data.clone(),
         events: data.ctx.events.clone(),
         storage: data.ctx.storage.clone(),
+        native_transfers: data.ctx.native_transfers.clone(),
     })
 }
 
@@ -204,6 +205,7 @@ pub struct ExecutionResult {
     pub return_data: Vec<u8>,
     pub events: Vec<HostEvent>,
     pub storage: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    pub native_transfers: Vec<crate::host::NativeTransfer>,
 }
 
 /// Safely get memory from a caller. Returns None if memory export is missing.
@@ -369,6 +371,73 @@ fn register_host_functions_typed(
             "get_block_height",
             |caller: Caller<'_, StoreData>| -> i64 {
                 caller.data().ctx.block_height as i64
+            },
+        )
+        .map_err(|e| VmError::HostError(e.to_string()))?;
+
+    // transfer_native(to_ptr: i32, amount_ptr: i32) -> i32
+    // Queues a native SOLEN transfer from the contract to the specified account.
+    // Returns 0 on success, -1 on failure.
+    // The transfer is executed by the executor after WASM completes.
+    linker
+        .func_wrap(
+            "env",
+            "transfer_native",
+            |mut caller: Caller<'_, StoreData>,
+             to_ptr: i32,
+             amount_ptr: i32|
+             -> i32 {
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let mut to = [0u8; 32];
+                if !safe_read(&caller, &memory, to_ptr as usize, &mut to) {
+                    return -1;
+                }
+                let mut amount_buf = [0u8; 16];
+                if !safe_read(&caller, &memory, amount_ptr as usize, &mut amount_buf) {
+                    return -1;
+                }
+                let amount = u128::from_le_bytes(amount_buf);
+                if amount == 0 {
+                    return -1;
+                }
+
+                // Charge fuel for the transfer.
+                let transfer_cost = 5000u64;
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < transfer_cost { return -1; }
+                    let _ = caller.set_fuel(remaining - transfer_cost);
+                }
+
+                // Cap total queued transfers per execution (prevent abuse).
+                if caller.data().ctx.native_transfers.len() >= 50 {
+                    return -1;
+                }
+
+                caller.data_mut().ctx.native_transfers.push(
+                    crate::host::NativeTransfer { to, amount }
+                );
+                0
+            },
+        )
+        .map_err(|e| VmError::HostError(e.to_string()))?;
+
+    // get_self_id(out_ptr: i32) — returns the contract's own account ID.
+    // Needed so contracts can reference their own address for token operations.
+    linker
+        .func_wrap(
+            "env",
+            "get_self_id",
+            |mut caller: Caller<'_, StoreData>, out_ptr: i32| {
+                let id = caller.data().ctx.contract_id;
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &id);
             },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;

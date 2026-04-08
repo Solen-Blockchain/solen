@@ -904,12 +904,56 @@ impl BlockExecutor {
 
                 // Execute in the VM.
                 let ctx = solen_vm::host::HostContext::new(*sender, 0)
+                    .with_contract_id(*target)
                     .with_storage(contract_storage);
 
                 match self.vm_runtime.execute(&target_account.code_hash, &bytecode, &input, ctx, None) {
                     Ok(result) => {
                         // Persist updated contract storage.
                         state.save_contract_storage(target, &result.storage)?;
+
+                        // Process native SOLEN transfers from the contract.
+                        for transfer in &result.native_transfers {
+                            // Debit the contract's account.
+                            let mut contract_acct = state.require_account(target)?;
+                            if contract_acct.balance < transfer.amount {
+                                return Err(ExecutionError::State(StateError::AccountNotFound(
+                                    "contract insufficient balance for transfer".into(),
+                                )));
+                            }
+                            contract_acct.balance -= transfer.amount;
+                            state.save_account(&contract_acct)?;
+
+                            // Credit the recipient.
+                            match state.require_account(&transfer.to) {
+                                Ok(mut recipient) => {
+                                    recipient.balance = recipient.balance.saturating_add(transfer.amount);
+                                    state.save_account(&recipient)?;
+                                }
+                                Err(_) => {
+                                    // Recipient doesn't exist — create a new account.
+                                    let new_acct = solen_types::account::Account {
+                                        id: transfer.to,
+                                        balance: transfer.amount,
+                                        nonce: 0,
+                                        code_hash: [0u8; 32],
+                                        auth_methods: vec![],
+                                    };
+                                    state.save_account(&new_acct)?;
+                                }
+                            }
+
+                            events.push(Event {
+                                emitter: *target,
+                                topic: b"native_transfer".to_vec(),
+                                data: {
+                                    let mut d = Vec::with_capacity(48);
+                                    d.extend_from_slice(&transfer.to);
+                                    d.extend_from_slice(&transfer.amount.to_le_bytes());
+                                    d
+                                },
+                            });
+                        }
 
                         // Convert VM events to execution events.
                         for vm_event in &result.events {

@@ -454,21 +454,90 @@ async fn main() -> anyhow::Result<()> {
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .map_err(|e| anyhow::anyhow!("http client failed: {e}"))?;
-                let rpc_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "solen_getSnapshot", "params": []
-                });
-                let body = client.post(snapshot_source.as_str())
-                    .header("Content-Type", "application/json")
-                    .body(rpc_body.to_string())
-                    .send()
-                    .map_err(|e| anyhow::anyhow!("snapshot download failed: {e}"))?
-                    .text()
-                    .map_err(|e| anyhow::anyhow!("snapshot read failed: {e}"))?;
-                let json: serde_json::Value = serde_json::from_str(&body)?;
-                let b64 = json["result"]["data"].as_str()
-                    .ok_or_else(|| anyhow::anyhow!("snapshot response missing data field"))?;
-                base64_decode(b64)?
+                // Try single-call snapshot first, fall back to chunked download.
+                let snapshot_url = snapshot_source.as_str();
+                let single_result = (|| -> Result<Vec<u8>, anyhow::Error> {
+                    let rpc_body = serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "solen_getSnapshot", "params": []
+                    });
+                    let body = client.post(snapshot_url)
+                        .header("Content-Type", "application/json")
+                        .body(rpc_body.to_string())
+                        .send()?
+                        .text()?;
+                    let json: serde_json::Value = serde_json::from_str(&body)?;
+                    let b64 = json["result"]["data"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("snapshot response missing data field"))?;
+                    Ok(base64_decode(b64)?)
+                })();
+
+                match single_result {
+                    Ok(data) => data,
+                    Err(e) => {
+                        info!("single-call snapshot failed ({e}), trying chunked download...");
+
+                        // Get metadata first.
+                        let meta_body = serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "method": "solen_getSnapshotMeta", "params": []
+                        });
+                        let meta_resp = client.post(snapshot_url)
+                            .header("Content-Type", "application/json")
+                            .body(meta_body.to_string())
+                            .send()
+                            .map_err(|e| anyhow::anyhow!("snapshot meta failed: {e}"))?
+                            .text()?;
+                        let meta_json: serde_json::Value = serde_json::from_str(&meta_resp)?;
+                        let total_bytes = meta_json["result"]["total_bytes"].as_u64()
+                            .ok_or_else(|| anyhow::anyhow!("snapshot meta missing total_bytes"))? as usize;
+
+                        info!(total_bytes, "downloading snapshot in chunks...");
+
+                        let chunk_size: usize = 4 * 1024 * 1024; // 4MB chunks
+                        let mut snapshot_data = Vec::with_capacity(total_bytes);
+                        let mut offset: usize = 0;
+
+                        loop {
+                            let chunk_body = serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "method": "solen_getSnapshotChunk",
+                                "params": [offset, chunk_size]
+                            });
+                            let chunk_resp = client.post(snapshot_url)
+                                .header("Content-Type", "application/json")
+                                .body(chunk_body.to_string())
+                                .send()
+                                .map_err(|e| anyhow::anyhow!("chunk download failed at offset {offset}: {e}"))?
+                                .text()?;
+                            let chunk_json: serde_json::Value = serde_json::from_str(&chunk_resp)?;
+
+                            if let Some(err) = chunk_json["error"]["message"].as_str() {
+                                return Err(anyhow::anyhow!("chunk error: {err}"));
+                            }
+
+                            let chunk_b64 = chunk_json["result"]["data"].as_str()
+                                .ok_or_else(|| anyhow::anyhow!("chunk missing data"))?;
+                            let chunk_bytes = base64_decode(chunk_b64)?;
+                            let done = chunk_json["result"]["done"].as_bool().unwrap_or(false);
+
+                            info!(
+                                offset,
+                                chunk_len = chunk_bytes.len(),
+                                progress = format!("{:.1}%", (offset + chunk_bytes.len()) as f64 / total_bytes as f64 * 100.0),
+                                "downloaded chunk"
+                            );
+
+                            snapshot_data.extend_from_slice(&chunk_bytes);
+                            offset += chunk_bytes.len();
+
+                            if done || chunk_bytes.is_empty() { break; }
+                        }
+
+                        info!(total = snapshot_data.len(), "chunked snapshot download complete");
+                        snapshot_data
+                    }
+                }
             } else {
                 // Load from file.
                 std::fs::read(snapshot_source)

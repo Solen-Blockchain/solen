@@ -264,6 +264,29 @@ pub struct SnapshotInfo {
     pub checkpoint: Option<SnapshotCheckpoint>,
 }
 
+/// Snapshot metadata (without data) for chunked downloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotMetaInfo {
+    pub height: u64,
+    pub epoch: u64,
+    pub state_root: String,
+    pub entries: u64,
+    pub total_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<SnapshotCheckpoint>,
+}
+
+/// A chunk of snapshot data for incremental download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotChunkInfo {
+    pub offset: usize,
+    pub length: usize,
+    pub total_bytes: usize,
+    /// Base64-encoded chunk data.
+    pub data: String,
+    pub done: bool,
+}
+
 /// Finalized checkpoint included in snapshot responses for verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotCheckpoint {
@@ -366,12 +389,23 @@ pub trait SolenApi {
     /// Get a compressed state snapshot for fast sync.
     #[method(name = "solen_getSnapshot")]
     fn get_snapshot(&self) -> RpcResult<SnapshotInfo>;
+
+    /// Get snapshot metadata without the data (for chunked download).
+    #[method(name = "solen_getSnapshotMeta")]
+    fn get_snapshot_meta(&self) -> RpcResult<SnapshotMetaInfo>;
+
+    /// Get a chunk of the snapshot data. Returns base64-encoded bytes.
+    /// chunk_size defaults to 4MB. offset is in bytes of the compressed snapshot.
+    #[method(name = "solen_getSnapshotChunk")]
+    fn get_snapshot_chunk(&self, offset: usize, chunk_size: Option<usize>) -> RpcResult<SnapshotChunkInfo>;
 }
 
 /// Cached snapshot to avoid regenerating on every request.
 struct CachedSnapshot {
     height: u64,
     info: SnapshotInfo,
+    /// Raw snapshot bytes for chunked serving.
+    raw_data: Vec<u8>,
 }
 
 /// Per-method rate limiter: tracks call counts per second.
@@ -456,7 +490,7 @@ impl SolenRpc {
                             data: b64,
                             checkpoint: None, // cache doesn't have engine access
                         };
-                        *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info });
+                        *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
                         tracing::info!(height, "snapshot cache warmed");
                     }
                 }
@@ -1311,17 +1345,6 @@ impl SolenApiServer for SolenRpc {
         let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
             .map_err(|e| internal_error(e.to_string()))?;
 
-        // Cap snapshot size before base64 encoding. The JSON-RPC response limit
-        // is 10 MB, and base64 adds ~33% overhead, so max compressed snapshot is ~7 MB.
-        // For larger states, nodes should use direct P2P sync instead of RPC snapshots.
-        const MAX_SNAPSHOT_RESPONSE: usize = 7 * 1024 * 1024; // 7 MB compressed
-        if data.len() > MAX_SNAPSHOT_RESPONSE {
-            return Err(internal_error(format!(
-                "snapshot too large ({} MB), use direct sync instead",
-                data.len() / (1024 * 1024)
-            )));
-        }
-
         let meta = solen_consensus::snapshot::read_snapshot_meta(&data)
             .map_err(|e| internal_error(e.to_string()))?;
 
@@ -1358,7 +1381,7 @@ impl SolenApiServer for SolenRpc {
         // Cache it.
         {
             let mut cache = self.snapshot_cache.lock().unwrap();
-            *cache = Some(CachedSnapshot { height, info: info.clone() });
+            *cache = Some(CachedSnapshot { height, info: info.clone(), raw_data: data });
         }
 
         Ok(info)
@@ -1378,6 +1401,151 @@ impl SolenApiServer for SolenRpc {
                 pre_state_root: hex_encode(&b.pre_state_root),
             })
             .collect())
+    }
+
+    fn get_snapshot_meta(&self) -> RpcResult<SnapshotMetaInfo> {
+        // Use cached snapshot if available, otherwise generate.
+        let cache = self.snapshot_cache.lock().unwrap();
+        if let Some(ref cached) = *cache {
+            let checkpoint = {
+                let cp_store = self.engine.finalized_checkpoints();
+                let cp = cp_store.read().unwrap();
+                cp.latest.as_ref().map(|fc| SnapshotCheckpoint {
+                    height: fc.height,
+                    epoch: fc.epoch,
+                    block_hash: hex_encode(&fc.block_hash),
+                    state_root: hex_encode(&fc.state_root),
+                    attestations: fc.attestations.iter()
+                        .map(|(v, sig)| (account_to_base58(v), hex_encode(sig)))
+                        .collect(),
+                })
+            };
+            return Ok(SnapshotMetaInfo {
+                height: cached.info.height,
+                epoch: cached.info.epoch,
+                state_root: cached.info.state_root.clone(),
+                entries: cached.info.entries,
+                total_bytes: cached.raw_data.len(),
+                checkpoint,
+            });
+        }
+        drop(cache);
+
+        // Generate snapshot to get metadata.
+        let _ = self.get_snapshot(); // This populates the cache (may fail for large snapshots, that's ok).
+
+        let cache = self.snapshot_cache.lock().unwrap();
+        if let Some(ref cached) = *cache {
+            return Ok(SnapshotMetaInfo {
+                height: cached.info.height,
+                epoch: cached.info.epoch,
+                state_root: cached.info.state_root.clone(),
+                entries: cached.info.entries,
+                total_bytes: cached.raw_data.len(),
+                checkpoint: cached.info.checkpoint.clone(),
+            });
+        }
+
+        // If even generating failed, create snapshot without the size check.
+        let height = self.engine.height();
+        let (store_snapshot, epoch) = {
+            let store = self.engine.store();
+            let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+            let snap = store.snapshot();
+            let epoch = {
+                let chain = self.engine.chain();
+                let chain = chain.read().map_err(|e| internal_error(e.to_string()))?;
+                chain.last().map(|b| b.header.epoch).unwrap_or(0)
+            };
+            (snap, epoch)
+        };
+
+        let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
+            .map_err(|e| internal_error(e.to_string()))?;
+        let meta = solen_consensus::snapshot::read_snapshot_meta(&data)
+            .map_err(|e| internal_error(e.to_string()))?;
+        let entries = store_snapshot.len() as u64;
+
+        let checkpoint = {
+            let cp_store = self.engine.finalized_checkpoints();
+            let cp = cp_store.read().unwrap();
+            cp.latest.as_ref().map(|fc| SnapshotCheckpoint {
+                height: fc.height,
+                epoch: fc.epoch,
+                block_hash: hex_encode(&fc.block_hash),
+                state_root: hex_encode(&fc.state_root),
+                attestations: fc.attestations.iter()
+                    .map(|(v, sig)| (account_to_base58(v), hex_encode(sig)))
+                    .collect(),
+            })
+        };
+
+        let total_bytes = data.len();
+        let b64 = base64_encode(&data);
+
+        // Cache for chunks.
+        let info = SnapshotInfo {
+            height, epoch,
+            state_root: hex_encode(&meta.state_root),
+            entries,
+            compressed_bytes: data.len() - 56,
+            uncompressed_bytes: meta.uncompressed_size,
+            data: b64,
+            checkpoint: checkpoint.clone(),
+        };
+        {
+            let mut cache = self.snapshot_cache.lock().unwrap();
+            *cache = Some(CachedSnapshot { height, info, raw_data: data });
+        }
+
+        Ok(SnapshotMetaInfo {
+            height, epoch,
+            state_root: hex_encode(&meta.state_root),
+            entries,
+            total_bytes,
+            checkpoint,
+        })
+    }
+
+    fn get_snapshot_chunk(&self, offset: usize, chunk_size: Option<usize>) -> RpcResult<SnapshotChunkInfo> {
+        if !RpcRateLimiter::check(&self.rate_limiter.snapshots, 20) {
+            return Err(ErrorObjectOwned::owned(-32000, "rate limited", None::<()>));
+        }
+
+        // Ensure cache is populated.
+        {
+            let cache = self.snapshot_cache.lock().unwrap();
+            if cache.is_none() {
+                drop(cache);
+                let _ = self.get_snapshot_meta(); // populate cache
+            }
+        }
+
+        let cache = self.snapshot_cache.lock().unwrap();
+        let cached = cache.as_ref()
+            .ok_or_else(|| internal_error("snapshot not available".to_string()))?;
+
+        let total = cached.raw_data.len();
+        let chunk_sz = chunk_size.unwrap_or(4 * 1024 * 1024).min(8 * 1024 * 1024); // max 8MB per chunk
+
+        if offset >= total {
+            return Ok(SnapshotChunkInfo {
+                offset, length: 0, total_bytes: total,
+                data: String::new(), done: true,
+            });
+        }
+
+        let end = (offset + chunk_sz).min(total);
+        let chunk = &cached.raw_data[offset..end];
+        let done = end >= total;
+
+        Ok(SnapshotChunkInfo {
+            offset,
+            length: chunk.len(),
+            total_bytes: total,
+            data: base64_encode(chunk),
+            done,
+        })
     }
 }
 

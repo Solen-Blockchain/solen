@@ -155,7 +155,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(
+                "info,libp2p_gossipsub::peer_score=error,libp2p_gossipsub::behaviour=warn"
+            )),
         )
         .init();
 

@@ -163,7 +163,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
             // Track batch submissions.
             // Event: topic=batch_verified, data=rollup_id[8]+batch_index[8]+state_root[32]+data_hash[32]
-            if event.topic == "batch_verified" && event.data.len() >= 160 {
+            if (event.topic == "batch_verified" || event.topic == "batch_submitted") && event.data.len() >= 160 {
                 if let (Ok(rollup_id), Ok(batch_index)) =
                     (u64_from_le_hex(&event.data[..16]), u64_from_le_hex(&event.data[16..32]))
                 {

@@ -952,6 +952,97 @@ fn execute_bridge_call(
                 }
             }
         }
+        "submit_batch" => {
+            // args: rollup_id[8] + batch_index[8] + state_root[32] + data_hash[32] + proof_len[4] + proof[...]
+            let rollup_id = match read_u64(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: need rollup_id[8]"),
+            };
+            let batch_index = match read_u64(args, 8) {
+                Some(idx) => idx,
+                None => return err("invalid args: need batch_index[8]"),
+            };
+            if args.len() < 80 {
+                return err("invalid args: need rollup_id[8] + batch_index[8] + state_root[32] + data_hash[32]");
+            }
+            let mut state_root = [0u8; 32];
+            state_root.copy_from_slice(&args[16..48]);
+            let mut data_hash = [0u8; 32];
+            data_hash.copy_from_slice(&args[48..80]);
+
+            let proof = if args.len() > 84 {
+                let proof_len = u32::from_le_bytes([args[80], args[81], args[82], args[83]]) as usize;
+                if args.len() >= 84 + proof_len {
+                    args[84..84 + proof_len].to_vec()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            // Verify the sender is the registered sequencer for this rollup.
+            match bridge.get_rollup(rollup_id) {
+                Some(rollup) => {
+                    if rollup.sequencer != *sender {
+                        return err("only the registered sequencer can submit batches");
+                    }
+                }
+                None => return err("rollup not registered"),
+            }
+
+            // Store the batch commitment.
+            let batch_key = format!("__rollup_{}_batch_{}__", rollup_id, batch_index);
+            let batch_data = serde_json::json!({
+                "rollup_id": rollup_id,
+                "batch_index": batch_index,
+                "state_root": hex_encode(&state_root),
+                "data_hash": hex_encode(&data_hash),
+                "submitter": hex_encode(sender),
+                "proof_len": proof.len(),
+            });
+            if let Ok(data) = serde_json::to_vec(&batch_data) {
+                let _ = store.put(batch_key.as_bytes(), &data);
+            }
+
+            // Update the rollup's latest state root.
+            let reg_key = format!("__rollup_{}__", rollup_id);
+            if let Ok(Some(existing)) = store.get(reg_key.as_bytes()) {
+                if let Ok(mut reg) = serde_json::from_slice::<serde_json::Value>(&existing) {
+                    reg["latest_state_root"] = serde_json::json!(hex_encode(&state_root));
+                    reg["latest_batch"] = serde_json::json!(batch_index);
+                    if let Ok(data) = serde_json::to_vec(&reg) {
+                        let _ = store.put(reg_key.as_bytes(), &data);
+                    }
+                }
+            }
+
+            // Update batch count on the rollup.
+            let count_key = format!("__rollup_{}_batch_count__", rollup_id);
+            let _ = store.put(count_key.as_bytes(), &batch_index.to_le_bytes());
+
+            events.push(Event {
+                emitter: BRIDGE_ADDRESS,
+                topic: b"batch_submitted".to_vec(),
+                data: {
+                    let mut d = Vec::with_capacity(80);
+                    d.extend_from_slice(&rollup_id.to_le_bytes());
+                    d.extend_from_slice(&batch_index.to_le_bytes());
+                    d.extend_from_slice(&state_root);
+                    d.extend_from_slice(&data_hash);
+                    d
+                },
+            });
+
+            tracing::info!(
+                rollup_id,
+                batch_index,
+                state_root = ?&state_root[..4],
+                "batch commitment accepted"
+            );
+
+            Ok(())
+        }
         _ => Err(format!("unknown bridge method: {method}")),
     };
 

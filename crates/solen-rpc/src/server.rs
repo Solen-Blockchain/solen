@@ -27,7 +27,7 @@ pub async fn start_rpc_server(
     let server = Server::builder()
         .max_connections(100)
         .max_request_body_size(1024 * 1024) // 1 MB max request
-        .max_response_body_size(10 * 1024 * 1024) // 10 MB max response
+        .max_response_body_size(100 * 1024 * 1024) // 100 MB max response
         .build(addr)
         .await
         .map_err(|e| RpcError::Server(e.to_string()))?;

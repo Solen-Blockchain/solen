@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use jsonrpsee::server::Server;
+use tower_http::cors::{CorsLayer, Any};
 use solen_consensus::engine::ConsensusEngine;
 use thiserror::Error;
 use tracing::info;
@@ -24,7 +25,13 @@ pub async fn start_rpc_server(
     // Per-IP rate limiting should be configured at the reverse proxy layer
     // (nginx/caddy) in production. The RPC server provides global rate limits
     // via RpcRateLimiter on write operations (submit_operation, submit_solution).
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let server = Server::builder()
+        .set_http_middleware(tower::ServiceBuilder::new().layer(cors))
         .max_connections(100)
         .max_request_body_size(1024 * 1024) // 1 MB max request
         .max_response_body_size(100 * 1024 * 1024) // 100 MB max response

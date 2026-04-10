@@ -1094,8 +1094,8 @@ async fn main() -> anyhow::Result<()> {
                                 // Reset tracked peer heights so we don't think we're behind.
                                 peer_heights_for_p2p.lock().unwrap().clear();
                                 net_height_for_p2p.store(0, std::sync::atomic::Ordering::Relaxed);
-                                // Trigger auto-resync from snapshot.
-                                engine_for_p2p.request_resync();
+                                // Don't auto-resync from sync rejection — it could be transient.
+                                // Only state root mismatches during finalization trigger resync.
                                 continue;
                             }
                         }
@@ -1364,13 +1364,29 @@ async fn main() -> anyhow::Result<()> {
 
                 let mut resync_ok = false;
                 for url in &resync_urls {
-                    info!(url, "attempting snapshot resync...");
+                    // Skip if this URL points to ourselves — check by comparing height.
                     let client = match reqwest::blocking::Client::builder()
                         .timeout(std::time::Duration::from_secs(120))
                         .build() {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
+                    // Quick height check — if peer is at same or lower height, skip.
+                    let our_h = engine_clone.height();
+                    if let Ok(resp) = client.post(url.as_str())
+                        .header("Content-Type", "application/json")
+                        .body(r#"{"jsonrpc":"2.0","id":1,"method":"solen_chainStatus","params":[]}"#)
+                        .send()
+                    {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            let peer_h = json["result"]["height"].as_u64().unwrap_or(0);
+                            if peer_h <= our_h {
+                                info!(url, our_h, peer_h, "skipping resync source — not ahead of us");
+                                continue;
+                            }
+                        }
+                    }
+                    info!(url, "attempting snapshot resync...");
 
                     // Get metadata first.
                     let meta_resp = match client.post(url.as_str())

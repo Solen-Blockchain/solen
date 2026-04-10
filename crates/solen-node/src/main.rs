@@ -1459,7 +1459,17 @@ async fn main() -> anyhow::Result<()> {
                 engine_clone.set_resyncing(false);
                 if resync_ok {
                     engine_clone.reset_partition_state();
-                    info!("auto-resync completed — resuming normal operation");
+                    info!("auto-resync completed — requesting block sync to catch up");
+                    // Request sync to catch up from snapshot height to network height.
+                    if let Some(ref handle) = net_for_blocks {
+                        let our_h = engine_clone.height();
+                        handle.broadcast(NetworkMessage::SyncRequest {
+                            from_height: our_h + 1,
+                            to_height: our_h + 500,
+                        });
+                    }
+                    // Wait a bit for sync blocks to arrive before producing.
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 } else {
                     warn!("auto-resync failed from all peers — node needs manual intervention");
                 }

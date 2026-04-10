@@ -143,6 +143,8 @@ pub struct ConsensusEngine {
     /// Height of a dropped block (our proposal that had attestation mismatches).
     /// The node layer reads and clears this to trigger a sync request.
     dropped_block_height: Arc<RwLock<Option<u64>>>,
+    /// Set when the node needs a full snapshot resync (state diverged irrecoverably).
+    needs_resync: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConsensusEngine {
@@ -231,6 +233,7 @@ impl ConsensusEngine {
                 _ => crate::checkpoint::TrustedCheckpoints::devnet(),
             },
             dropped_block_height: Arc::new(RwLock::new(None)),
+            needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -336,6 +339,54 @@ impl ConsensusEngine {
     /// Reset partition state — called when connectivity is restored.
     pub fn reset_partition_state(&self) {
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Signal that the node needs a full snapshot resync.
+    pub fn request_resync(&self) {
+        self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check and clear the resync flag.
+    pub fn take_resync_request(&self) -> bool {
+        self.needs_resync.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reset the engine to a specific height/epoch after a snapshot restore.
+    pub fn reset_to_height(&self, height: u64, epoch: u64) {
+        // Clear pending blocks and attestations.
+        self.pending_blocks.write().unwrap().clear();
+        self.pending_attestations.write().unwrap().clear();
+        self.early_attestations.write().unwrap().clear();
+        self.mempool.clear();
+        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        *self.dropped_block_height.write().unwrap() = None;
+
+        // Update epoch manager.
+        {
+            let mut em = self.epoch_manager.write().unwrap();
+            em.current_epoch = epoch;
+        }
+
+        // Rebuild chain to just contain the height marker.
+        self.chain.write().unwrap().clear();
+
+        // Sync validator set from restored staking state.
+        let staking = {
+            let store = self.store.read().unwrap();
+            solen_system_contracts::staking::StakingContract::load(store.as_ref())
+        };
+        {
+            let mut vs = self.validator_set.write().unwrap();
+            for sv in &staking.validators {
+                if sv.is_active {
+                    if let Some(v) = vs.get_mut(&sv.id) {
+                        v.stake = sv.total_stake();
+                    }
+                }
+            }
+        }
+
+        info!(height, epoch, "engine state reset after snapshot restore");
     }
 
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
@@ -1074,8 +1125,9 @@ impl ConsensusEngine {
                     proposer = ?&pb.header.proposer[..4],
                     ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
-                    "state root mismatch on finalization — rejecting block (node will resync)"
+                    "state root mismatch on finalization — requesting snapshot resync"
                 );
+                self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
 

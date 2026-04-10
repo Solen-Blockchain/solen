@@ -1224,6 +1224,7 @@ async fn main() -> anyhow::Result<()> {
     let net_for_blocks = net_handle.clone();
     let att_kp_for_consensus = attestation_kp.clone();
     let syncing_for_consensus = syncing.clone();
+    let net_for_resync = net;
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -1343,6 +1344,122 @@ async fn main() -> anyhow::Result<()> {
             // 3. We're the backup proposer AND no block pending from any source.
             //    The `already_pending` check prevents competing blocks at the same
             //    height, which causes attestation hash mismatches.
+            // Auto-resync: if state diverged, download a fresh snapshot from peers.
+            if engine_clone.take_resync_request() {
+                warn!("state divergence detected — initiating automatic snapshot resync");
+                // Try each seed RPC for a snapshot.
+                let resync_urls: Vec<String> = match net_for_resync {
+                    Network::Testnet => vec![
+                        "https://testnet-rpc.solenchain.io".into(),
+                        "https://testnet-rpc2.solenchain.io".into(),
+                        "https://testnet-rpc3.solenchain.io".into(),
+                    ],
+                    _ => vec![],
+                };
+
+                let mut resync_ok = false;
+                for url in &resync_urls {
+                    info!(url, "attempting snapshot resync...");
+                    let client = match reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(120))
+                        .build() {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+
+                    // Get metadata first.
+                    let meta_resp = match client.post(url.as_str())
+                        .header("Content-Type", "application/json")
+                        .body(r#"{"jsonrpc":"2.0","id":1,"method":"solen_getSnapshotMeta","params":[]}"#)
+                        .send() {
+                        Ok(r) => r,
+                        Err(e) => { warn!(url, error = %e, "resync meta failed"); continue; }
+                    };
+                    let meta_json: serde_json::Value = match meta_resp.json() {
+                        Ok(j) => j,
+                        Err(_) => continue,
+                    };
+                    let total_bytes = match meta_json["result"]["total_bytes"].as_u64() {
+                        Some(t) => t as usize,
+                        None => { warn!(url, "resync: no total_bytes in meta"); continue; }
+                    };
+
+                    info!(url, total_bytes, "downloading snapshot chunks...");
+                    let chunk_size: usize = 4 * 1024 * 1024;
+                    let mut snapshot_data = Vec::with_capacity(total_bytes);
+                    let mut offset: usize = 0;
+                    let mut download_ok = true;
+
+                    loop {
+                        let body = serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "method": "solen_getSnapshotChunk",
+                            "params": [offset, chunk_size]
+                        });
+                        let resp = match client.post(url.as_str())
+                            .header("Content-Type", "application/json")
+                            .body(body.to_string())
+                            .send() {
+                            Ok(r) => r,
+                            Err(e) => { warn!(error = %e, "chunk download failed"); download_ok = false; break; }
+                        };
+                        let cj: serde_json::Value = match resp.json() {
+                            Ok(j) => j,
+                            Err(_) => { download_ok = false; break; }
+                        };
+                        let chunk_b64 = match cj["result"]["data"].as_str() {
+                            Some(s) => s.to_string(),
+                            None => { download_ok = false; break; }
+                        };
+                        let chunk_bytes = match base64_decode(&chunk_b64) {
+                            Ok(b) => b,
+                            Err(_) => { download_ok = false; break; }
+                        };
+                        let done = cj["result"]["done"].as_bool().unwrap_or(false);
+                        info!(offset, chunk_len = chunk_bytes.len(), "resync chunk downloaded");
+                        snapshot_data.extend_from_slice(&chunk_bytes);
+                        offset += chunk_bytes.len();
+                        if done || chunk_bytes.is_empty() { break; }
+                    }
+
+                    if !download_ok || snapshot_data.is_empty() { continue; }
+
+                    // Wipe current store and restore from snapshot.
+                    info!(bytes = snapshot_data.len(), "restoring snapshot...");
+                    {
+                        let mut store = engine_clone.store();
+                        let mut store = store.write().unwrap();
+                        store.clear().ok();
+                        match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data) {
+                            Ok(meta) => {
+                                info!(
+                                    height = meta.height,
+                                    epoch = meta.epoch,
+                                    entries = meta.entry_count,
+                                    "snapshot restored — resync complete"
+                                );
+                                // Reset engine state to match snapshot.
+                                engine_clone.reset_to_height(meta.height, meta.epoch);
+                                resync_ok = true;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "snapshot restore failed");
+                            }
+                        }
+                    }
+
+                    if resync_ok { break; }
+                }
+
+                if resync_ok {
+                    engine_clone.reset_partition_state();
+                    info!("auto-resync completed — resuming normal operation");
+                } else {
+                    warn!("auto-resync failed from all peers — node needs manual intervention");
+                }
+                continue;
+            }
+
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
             if engine_clone.is_likely_partitioned() {

@@ -58,6 +58,15 @@ pub trait StateStore: Send + Sync {
     /// Iterate all key-value pairs in the store.
     fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
 
+    /// Delete all entries in the store.
+    fn clear(&mut self) -> Result<(), StorageError> {
+        let keys: Vec<Vec<u8>> = self.scan_all()?.into_iter().map(|(k, _)| k).collect();
+        for k in keys {
+            self.delete(&k)?;
+        }
+        Ok(())
+    }
+
     /// Create a writable in-memory snapshot for trial execution.
     /// Unlike `snapshot()` which may be read-only, this always returns a
     /// fully writable store suitable for speculative execution.

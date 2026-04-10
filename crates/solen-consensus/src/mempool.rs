@@ -143,6 +143,13 @@ impl Mempool {
     }
 
     /// Drain up to `limit` operations, highest fee first.
+    pub fn clear(&self) {
+        let mut pool = self.inner.lock().unwrap();
+        pool.entries.clear();
+        pool.seen.clear();
+        pool.sender_counts.clear();
+    }
+
     pub fn drain(&self, limit: usize) -> Vec<UserOperation> {
         let mut pool = self.inner.lock().unwrap();
         let n = limit.min(pool.entries.len());

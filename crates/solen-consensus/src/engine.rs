@@ -367,8 +367,30 @@ impl ConsensusEngine {
             em.current_epoch = epoch;
         }
 
-        // Rebuild chain to just contain the height marker.
-        self.chain.write().unwrap().clear();
+        // Set chain to a single marker block at the snapshot height so height() returns correctly.
+        {
+            let mut chain = self.chain.write().unwrap();
+            chain.clear();
+            chain.push(FinalizedBlock {
+                header: BlockHeader {
+                    height,
+                    epoch,
+                    parent_hash: [0u8; 32],
+                    state_root: {
+                        let store = self.store.read().unwrap();
+                        store.state_root()
+                    },
+                    transactions_root: [0u8; 32],
+                    receipts_root: [0u8; 32],
+                    proposer: self.config.validator_id,
+                    timestamp_ms: 0,
+                    proposer_signature: vec![],
+                },
+                result: BlockResult { state_root: [0u8; 32], receipts: vec![], gas_used: 0 },
+                attestations: vec![],
+                operations: vec![],
+            });
+        }
 
         // Sync validator set from restored staking state.
         let staking = {

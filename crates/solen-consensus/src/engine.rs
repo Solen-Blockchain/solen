@@ -795,6 +795,7 @@ impl ConsensusEngine {
                 let existing_hash = block_hash(&existing.header);
                 let existing_header = existing.header.clone();
                 let is_same_proposer = existing.header.proposer == header.proposer;
+                let was_already_executed = existing.already_executed;
                 let new_hash = block_hash(header);
                 drop(pending);
 
@@ -829,6 +830,19 @@ impl ConsensusEngine {
                     .unwrap_or(usize::MAX);
 
                 if new_rank < existing_rank {
+                    // Check if we already executed our own block for this height.
+                    // If so, we can't replace it without corrupting the store — the
+                    // execution already mutated state. Let the timeout/resync handle it.
+                    if was_already_executed {
+                        warn!(
+                            height = header.height,
+                            existing_rank,
+                            new_rank,
+                            "cannot replace already-executed block — keeping ours, will resync if needed"
+                        );
+                        return false;
+                    }
+
                     // New block is from a higher-priority proposer — replace.
                     info!(
                         height = header.height,

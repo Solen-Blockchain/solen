@@ -1094,6 +1094,8 @@ async fn main() -> anyhow::Result<()> {
                                 // Reset tracked peer heights so we don't think we're behind.
                                 peer_heights_for_p2p.lock().unwrap().clear();
                                 net_height_for_p2p.store(0, std::sync::atomic::Ordering::Relaxed);
+                                // Trigger auto-resync from snapshot.
+                                engine_for_p2p.request_resync();
                                 continue;
                             }
                         }
@@ -1427,7 +1429,7 @@ async fn main() -> anyhow::Result<()> {
                     // Wipe current store and restore from snapshot.
                     info!(bytes = snapshot_data.len(), "restoring snapshot...");
                     {
-                        let mut store = engine_clone.store();
+                        let store = engine_clone.store();
                         let mut store = store.write().unwrap();
                         store.clear().ok();
                         match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data) {

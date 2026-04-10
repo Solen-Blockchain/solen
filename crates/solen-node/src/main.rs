@@ -1102,6 +1102,8 @@ async fn main() -> anyhow::Result<()> {
 
                         // Re-request if we're still behind (whether we synced some or hit a gap).
                         if our_height + 1 >= known_net_height {
+                            // Clear any pending resync — we caught up via normal sync.
+                            engine_for_p2p.take_resync_request();
                             tracing::info!(
                                 height = our_height,
                                 "sync caught up, waiting to verify state with live block"
@@ -1349,6 +1351,7 @@ async fn main() -> anyhow::Result<()> {
             // Auto-resync: if state diverged, download a fresh snapshot from peers.
             if engine_clone.take_resync_request() {
                 warn!("state divergence detected — initiating automatic snapshot resync");
+                engine_clone.set_resyncing(true);
                 // Try each seed RPC for a snapshot.
                 let resync_urls: Vec<String> = match net_for_resync {
                     Network::Testnet => vec![
@@ -1453,6 +1456,7 @@ async fn main() -> anyhow::Result<()> {
                     if resync_ok { break; }
                 }
 
+                engine_clone.set_resyncing(false);
                 if resync_ok {
                     engine_clone.reset_partition_state();
                     info!("auto-resync completed — resuming normal operation");

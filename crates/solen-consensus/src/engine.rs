@@ -145,6 +145,8 @@ pub struct ConsensusEngine {
     dropped_block_height: Arc<RwLock<Option<u64>>>,
     /// Set when the node needs a full snapshot resync (state diverged irrecoverably).
     needs_resync: Arc<std::sync::atomic::AtomicBool>,
+    /// True while a snapshot restore is in progress — blocks should not be finalized.
+    resyncing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConsensusEngine {
@@ -234,6 +236,7 @@ impl ConsensusEngine {
             },
             dropped_block_height: Arc::new(RwLock::new(None)),
             needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -349,6 +352,15 @@ impl ConsensusEngine {
     /// Check and clear the resync flag.
     pub fn take_resync_request(&self) -> bool {
         self.needs_resync.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check if a snapshot restore is in progress.
+    pub fn is_resyncing(&self) -> bool {
+        self.resyncing.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_resyncing(&self, v: bool) {
+        self.resyncing.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Reset the engine to a specific height/epoch after a snapshot restore.
@@ -729,6 +741,9 @@ impl ConsensusEngine {
         header: &BlockHeader,
         operations: &[UserOperation],
     ) -> bool {
+        // Don't accept blocks while a snapshot restore is in progress.
+        if self.is_resyncing() { return false; }
+
         let (our_height, expected_height, fork_detected) = {
             let chain = self.chain.read().unwrap();
             let our_height = chain.last().map(|b| b.header.height).unwrap_or(0);

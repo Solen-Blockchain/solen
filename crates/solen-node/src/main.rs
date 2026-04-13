@@ -638,7 +638,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig {
         block_time_ms: block_time,
-        max_ops_per_block: 100,
+        max_ops_per_block: 10000,
         validator_id,
         chain_id: genesis.chain_id,
         prune: cli.prune,

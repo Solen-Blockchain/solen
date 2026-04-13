@@ -184,7 +184,7 @@ cargo run --bin solen-node -- \
 
 ## JSON-RPC API
 
-All methods use standard JSON-RPC 2.0 over HTTP POST to the RPC port.
+All methods use standard JSON-RPC 2.0. The RPC server accepts both HTTP POST and WebSocket connections on the same port.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
@@ -207,12 +207,29 @@ All methods use standard JSON-RPC 2.0 over HTTP POST to the RPC port.
 | `solen_getRollupBatches` | `rollup_id`, `limit?` | Verified batch history for a rollup |
 | `solen_submitBatch` | `BatchSubmitRequest` | Submit a rollup batch commitment |
 
-**Example:**
+### WebSocket Subscriptions
+
+Connect via `ws://host:port` (same port as HTTP). All RPC methods above are also callable over WebSocket. Additionally, the following subscriptions stream real-time events:
+
+| Subscribe | Unsubscribe | Notification | Parameters | Description |
+|-----------|-------------|-------------|-----------|-------------|
+| `solen_subscribeNewBlocks` | `solen_unsubscribeNewBlocks` | `solen_newBlock` | — | Stream finalized blocks (height, epoch, proposer, tx count, gas) |
+| `solen_subscribeTxConfirmation` | `solen_unsubscribeTxConfirmation` | `solen_txConfirmation` | `sender`, `nonce` | Watch for a specific transaction confirmation (auto-closes after delivery) |
+| `solen_subscribeValidatorChanges` | `solen_unsubscribeValidatorChanges` | `solen_validatorChange` | — | Validator set changes at epoch boundaries |
+
+**HTTP Example:**
 
 ```bash
 curl -s -X POST http://127.0.0.1:9944 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"solen_chainStatus","params":[],"id":1}'
+```
+
+**WebSocket Example:**
+
+```bash
+websocat ws://127.0.0.1:9944
+{"jsonrpc":"2.0","id":1,"method":"solen_subscribeNewBlocks","params":[]}
 ```
 
 ---

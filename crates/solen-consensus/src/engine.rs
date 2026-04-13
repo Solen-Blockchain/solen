@@ -1737,13 +1737,10 @@ impl ConsensusEngine {
             }
 
             // Emit validator set changed event.
-            {
-                let vs = self.validator_set.read().unwrap();
-                let _ = self.event_tx.send(NodeEvent::ValidatorSetChanged {
-                    epoch: em.current_epoch,
-                    active_count: vs.active_count(),
-                });
-            }
+            let _ = self.event_tx.send(NodeEvent::ValidatorSetChanged {
+                epoch: em.current_epoch,
+                active_count: vs.active_count(),
+            });
 
             // Propose a new checkpoint at the epoch boundary.
             // The block at this height becomes the checkpoint candidate.

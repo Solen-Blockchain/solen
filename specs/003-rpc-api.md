@@ -2,6 +2,13 @@
 
 **Status:** Draft
 
+## Transport
+
+The RPC server accepts both HTTP POST and WebSocket connections on the same port. All methods below are callable over either transport. WebSocket additionally supports real-time subscriptions.
+
+- **HTTP:** `POST http://host:port` with JSON-RPC 2.0 body
+- **WebSocket:** `ws://host:port` with JSON-RPC 2.0 messages
+
 ## Endpoint Groups
 
 ### State Queries
@@ -32,3 +39,19 @@
 - `solen_getRollupStatus(rollup_id)` - Rollup registration, last state root, batch count
 - `solen_getRollupBatches(rollup_id, limit?)` - Verified batch history
 - `solen_submitBatch(batch)` - Submit a rollup batch commitment for verification
+
+### WebSocket Subscriptions
+
+Subscriptions use JSON-RPC 2.0 subscription protocol. Connect via WebSocket, send a subscribe request, and receive notifications until unsubscribed or disconnected.
+
+- `solen_subscribeNewBlocks()` → `solen_newBlock` notifications
+  - Streams every finalized block: height, epoch, block_hash, state_root, proposer, timestamp_ms, tx_count, gas_used
+
+- `solen_subscribeTxConfirmation(sender, nonce)` → `solen_txConfirmation` notifications
+  - Watches for a specific transaction (identified by sender + nonce)
+  - Auto-closes after the transaction is confirmed
+  - Returns: block_height, tx_hash, sender, nonce, success, gas_used
+
+- `solen_subscribeValidatorChanges()` → `solen_validatorChange` notifications
+  - Emitted at epoch boundaries when the validator set changes
+  - Returns: epoch, active_count

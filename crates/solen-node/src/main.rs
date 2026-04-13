@@ -1495,6 +1495,7 @@ async fn main() -> anyhow::Result<()> {
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
             if engine_clone.is_likely_partitioned() {
+                tracing::warn!("skipping production — partition detected");
                 // Clear all peer bans to allow reconnection.
                 if let Some(ref handle) = net_for_blocks {
                     handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
@@ -1510,9 +1511,24 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            let should_propose = engine_clone.active_validator_count() <= 1
-                || (engine_clone.is_next_proposer() && !already_pending)
-                || (!already_pending && engine_clone.is_backup_proposer(stalled_for));
+            let is_proposer = engine_clone.is_next_proposer();
+            let is_backup = engine_clone.is_backup_proposer(stalled_for);
+            let active_count = engine_clone.active_validator_count();
+            let should_propose = active_count <= 1
+                || (is_proposer && !already_pending)
+                || (!already_pending && is_backup);
+
+            if !should_propose && stalled_for.as_secs() > 5 {
+                tracing::warn!(
+                    height = next_height,
+                    is_proposer,
+                    already_pending,
+                    is_backup,
+                    active_count,
+                    stalled_secs = stalled_for.as_secs(),
+                    "stalled — not proposing"
+                );
+            }
 
             // Check if a block was dropped due to attestation mismatch.
             // If so, request sync for that height to get the correct block from peers.

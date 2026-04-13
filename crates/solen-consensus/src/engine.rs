@@ -793,10 +793,7 @@ impl ConsensusEngine {
         let round = (elapsed_past_min / round_interval_ms) as usize;
 
         // Position in the proposer order: 0 = designated, 1 = first backup, etc.
-        let backup_position = round + 1;
-        if backup_position >= order.len() {
-            return false; // all validators have had their turn
-        }
+        let backup_position = (round + 1) % order.len();
 
         order[backup_position] == self.config.validator_id
     }

@@ -644,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
         prune: cli.prune,
     };
 
-    let mempool = Mempool::new(10_000);
+    let mempool = Mempool::new(200_000);
     let mut engine_raw = ConsensusEngine::with_validators(config, store, mempool, validator_set);
     // Set signing keypair for block header signatures (proves proposer authored the block).
     engine_raw.set_signing_keypair(Keypair::from_seed(&validator_seed));

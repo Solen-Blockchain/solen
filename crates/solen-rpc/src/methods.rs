@@ -2,11 +2,15 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
+use jsonrpsee::core::SubscriptionResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+use jsonrpsee::{PendingSubscriptionSink, SubscriptionMessage};
 use serde::{Deserialize, Serialize};
 use solen_consensus::engine::ConsensusEngine;
+use solen_consensus::events::NodeEvent;
 use solen_execution::state::ReadonlyStateManager;
 use solen_intents::types::{Constraint, Intent};
 use solen_types::encoding::{account_to_base58, hex_decode as encoding_hex_decode, hex_encode, parse_address};
@@ -308,6 +312,37 @@ pub struct VerifiedBatchInfo {
     pub pre_state_root: String,
 }
 
+/// Notification sent when a new block is finalized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockNotification {
+    pub height: u64,
+    pub epoch: u64,
+    pub block_hash: String,
+    pub state_root: String,
+    pub proposer: String,
+    pub timestamp_ms: u64,
+    pub tx_count: usize,
+    pub gas_used: u64,
+}
+
+/// Notification sent when a transaction is confirmed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxConfirmationNotification {
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub sender: String,
+    pub nonce: u64,
+    pub success: bool,
+    pub gas_used: u64,
+}
+
+/// Notification sent when the validator set changes at an epoch boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorChangeNotification {
+    pub epoch: u64,
+    pub active_count: usize,
+}
+
 #[rpc(server)]
 pub trait SolenApi {
     #[method(name = "solen_getBalance")]
@@ -398,6 +433,19 @@ pub trait SolenApi {
     /// chunk_size defaults to 4MB. offset is in bytes of the compressed snapshot.
     #[method(name = "solen_getSnapshotChunk")]
     fn get_snapshot_chunk(&self, offset: usize, chunk_size: Option<usize>) -> RpcResult<SnapshotChunkInfo>;
+
+    /// Subscribe to new finalized blocks.
+    #[subscription(name = "solen_subscribeNewBlocks" => "solen_newBlock", unsubscribe = "solen_unsubscribeNewBlocks", item = BlockNotification)]
+    async fn subscribe_new_blocks(&self) -> SubscriptionResult;
+
+    /// Subscribe to confirmation of a specific transaction (sender + nonce).
+    /// The subscription auto-closes after the transaction is confirmed.
+    #[subscription(name = "solen_subscribeTxConfirmation" => "solen_txConfirmation", unsubscribe = "solen_unsubscribeTxConfirmation", item = TxConfirmationNotification)]
+    async fn subscribe_tx_confirmation(&self, sender: String, nonce: u64) -> SubscriptionResult;
+
+    /// Subscribe to validator set changes at epoch boundaries.
+    #[subscription(name = "solen_subscribeValidatorChanges" => "solen_validatorChange", unsubscribe = "solen_unsubscribeValidatorChanges", item = ValidatorChangeNotification)]
+    async fn subscribe_validator_changes(&self) -> SubscriptionResult;
 }
 
 /// Cached snapshot to avoid regenerating on every request.
@@ -444,6 +492,7 @@ pub struct SolenRpc {
     engine: Arc<ConsensusEngine>,
     snapshot_cache: Arc<std::sync::Mutex<Option<CachedSnapshot>>>,
     rate_limiter: Arc<RpcRateLimiter>,
+    event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
 /// Minimum blocks between snapshot regenerations.
@@ -498,10 +547,12 @@ impl SolenRpc {
             }
         });
 
+        let event_tx = engine.event_sender();
         Self {
             engine,
             snapshot_cache: cache,
             rate_limiter: Arc::new(RpcRateLimiter::new()),
+            event_tx,
         }
     }
 }
@@ -562,6 +613,7 @@ fn internal_error(msg: impl ToString) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32603, msg.to_string(), None::<()>)
 }
 
+#[async_trait]
 impl SolenApiServer for SolenRpc {
     fn get_balance(&self, account_id: String) -> RpcResult<String> {
         let id = parse_account_id(&account_id)?;
@@ -1546,6 +1598,130 @@ impl SolenApiServer for SolenRpc {
             data: base64_encode(chunk),
             done,
         })
+    }
+
+    async fn subscribe_new_blocks(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
+        let mut rx = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                Err(_) => return,
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(NodeEvent::BlockFinalized {
+                        height, epoch, block_hash, state_root, proposer,
+                        timestamp_ms, tx_count, gas_used,
+                    }) => {
+                        let notification = BlockNotification {
+                            height,
+                            epoch,
+                            block_hash: hex_encode(&block_hash),
+                            state_root: hex_encode(&state_root),
+                            proposer: account_to_base58(&proposer),
+                            timestamp_ms,
+                            tx_count,
+                            gas_used,
+                        };
+                        let msg = SubscriptionMessage::from_json(&notification).unwrap();
+                        if sink.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "newBlocks subscriber lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn subscribe_tx_confirmation(
+        &self,
+        pending: PendingSubscriptionSink,
+        sender: String,
+        nonce: u64,
+    ) -> SubscriptionResult {
+        let target_sender = match parse_account_id(&sender) {
+            Ok(id) => id,
+            Err(_) => {
+                // Reject the subscription with an error.
+                let _ = pending.reject(ErrorObjectOwned::owned(-32602, "invalid sender address", None::<()>)).await;
+                return Ok(());
+            }
+        };
+        let mut rx = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                Err(_) => return,
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(NodeEvent::TxIncluded {
+                        block_height, tx_hash, sender, nonce: tx_nonce,
+                        success, gas_used,
+                    }) if sender == target_sender && tx_nonce == nonce => {
+                        let notification = TxConfirmationNotification {
+                            block_height,
+                            tx_hash: hex_encode(&tx_hash),
+                            sender: account_to_base58(&sender),
+                            nonce: tx_nonce,
+                            success,
+                            gas_used,
+                        };
+                        let msg = SubscriptionMessage::from_json(&notification).unwrap();
+                        let _ = sink.send(msg).await;
+                        break; // auto-close after confirmation
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "txConfirmation subscriber lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn subscribe_validator_changes(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
+        let mut rx = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                Err(_) => return,
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(NodeEvent::ValidatorSetChanged { epoch, active_count }) => {
+                        let notification = ValidatorChangeNotification {
+                            epoch,
+                            active_count,
+                        };
+                        let msg = SubscriptionMessage::from_json(&notification).unwrap();
+                        if sink.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "validatorChanges subscriber lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 

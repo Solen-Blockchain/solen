@@ -25,6 +25,7 @@ use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
 use crate::epoch::EpochManager;
+use crate::events::NodeEvent;
 use crate::mempool::Mempool;
 use crate::validator::{ValidatorInfo, ValidatorSet};
 
@@ -147,6 +148,8 @@ pub struct ConsensusEngine {
     needs_resync: Arc<std::sync::atomic::AtomicBool>,
     /// True while a snapshot restore is in progress — blocks should not be finalized.
     resyncing: Arc<std::sync::atomic::AtomicBool>,
+    /// Broadcast channel for node events (WebSocket subscriptions, indexers).
+    event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
 impl ConsensusEngine {
@@ -237,6 +240,7 @@ impl ConsensusEngine {
             dropped_block_height: Arc::new(RwLock::new(None)),
             needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            event_tx: tokio::sync::broadcast::channel(1024).0,
         }
     }
 
@@ -251,6 +255,48 @@ impl ConsensusEngine {
 
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Subscribe to node events (new blocks, tx confirmations, validator changes).
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<NodeEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Get the event sender for sharing with the RPC layer.
+    pub fn event_sender(&self) -> tokio::sync::broadcast::Sender<NodeEvent> {
+        self.event_tx.clone()
+    }
+
+    /// Emit events for a finalized block — block notification + per-tx confirmations.
+    fn emit_block_events(&self, block: &FinalizedBlock) {
+        let bh = block_hash(&block.header);
+
+        // Block finalized event.
+        let _ = self.event_tx.send(NodeEvent::BlockFinalized {
+            height: block.header.height,
+            epoch: block.header.epoch,
+            block_hash: bh,
+            state_root: block.header.state_root,
+            proposer: block.header.proposer,
+            timestamp_ms: block.header.timestamp_ms,
+            tx_count: block.result.receipts.len(),
+            gas_used: block.result.gas_used,
+        });
+
+        // Per-transaction confirmation events.
+        for receipt in &block.result.receipts {
+            let tx_hash = solen_crypto::blake3_hash(
+                &[&receipt.sender[..], &receipt.nonce.to_le_bytes()[..]].concat(),
+            );
+            let _ = self.event_tx.send(NodeEvent::TxIncluded {
+                block_height: block.header.height,
+                tx_hash,
+                sender: receipt.sender,
+                nonce: receipt.nonce,
+                success: receipt.success,
+                gas_used: receipt.gas_used,
+            });
+        }
     }
 
     /// Persist the last attested block to prevent amnesia after crash.
@@ -636,6 +682,7 @@ impl ConsensusEngine {
 
             self.chain.write().unwrap().push(block.clone());
             self.persist_block_and_meta(&block);
+            self.emit_block_events(&block);
 
             self.try_epoch_transition(height);
 
@@ -1180,6 +1227,7 @@ impl ConsensusEngine {
 
         self.chain.write().unwrap().push(block.clone());
         self.persist_block_and_meta(&block);
+        self.emit_block_events(&block);
 
         // Track missed blocks for downtime slashing.
         // If the actual proposer differs from the designated proposer,
@@ -1686,6 +1734,15 @@ impl ConsensusEngine {
                     validator = ?&id[..4],
                     "validator removed from consensus set (exited staking)"
                 );
+            }
+
+            // Emit validator set changed event.
+            {
+                let vs = self.validator_set.read().unwrap();
+                let _ = self.event_tx.send(NodeEvent::ValidatorSetChanged {
+                    epoch: em.current_epoch,
+                    active_count: vs.active_count(),
+                });
             }
 
             // Propose a new checkpoint at the epoch boundary.

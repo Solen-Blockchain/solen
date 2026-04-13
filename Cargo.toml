@@ -57,6 +57,7 @@ rocksdb = "0.22"
 
 # RPC
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+async-trait = "0.1"
 axum = "0.7"
 
 # Logging / tracing

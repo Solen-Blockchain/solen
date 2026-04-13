@@ -10,6 +10,7 @@ pub mod checkpoint;
 pub mod encrypted_mempool;
 pub mod engine;
 pub mod epoch;
+pub mod events;
 pub mod mempool;
 pub mod slashing;
 pub mod snapshot;

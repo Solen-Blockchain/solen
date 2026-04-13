@@ -42,7 +42,7 @@ pub async fn start_rpc_server(
     let rpc = SolenRpc::new(engine);
     let handle = server.start(rpc.into_rpc());
 
-    info!(%addr, "JSON-RPC server started");
+    info!(%addr, "JSON-RPC server started (HTTP + WebSocket)");
 
     Ok(handle)
 }

@@ -22,3 +22,4 @@ serde_json = { workspace = true }
 borsh = { workspace = true }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
+async-trait = { workspace = true }

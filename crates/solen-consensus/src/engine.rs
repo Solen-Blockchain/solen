@@ -55,7 +55,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             block_time_ms: 2000,
-            max_ops_per_block: 50000,
+            max_ops_per_block: 10000,
             validator_id: [0u8; 32],
             chain_id: 0,
             prune: false,

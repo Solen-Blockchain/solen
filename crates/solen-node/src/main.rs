@@ -638,7 +638,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig {
         block_time_ms: block_time,
-        max_ops_per_block: 50000,
+        max_ops_per_block: 10000,
         validator_id,
         chain_id: genesis.chain_id,
         prune: cli.prune,
@@ -784,7 +784,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     } => {
                         // Reject oversized blocks to prevent memory DoS.
-                        if operations.len() > 50000 {
+                        if operations.len() > 10000 {
                             tracing::warn!(ops = operations.len(), "rejecting oversized block");
                             continue;
                         }

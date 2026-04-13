@@ -683,6 +683,7 @@ impl ConsensusEngine {
             self.chain.write().unwrap().push(block.clone());
             self.persist_block_and_meta(&block);
             self.emit_block_events(&block);
+            self.mempool.remove_finalized(&block.operations);
 
             self.try_epoch_transition(height);
 
@@ -1228,6 +1229,10 @@ impl ConsensusEngine {
         self.chain.write().unwrap().push(block.clone());
         self.persist_block_and_meta(&block);
         self.emit_block_events(&block);
+
+        // Remove finalized operations from our mempool to prevent
+        // re-including already-executed transactions in future blocks.
+        self.mempool.remove_finalized(&block.operations);
 
         // Track missed blocks for downtime slashing.
         // If the actual proposer differs from the designated proposer,

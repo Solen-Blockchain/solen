@@ -171,6 +171,28 @@ impl Mempool {
         ops
     }
 
+    /// Remove operations that were included in a finalized block.
+    /// Called after any block is finalized (whether we proposed it or not)
+    /// to prevent re-including already-executed transactions.
+    pub fn remove_finalized(&self, ops: &[UserOperation]) {
+        let mut pool = self.inner.lock().unwrap();
+        for op in ops {
+            let key: DedupKey = (op.sender, op.nonce);
+            if pool.seen.remove(&key) {
+                // Find and remove from the BTreeSet.
+                let entry = MempoolEntry { op: op.clone() };
+                if pool.entries.remove(&entry) {
+                    if let Some(count) = pool.sender_counts.get_mut(&op.sender) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            pool.sender_counts.remove(&op.sender);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Number of pending operations.
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()

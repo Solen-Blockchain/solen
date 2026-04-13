@@ -784,7 +784,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     } => {
                         // Reject oversized blocks to prevent memory DoS.
-                        if operations.len() > 1000 {
+                        if operations.len() > 10000 {
                             tracing::warn!(ops = operations.len(), "rejecting oversized block");
                             continue;
                         }

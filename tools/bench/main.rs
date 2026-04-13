@@ -110,9 +110,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("\r  Funded {}/{}", cli.senders, cli.senders);
 
-    // Wait for funding txs to land.
+    // Wait for funding txs to land — verify the last sender has a balance.
     println!("Waiting for funding transactions to finalize...");
-    wait_for_height(&client, &cli.rpc, start_height + 5).await?;
+    let last_sender = senders.last().unwrap().public_key();
+    loop {
+        let nonce = get_next_nonce(&client, &cli.rpc, &last_sender).await.unwrap_or(0);
+        if nonce > 0 {
+            break; // Account exists and has been used (funded).
+        }
+        // Also check balance directly.
+        let balance = get_balance(&client, &cli.rpc, &last_sender).await.unwrap_or(0);
+        if balance > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    println!("  All senders funded.");
 
     // Now blast transactions.
     let total_txs = cli.senders * cli.txs_per_sender;
@@ -314,6 +327,13 @@ async fn get_next_nonce(client: &reqwest::Client, rpc: &str, account: &[u8; 32])
     let hex = account.iter().map(|b| format!("{b:02x}")).collect::<String>();
     let result = rpc_call(client, rpc, "solen_getNextNonce", serde_json::json!([hex])).await?;
     Ok(result.as_u64().unwrap_or(0))
+}
+
+async fn get_balance(client: &reqwest::Client, rpc: &str, account: &[u8; 32]) -> Result<u128, String> {
+    let hex = account.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let result = rpc_call(client, rpc, "solen_getBalance", serde_json::json!([hex])).await?;
+    let s = result.as_str().unwrap_or("0");
+    s.parse::<u128>().map_err(|e| e.to_string())
 }
 
 async fn get_block(client: &reqwest::Client, rpc: &str, height: u64) -> Result<serde_json::Value, String> {

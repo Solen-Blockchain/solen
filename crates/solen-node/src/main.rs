@@ -638,13 +638,13 @@ async fn main() -> anyhow::Result<()> {
 
     let config = EngineConfig {
         block_time_ms: block_time,
-        max_ops_per_block: 10000,
+        max_ops_per_block: 5000,
         validator_id,
         chain_id: genesis.chain_id,
         prune: cli.prune,
     };
 
-    let mempool = Mempool::new(200_000);
+    let mempool = Mempool::new(50_000);
     let mut engine_raw = ConsensusEngine::with_validators(config, store, mempool, validator_set);
     // Set signing keypair for block header signatures (proves proposer authored the block).
     engine_raw.set_signing_keypair(Keypair::from_seed(&validator_seed));
@@ -784,7 +784,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     } => {
                         // Reject oversized blocks to prevent memory DoS.
-                        if operations.len() > 10000 {
+                        if operations.len() > 5000 {
                             tracing::warn!(ops = operations.len(), "rejecting oversized block");
                             continue;
                         }

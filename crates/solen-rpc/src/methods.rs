@@ -676,8 +676,8 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_operation(&self, op: UserOperation) -> RpcResult<SubmitResult> {
-        // Rate limit: max 10000 submissions per second globally.
-        if !RpcRateLimiter::check(&self.rate_limiter.submit_ops, 10000) {
+        // Rate limit: max 500 submissions per second globally.
+        if !RpcRateLimiter::check(&self.rate_limiter.submit_ops, 500) {
             return Ok(SubmitResult {
                 accepted: false,
                 error: Some("rate limited — too many submissions, try again".to_string()),
@@ -702,7 +702,7 @@ impl SolenApiServer for SolenRpc {
                                 )),
                             });
                         }
-                        if op.nonce > account.nonce + 1000 {
+                        if op.nonce > account.nonce + 64 {
                             return Ok(SubmitResult {
                                 accepted: false,
                                 error: Some(format!(

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use solen_types::transaction::UserOperation;
 
 /// Maximum pending operations per sender to prevent single-sender spam.
-const MAX_OPS_PER_SENDER: usize = 1000;
+const MAX_OPS_PER_SENDER: usize = 64;
 
 /// A mempool entry wrapping a UserOperation with ordering by fee (descending).
 #[derive(Clone, Debug)]

@@ -55,7 +55,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             block_time_ms: 2000,
-            max_ops_per_block: 10000,
+            max_ops_per_block: 5000,
             validator_id: [0u8; 32],
             chain_id: 0,
             prune: false,
@@ -240,7 +240,7 @@ impl ConsensusEngine {
             dropped_block_height: Arc::new(RwLock::new(None)),
             needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            event_tx: tokio::sync::broadcast::channel(16384).0,
+            event_tx: tokio::sync::broadcast::channel(8192).0,
         }
     }
 
@@ -534,10 +534,10 @@ impl ConsensusEngine {
                         if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(&data) {
                             op.nonce >= account.nonce
                         } else {
-                            true // can't parse — let executor handle it
+                            true
                         }
                     }
-                    _ => true, // account doesn't exist — let executor handle it
+                    _ => true,
                 }
             });
         }

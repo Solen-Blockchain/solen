@@ -1348,11 +1348,6 @@ async fn main() -> anyhow::Result<()> {
             // 3. We're the backup proposer AND no block pending from any source.
             //    The `already_pending` check prevents competing blocks at the same
             //    height, which causes attestation hash mismatches.
-            tracing::info!(
-                height = next_height,
-                already_pending,
-                "consensus tick reached proposal check"
-            );
             // Auto-resync: if state diverged, download a fresh snapshot from peers.
             if engine_clone.take_resync_request() {
                 warn!("state divergence detected — initiating automatic snapshot resync");
@@ -1515,25 +1510,9 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            let is_proposer = engine_clone.is_next_proposer();
-            let active_count = engine_clone.active_validator_count();
-            let is_backup = engine_clone.is_backup_proposer(stalled_for);
-            let should_propose = active_count <= 1
-                || (is_proposer && !already_pending)
-                || (!already_pending && is_backup);
-
-            if !should_propose {
-                tracing::info!(
-                    height = next_height,
-                    is_proposer,
-                    already_pending,
-                    is_backup,
-                    active_count,
-                    stalled_ms = stalled_for.as_millis() as u64,
-                    partitioned = engine_clone.is_likely_partitioned(),
-                    "not proposing this tick"
-                );
-            }
+            let should_propose = engine_clone.active_validator_count() <= 1
+                || (engine_clone.is_next_proposer() && !already_pending)
+                || (!already_pending && engine_clone.is_backup_proposer(stalled_for));
 
             // Check if a block was dropped due to attestation mismatch.
             // If so, request sync for that height to get the correct block from peers.

@@ -702,7 +702,7 @@ impl SolenApiServer for SolenRpc {
                                 )),
                             });
                         }
-                        if op.nonce > account.nonce + 16 {
+                        if op.nonce > account.nonce + 1000 {
                             return Ok(SubmitResult {
                                 accepted: false,
                                 error: Some(format!(

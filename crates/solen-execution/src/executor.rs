@@ -507,22 +507,36 @@ impl BlockExecutor {
         }
 
         // Validate signature against the account's auth methods.
-        let mut state = StateManager::new(store);
-        if let Err(e) = self.validate_and_prepare(&mut state, op) {
-            warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
-            return ExecutionReceipt {
-                sender: op.sender,
-                nonce: op.nonce,
-                success: false,
-                gas_used: 0,
-                error: Some(e.to_string()),
-                events: vec![],
-                auth_method: "ed25519".to_string(),
-            };
+        {
+            let mut state = StateManager::new(store);
+            if let Err(e) = self.validate_and_prepare(&mut state, op) {
+                warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
+                return ExecutionReceipt {
+                    sender: op.sender,
+                    nonce: op.nonce,
+                    success: false,
+                    gas_used: 0,
+                    error: Some(e.to_string()),
+                    events: vec![],
+                    auth_method: "ed25519".to_string(),
+                };
+            }
         }
 
-        let max_possible_fee = 0u128; // No upfront reservation.
-        drop(state);
+        // Reserve max_fee upfront to prevent spend-then-underpay attacks.
+        // The reserved amount is refunded after execution, then actual fee is deducted.
+        let max_possible_fee = {
+            let mut state = StateManager::new(store);
+            match state.get_account(&op.sender) {
+                Ok(Some(mut sender_acct)) => {
+                    let reserve = op.max_fee.min(sender_acct.balance);
+                    sender_acct.balance -= reserve;
+                    let _ = state.save_account(&sender_acct);
+                    reserve
+                }
+                _ => 0,
+            }
+        };
 
         // Execute each action. For multi-action operations, take a full store
         // snapshot so ALL state changes (including system contracts) can be rolled
@@ -565,9 +579,31 @@ impl BlockExecutor {
         if let Some(err) = action_failed {
             if let Some(snapshot) = store_snapshot {
                 // Restore entire store to pre-execution state.
-                // Re-apply only the sender's nonce increment and fee deduction.
-                let all_entries = snapshot.scan_all().unwrap_or_default();
-                for (k, v) in &all_entries {
+                // Delete any new keys created during failed execution (e.g. deployed
+                // contracts, new accounts) by scanning for account keys that didn't
+                // exist in the snapshot.
+                let snapshot_entries = snapshot.scan_all().unwrap_or_default();
+                let snapshot_keys: std::collections::HashSet<&[u8]> =
+                    snapshot_entries.iter().map(|(k, _)| k.as_slice()).collect();
+
+                // Only scan account/contract prefix keys for cleanup — avoids full store scan.
+                if let Ok(current) = store.scan_prefix(b"acc/") {
+                    for (k, _) in &current {
+                        if !snapshot_keys.contains(k.as_slice()) {
+                            let _ = store.delete(k);
+                        }
+                    }
+                }
+                if let Ok(current) = store.scan_prefix(b"code/") {
+                    for (k, _) in &current {
+                        if !snapshot_keys.contains(k.as_slice()) {
+                            let _ = store.delete(k);
+                        }
+                    }
+                }
+
+                // Restore all snapshot entries to their pre-execution values.
+                for (k, v) in &snapshot_entries {
                     let _ = store.put(k, v);
                 }
                 // Re-apply nonce increment (was consumed before execution, then rolled back).

@@ -939,6 +939,29 @@ impl ConsensusEngine {
             }
         }
 
+        // Verify proposer signature to prevent forged block headers.
+        if header.proposer_signature.len() == 64 {
+            let bh = block_hash(header);
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(&header.proposer_signature);
+            if solen_crypto::verify(&header.proposer, &bh, &sig).is_err() {
+                warn!(
+                    height = header.height,
+                    proposer = ?&header.proposer[..4],
+                    "invalid proposer signature — rejecting block"
+                );
+                return false;
+            }
+        } else if !header.proposer_signature.is_empty() {
+            // Non-empty but wrong length — invalid.
+            warn!(
+                height = header.height,
+                sig_len = header.proposer_signature.len(),
+                "malformed proposer signature — rejecting block"
+            );
+            return false;
+        }
+
         // Check for duplicate pending/finalized blocks.
         {
             let chain = self.chain.read().unwrap();
@@ -1107,6 +1130,14 @@ impl ConsensusEngine {
         block_height: u64,
         attested_hash: Hash,
     ) -> bool {
+        // Reject attestations from non-validators to prevent memory DoS.
+        {
+            let vs = self.validator_set.read().unwrap();
+            if !vs.active().iter().any(|v| v.id == validator_id) {
+                return false;
+            }
+        }
+
         // Only accept attestations for blocks we already have in pending.
         // Accepting attestations without the block enables split-quorum attacks
         // where an attacker sends attestations for a block that doesn't exist

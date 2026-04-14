@@ -97,6 +97,14 @@ impl VmRuntime {
             .linker
             .instantiate_pre(&module)
             .map_err(|e| VmError::Trap(e.to_string()))?;
+        // Evict oldest entries if cache exceeds limit to prevent memory DoS.
+        const MAX_CACHE_SIZE: usize = 1024;
+        if cache.len() >= MAX_CACHE_SIZE {
+            // Simple eviction: remove a random entry (HashMap iteration order).
+            if let Some(key) = cache.keys().next().copied() {
+                cache.remove(&key);
+            }
+        }
         cache.insert(*code_hash, pre.clone());
         Ok(pre)
     }

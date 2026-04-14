@@ -355,6 +355,16 @@ impl StakingContract {
             });
         }
 
+        // Check unbonding entry limit BEFORE mutating state to prevent
+        // state corruption if this check fails.
+        const MAX_UNDELEGATION_ENTRIES: usize = 7;
+        let existing_count = self.undelegations.iter()
+            .filter(|u| u.delegator == delegator && u.validator == validator)
+            .count();
+        if existing_count >= MAX_UNDELEGATION_ENTRIES {
+            return Err(StakingError::TooManyUndelegations);
+        }
+
         delegation.amount -= amount;
 
         // Remove zero-amount delegations to prevent state bloat.
@@ -365,16 +375,6 @@ impl StakingContract {
         // Reduce validator's total.
         if let Some(val) = self.validators.iter_mut().find(|v| v.id == validator) {
             val.total_delegated = val.total_delegated.saturating_sub(amount);
-        }
-
-        // Limit unbonding entries per delegator to prevent state bloat.
-        // (Cosmos SDK uses MaxEntries=7 for the same reason.)
-        const MAX_UNDELEGATION_ENTRIES: usize = 7;
-        let existing_count = self.undelegations.iter()
-            .filter(|u| u.delegator == delegator && u.validator == validator)
-            .count();
-        if existing_count >= MAX_UNDELEGATION_ENTRIES {
-            return Err(StakingError::TooManyUndelegations);
         }
 
         self.undelegations.push(Undelegation {

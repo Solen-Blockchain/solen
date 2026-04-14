@@ -186,9 +186,17 @@ impl BridgeContract {
             .find(|v| v.rollup_id == rollup_id)
             .ok_or(BridgeError::VaultNotFound(rollup_id))?;
 
-        if vault.balance < amount {
+        // Check balance against BOTH current balance AND pending withdrawals
+        // to prevent over-commitment of vault funds.
+        let pending_amount: u128 = self.pending_withdrawals.iter()
+            .filter(|w| w.rollup_id == rollup_id && matches!(w.status, WithdrawalStatus::Pending))
+            .map(|w| w.amount)
+            .sum();
+        let available = vault.balance.saturating_sub(pending_amount);
+
+        if available < amount {
             return Err(BridgeError::InsufficientVaultBalance {
-                have: vault.balance,
+                have: available,
                 need: amount,
             });
         }

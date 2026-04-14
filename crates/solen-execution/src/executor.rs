@@ -586,18 +586,14 @@ impl BlockExecutor {
                 let snapshot_keys: std::collections::HashSet<&[u8]> =
                     snapshot_entries.iter().map(|(k, _)| k.as_slice()).collect();
 
-                // Only scan account/contract prefix keys for cleanup — avoids full store scan.
-                if let Ok(current) = store.scan_prefix(b"acc/") {
-                    for (k, _) in &current {
-                        if !snapshot_keys.contains(k.as_slice()) {
-                            let _ = store.delete(k);
-                        }
-                    }
-                }
-                if let Ok(current) = store.scan_prefix(b"code/") {
-                    for (k, _) in &current {
-                        if !snapshot_keys.contains(k.as_slice()) {
-                            let _ = store.delete(k);
+                // Delete any keys created during failed execution.
+                // Scan all prefixes that actions can write to.
+                for prefix in &[b"acc/" as &[u8], b"code/", b"cs/", b"intent/"] {
+                    if let Ok(current) = store.scan_prefix(prefix) {
+                        for (k, _) in &current {
+                            if !snapshot_keys.contains(k.as_slice()) {
+                                let _ = store.delete(k);
+                            }
                         }
                     }
                 }

@@ -343,6 +343,35 @@ impl ConsensusEngine {
     }
 
     /// Add a checkpoint attestation from a validator.
+    /// The caller must verify the signature. This method additionally checks
+    /// that the attestation is for the CURRENT pending checkpoint to prevent
+    /// replay of old attestations.
+    pub fn attest_checkpoint_with_data(
+        &self,
+        validator_id: ValidatorId,
+        signature: Vec<u8>,
+        height: u64,
+        block_hash: &Hash,
+        state_root: &Hash,
+    ) -> bool {
+        // Verify the attestation is for the current pending checkpoint.
+        {
+            let cp_store = self.finalized_checkpoints.read().unwrap();
+            if let Some(ref pending) = cp_store.pending {
+                if pending.height != height
+                    || pending.block_hash != *block_hash
+                    || pending.state_root != *state_root
+                {
+                    return false; // Attestation is for a different/old checkpoint.
+                }
+            } else {
+                return false; // No pending checkpoint.
+            }
+        }
+        self.attest_checkpoint(validator_id, signature)
+    }
+
+    /// Add a checkpoint attestation from a validator (internal — skips data check).
     pub fn attest_checkpoint(&self, validator_id: ValidatorId, signature: Vec<u8>) -> bool {
         let vs = self.validator_set.read().unwrap();
         let mut cp_store = self.finalized_checkpoints.write().unwrap();
@@ -925,7 +954,8 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Validate proposer is a known active validator.
+        // Validate proposer is a known active validator AND is in the
+        // proposer rotation for this height (designated or backup).
         {
             let vs = self.validator_set.read().unwrap();
             let is_valid_proposer = vs.active().iter().any(|v| v.id == header.proposer);
@@ -934,6 +964,18 @@ impl ConsensusEngine {
                     height = header.height,
                     proposer = ?header.proposer[..4],
                     "proposer not in active validator set — rejecting block"
+                );
+                return false;
+            }
+            // Check proposer is in the rotation order for this height.
+            // Accept designated proposer + any backup (they take over if designated is offline).
+            let seed = self.epoch_seed();
+            let order = vs.proposer_order_for_height(header.height, &seed);
+            if !order.contains(&header.proposer) {
+                warn!(
+                    height = header.height,
+                    proposer = ?&header.proposer[..4],
+                    "proposer not in rotation order — rejecting block"
                 );
                 return false;
             }

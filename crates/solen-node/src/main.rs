@@ -955,7 +955,9 @@ async fn main() -> anyhow::Result<()> {
                             let mut sig = [0u8; 64];
                             sig.copy_from_slice(&signature);
                             if solen_crypto::verify(&validator_id, &msg, &sig).is_ok() {
-                                let finalized = engine_for_p2p.attest_checkpoint(validator_id, signature);
+                                let finalized = engine_for_p2p.attest_checkpoint_with_data(
+                                    validator_id, signature, height, &block_hash, &state_root,
+                                );
                                 if finalized {
                                     tracing::info!(height, "checkpoint finalized via peer attestation");
                                 }

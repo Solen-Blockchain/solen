@@ -1905,28 +1905,32 @@ impl ConsensusEngine {
                 continue;
             }
 
-            // Before force-finalizing, check if we've heard from enough validators
-            // to plausibly reach quorum. If we only have attestations from a minority
-            // of stake, we're likely partitioned — do NOT force-finalize.
+            // Before force-finalizing, check if attesting validators have enough
+            // stake for quorum. Uses the same 2/3+ stake threshold as normal
+            // finalization. This prevents minority-stake partitions from
+            // force-finalizing divergent chains.
             {
                 let atts = self.pending_attestations.read().unwrap();
-                let att_count = atts.get(&height).map(|a| a.len()).unwrap_or(0);
+                let att_ids: Vec<_> = atts.get(&height)
+                    .map(|a| a.iter().map(|att| att.validator_id).collect())
+                    .unwrap_or_default();
+                let att_count = att_ids.len();
                 let vs = self.validator_set.read().unwrap();
                 let active_count = vs.active_count();
+                let has_quorum_stake = vs.has_quorum(&att_ids);
                 drop(vs);
                 drop(atts);
 
-                // Only force-finalize if we have attestations from at least half
-                // the active validators, OR if we're in single-validator mode.
-                if active_count > 1 && att_count < (active_count + 1) / 2 {
-                    // Too few attestations — likely partitioned. Don't force-finalize.
+                // Only force-finalize if attesting validators hold 2/3+ stake,
+                // OR if we're in single-validator mode.
+                if active_count > 1 && !has_quorum_stake {
                     let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if force_count > 2 {
                         warn!(
                             height,
                             attestations = att_count,
                             active_validators = active_count,
-                            "partition detected — too few attestations, stopping production"
+                            "partition detected — insufficient stake for quorum, stopping production"
                         );
                         self.pending_blocks.write().unwrap().remove(&height);
                     } else {
@@ -1934,7 +1938,7 @@ impl ConsensusEngine {
                             height,
                             attestations = att_count,
                             active_validators = active_count,
-                            "waiting for more attestations before force-finalizing"
+                            "waiting for quorum stake before force-finalizing"
                         );
                     }
                     continue;

@@ -174,14 +174,20 @@ impl Mempool {
     /// Remove operations that were included in a finalized block.
     /// Called after any block is finalized (whether we proposed it or not)
     /// to prevent re-including already-executed transactions.
+    /// Removes by (sender, nonce) key — not full op comparison — so this
+    /// works even if the local mempool has a different fee variant.
     pub fn remove_finalized(&self, ops: &[UserOperation]) {
         let mut pool = self.inner.lock().unwrap();
         for op in ops {
             let key: DedupKey = (op.sender, op.nonce);
             if pool.seen.remove(&key) {
-                // Find and remove from the BTreeSet.
-                let entry = MempoolEntry { op: op.clone() };
-                if pool.entries.remove(&entry) {
+                // Find and remove from BTreeSet by matching (sender, nonce),
+                // not by full Ord comparison (which includes max_fee).
+                let to_remove = pool.entries.iter()
+                    .find(|e| e.op.sender == op.sender && e.op.nonce == op.nonce)
+                    .cloned();
+                if let Some(entry) = to_remove {
+                    pool.entries.remove(&entry);
                     if let Some(count) = pool.sender_counts.get_mut(&op.sender) {
                         *count = count.saturating_sub(1);
                         if *count == 0 {

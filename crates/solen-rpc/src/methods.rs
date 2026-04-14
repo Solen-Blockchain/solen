@@ -1650,24 +1650,63 @@ impl SolenApiServer for SolenRpc {
         let target_sender = match parse_account_id(&sender) {
             Ok(id) => id,
             Err(_) => {
-                // Reject the subscription with an error.
                 let _ = pending.reject(ErrorObjectOwned::owned(-32602, "invalid sender address", None::<()>)).await;
                 return Ok(());
             }
         };
+
+        // Backfill: check if the tx is already confirmed on-chain before subscribing.
+        // This prevents the subscription from hanging if the event was emitted before we subscribed.
+        let already_confirmed = {
+            let store = self.engine.store();
+            let store = store.read().unwrap();
+            let state = ReadonlyStateManager::new(store.as_ref());
+            state.get_account(&target_sender)
+                .ok()
+                .flatten()
+                .map(|a| a.nonce > nonce)
+                .unwrap_or(false)
+        };
+
+        if already_confirmed {
+            // Tx already landed — send immediate confirmation and close.
+            let sink = match pending.accept().await {
+                Ok(sink) => sink,
+                Err(_) => return Ok(()),
+            };
+            let notification = TxConfirmationNotification {
+                block_height: 0, // exact block unknown from nonce check
+                tx_hash: String::new(),
+                sender: account_to_base58(&target_sender),
+                nonce,
+                success: true,
+                gas_used: 0,
+            };
+            let msg = SubscriptionMessage::from_json(&notification).unwrap();
+            let _ = sink.send(msg).await;
+            return Ok(());
+        }
+
         let mut rx = self.event_tx.subscribe();
+        // Clone engine for re-check on lag.
+        let engine = self.engine.clone();
 
         tokio::spawn(async move {
             let sink = match pending.accept().await {
                 Ok(sink) => sink,
                 Err(_) => return,
             };
+
+            // TTL: auto-close after 5 minutes if tx never confirms.
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
+
             loop {
-                match rx.recv().await {
-                    Ok(NodeEvent::TxIncluded {
+                let recv = tokio::time::timeout_at(deadline, rx.recv()).await;
+                match recv {
+                    Ok(Ok(NodeEvent::TxIncluded {
                         block_height, tx_hash, sender, nonce: tx_nonce,
                         success, gas_used,
-                    }) if sender == target_sender && tx_nonce == nonce => {
+                    })) if sender == target_sender && tx_nonce == nonce => {
                         let notification = TxConfirmationNotification {
                             block_height,
                             tx_hash: hex_encode(&tx_hash),
@@ -1678,13 +1717,42 @@ impl SolenApiServer for SolenRpc {
                         };
                         let msg = SubscriptionMessage::from_json(&notification).unwrap();
                         let _ = sink.send(msg).await;
-                        break; // auto-close after confirmation
+                        break;
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(missed = n, "txConfirmation subscriber lagged");
+                    Ok(Ok(_)) => {}
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                        tracing::warn!(missed = n, "txConfirmation subscriber lagged — checking chain state");
+                        // Re-check chain state in case the tx landed during lag.
+                        let confirmed = {
+                            let store = engine.store();
+                            let store = store.read().unwrap();
+                            let state = ReadonlyStateManager::new(store.as_ref());
+                            state.get_account(&target_sender)
+                                .ok()
+                                .flatten()
+                                .map(|a| a.nonce > nonce)
+                                .unwrap_or(false)
+                        };
+                        if confirmed {
+                            let notification = TxConfirmationNotification {
+                                block_height: 0,
+                                tx_hash: String::new(),
+                                sender: account_to_base58(&target_sender),
+                                nonce,
+                                success: true,
+                                gas_used: 0,
+                            };
+                            let msg = SubscriptionMessage::from_json(&notification).unwrap();
+                            let _ = sink.send(msg).await;
+                            break;
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                    Err(_) => {
+                        // TTL expired — close subscription.
+                        tracing::debug!("txConfirmation subscription timed out after 5 minutes");
+                        break;
+                    }
                 }
             }
         });

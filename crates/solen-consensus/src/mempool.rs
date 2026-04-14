@@ -76,7 +76,7 @@ impl Mempool {
 
     /// Maximum serialized size of a single operation (256 KB).
     /// Prevents memory exhaustion from operations with huge code or args.
-    const MAX_OP_SIZE: usize = 256 * 1024;
+    const MAX_OP_SIZE: usize = 8 * 1024 * 1024; // 8 MB — supports up to 4MB contract deploys
 
     /// Add an operation to the mempool. Returns false if pool is full, duplicate,
     /// or if the operation is a system-reserved intent operation.

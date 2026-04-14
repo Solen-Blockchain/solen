@@ -1913,10 +1913,6 @@ impl ConsensusEngine {
                 let att_count = atts.get(&height).map(|a| a.len()).unwrap_or(0);
                 let vs = self.validator_set.read().unwrap();
                 let active_count = vs.active_count();
-                let att_ids: Vec<_> = atts.get(&height)
-                    .map(|a| a.iter().map(|att| att.validator_id).collect())
-                    .unwrap_or_default();
-                let have_quorum_stake = vs.has_quorum(&att_ids);
                 drop(vs);
                 drop(atts);
 

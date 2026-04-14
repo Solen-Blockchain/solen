@@ -33,7 +33,7 @@ pub async fn start_rpc_server(
     let server = Server::builder()
         .set_http_middleware(tower::ServiceBuilder::new().layer(cors))
         .max_connections(100)
-        .max_request_body_size(1024 * 1024) // 1 MB max request
+        .max_request_body_size(10 * 1024 * 1024) // 10 MB max request (supports ~4MB contract deploys)
         .max_response_body_size(100 * 1024 * 1024) // 100 MB max response
         .build(addr)
         .await

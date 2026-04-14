@@ -47,6 +47,14 @@ struct Cli {
     /// Max concurrent submissions
     #[arg(long, default_value_t = 20)]
     concurrency: usize,
+
+    /// Contract ID to call instead of doing transfers (hex or base58)
+    #[arg(long)]
+    contract: Option<String>,
+
+    /// Method name for contract calls
+    #[arg(long, default_value = "call")]
+    method: String,
 }
 
 #[tokio::main]
@@ -127,6 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("  All senders funded.");
 
+    // Parse contract target if specified.
+    let contract_target: Option<[u8; 32]> = cli.contract.as_ref().map(|c| {
+        parse_account_id(c).expect("invalid contract address")
+    });
+    let bench_method = cli.method.clone();
+
     // Now blast transactions.
     let total_txs = cli.senders * cli.txs_per_sender;
     let submitted = Arc::new(AtomicU64::new(0));
@@ -154,6 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let submitted = submitted.clone();
         let accepted = accepted.clone();
         let rejected = rejected.clone();
+        let contract_target = contract_target;
+        let bench_method = bench_method.clone();
 
         // Get starting nonce for this sender.
         let start_nonce = get_next_nonce(&client, &rpc, &sender_id).await.unwrap_or(0);
@@ -170,14 +186,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let kp = Keypair::from_seed(&sender_seed);
             for i in 0..txs {
                 let _permit = sem.acquire().await.unwrap();
+                let action = if let Some(target) = contract_target {
+                    Action::Call {
+                        target,
+                        method: bench_method.clone(),
+                        args: vec![],
+                    }
+                } else {
+                    Action::Transfer {
+                        to: recipient,
+                        amount: 1,
+                    }
+                };
                 let mut op = UserOperation {
                     sender: sender_id,
                     nonce: start_nonce + i as u64,
-                    actions: vec![Action::Transfer {
-                        to: recipient,
-                        amount: 1, // 1 base unit
-                    }],
-                    max_fee: 100_000,
+                    actions: vec![action],
+                    max_fee: 1_000_000,
                     signature: vec![],
                 };
                 sign_op(&mut op, &kp, chain_id);
@@ -356,6 +381,34 @@ async fn wait_for_height(client: &reqwest::Client, rpc: &str, target: u64) -> Re
         if h >= target { return Ok(()); }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+fn parse_account_id(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    // Try hex first.
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(hex_to_bytes(s)?);
+    }
+    // Base58 decode.
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut result = [0u8; 32];
+    let mut digits: Vec<u8> = Vec::new();
+    for &c in s.as_bytes() {
+        let idx = ALPHABET.iter().position(|&a| a == c)
+            .ok_or_else(|| format!("invalid base58 character: {}", c as char))? as u8;
+        let mut carry = idx as u32;
+        for d in digits.iter_mut().rev() {
+            carry += (*d as u32) * 58;
+            *d = (carry & 0xFF) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            digits.insert(0, (carry & 0xFF) as u8);
+            carry >>= 8;
+        }
+    }
+    let offset = 32usize.saturating_sub(digits.len());
+    result[offset..].copy_from_slice(&digits[..digits.len().min(32)]);
+    Ok(result)
 }
 
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {

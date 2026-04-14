@@ -1,1 +1,0 @@
-/home/michael/solen/examples/contracts/attack/target/wasm32-unknown-unknown/release/solen_attack_contracts.wasm: /home/michael/solen/crates/solen-contract-sdk/src/lib.rs /home/michael/solen/examples/contracts/attack/src/lib.rs

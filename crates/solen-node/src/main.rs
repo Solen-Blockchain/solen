@@ -1257,6 +1257,7 @@ async fn main() -> anyhow::Result<()> {
         // Reset AFTER mesh warmup so stalled_for doesn't start at 30+ seconds.
         // This prevents all validators from thinking they're backup proposers at genesis.
         let mut last_finalized_at = std::time::Instant::now();
+        let mut last_proposed_at = std::time::Instant::now();
 
         loop {
             poll.tick().await;
@@ -1290,6 +1291,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Track when new blocks finalize (from any source).
+            // Only reset the proposal timer for stalled_for tracking,
+            // NOT for min_interval — we want to propose as soon as it's
+            // our turn after a peer's block, not wait an extra block_time.
             let current_height = engine_clone.height();
             if current_height > last_finalized_height {
                 last_finalized_height = current_height;
@@ -1332,8 +1336,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Enforce minimum interval since last finalized block.
-            if last_finalized_at.elapsed() < min_interval {
+            // Enforce minimum interval since last proposal to prevent spamming.
+            // Uses proposal time, not finalization time — otherwise attestation
+            // round-trips add to the effective block time.
+            if last_proposed_at.elapsed() < min_interval {
                 continue;
             }
 
@@ -1544,6 +1550,7 @@ async fn main() -> anyhow::Result<()> {
 
             if should_propose {
                 let produced = engine_clone.produce_block();
+                last_proposed_at = std::time::Instant::now();
                 last_finalized_at = std::time::Instant::now();
 
                 // Broadcast the proposed block with full operations.

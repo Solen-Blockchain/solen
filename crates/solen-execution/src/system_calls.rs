@@ -835,6 +835,137 @@ fn execute_bridge_call(
                 }
             }
         }
+        "bridge_to_base" => {
+            // Bridge SOLEN to Base chain. Locks SOLEN in the bridge contract
+            // and emits an event for the relayer to mint wSOLEN on Base.
+            // args: base_recipient[20] + amount[16]
+            if args.len() < 36 {
+                return err("invalid args: need base_recipient[20] + amount[16]");
+            }
+            let mut base_recipient = [0u8; 20];
+            base_recipient.copy_from_slice(&args[0..20]);
+            let amount = match read_u128(args, 20) {
+                Some(a) => a,
+                None => return err("invalid args: bad amount"),
+            };
+            if amount == 0 {
+                return err("amount must be > 0");
+            }
+
+            // Deduct from sender, credit to bridge contract (locked).
+            let mut state = StateManager::new(store);
+            match state.require_account(sender) {
+                Ok(mut acct) => {
+                    if acct.balance < amount + MIN_FEE_RESERVE {
+                        return err("insufficient balance for bridge (need fee reserve)");
+                    }
+                    acct.balance -= amount;
+                    let _ = state.save_account(&acct);
+                }
+                Err(e) => return err(&e.to_string()),
+            }
+            // Credit bridge contract balance (vault).
+            match state.get_account(&BRIDGE_ADDRESS) {
+                Ok(Some(mut bridge_acct)) => {
+                    bridge_acct.balance = bridge_acct.balance.saturating_add(amount);
+                    let _ = state.save_account(&bridge_acct);
+                }
+                _ => {
+                    // Refund on failure.
+                    if let Ok(mut acct) = state.require_account(sender) {
+                        acct.balance = acct.balance.saturating_add(amount);
+                        let _ = state.save_account(&acct);
+                    }
+                    return err("bridge account not found");
+                }
+            }
+
+            // Emit event: bridge_deposit with sender[32] + base_recipient[20] + amount[16]
+            let mut event_data = Vec::with_capacity(68);
+            event_data.extend_from_slice(sender);
+            event_data.extend_from_slice(&base_recipient);
+            event_data.extend_from_slice(&amount.to_le_bytes());
+            events.push(Event {
+                emitter: BRIDGE_ADDRESS,
+                topic: b"bridge_deposit".to_vec(),
+                data: event_data,
+            });
+
+            Ok(())
+        }
+        "bridge_from_base" => {
+            // Release SOLEN from the bridge vault to a Solen recipient.
+            // Called by the relayer when wSOLEN is burned on Base.
+            // args: recipient[32] + amount[16] + base_tx_hash[32]
+            // Only the bridge relayer (sequencer) should call this.
+            if args.len() < 80 {
+                return err("invalid args: need recipient[32] + amount[16] + base_tx_hash[32]");
+            }
+            let recipient = match read_account_id(args, 0) {
+                Some(id) => id,
+                None => return err("invalid args: bad recipient"),
+            };
+            let amount = match read_u128(args, 32) {
+                Some(a) => a,
+                None => return err("invalid args: bad amount"),
+            };
+            let mut base_tx_hash = [0u8; 32];
+            base_tx_hash.copy_from_slice(&args[48..80]);
+
+            // Check this tx hasn't been processed already (prevent replay).
+            let processed_key = {
+                let mut k = b"bridge_processed/".to_vec();
+                k.extend_from_slice(&base_tx_hash);
+                k
+            };
+            if store.get(&processed_key).ok().flatten().is_some() {
+                return err("bridge release already processed");
+            }
+
+            // Debit bridge contract, credit recipient.
+            let mut state = StateManager::new(store);
+            match state.get_account(&BRIDGE_ADDRESS) {
+                Ok(Some(mut bridge_acct)) => {
+                    if bridge_acct.balance < amount {
+                        return err("bridge vault insufficient balance");
+                    }
+                    bridge_acct.balance -= amount;
+                    let _ = state.save_account(&bridge_acct);
+                }
+                _ => return err("bridge account not found"),
+            }
+
+            // Credit recipient (create account if needed).
+            let mut recipient_acct = state.get_account(&recipient)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| solen_types::account::Account {
+                    id: recipient,
+                    code_hash: [0u8; 32],
+                    auth_methods: vec![],
+                    nonce: 0,
+                    balance: 0,
+                });
+            recipient_acct.balance = recipient_acct.balance.saturating_add(amount);
+            let _ = state.save_account(&recipient_acct);
+            drop(state);
+
+            // Mark as processed.
+            let _ = store.put(&processed_key, &[1]);
+
+            // Emit event.
+            let mut event_data = Vec::with_capacity(80);
+            event_data.extend_from_slice(&recipient);
+            event_data.extend_from_slice(&amount.to_le_bytes());
+            event_data.extend_from_slice(&base_tx_hash);
+            events.push(Event {
+                emitter: BRIDGE_ADDRESS,
+                topic: b"bridge_release".to_vec(),
+                data: event_data,
+            });
+
+            Ok(())
+        }
         "register_vault" => {
             let rollup_id = match read_u64(args, 0) {
                 Some(id) => id,

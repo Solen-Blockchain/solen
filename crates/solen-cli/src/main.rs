@@ -190,6 +190,16 @@ enum Commands {
         from: String,
     },
 
+    /// Bridge SOLEN to Base chain (locks SOLEN, relayer mints wSOLEN on Base)
+    BridgeToBase {
+        /// Your key name
+        from: String,
+        /// Base chain recipient address (0x...)
+        base_address: String,
+        /// Amount in SOLEN (e.g., 100 or 100.5)
+        amount: String,
+    },
+
     /// Transfer tokens between accounts
     Transfer {
         /// Sender key name (must exist in keystore)
@@ -394,6 +404,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Unjail { from } => {
             commands::cmd_unjail(&rpc, &from, chain_id).await?
+        }
+        Commands::BridgeToBase { from, base_address, amount } => {
+            commands::cmd_bridge_to_base(&rpc, &from, &base_address, &amount, chain_id).await?
         }
         Commands::Transfer { from, to, amount } => {
             let base = parse_solen_amount(&amount)?;

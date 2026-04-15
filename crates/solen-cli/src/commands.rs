@@ -643,6 +643,91 @@ pub async fn cmd_unjail(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()
     Ok(())
 }
 
+// ── Bridge ─────────────────────────────────────────────────────
+
+pub async fn cmd_bridge_to_base(
+    rpc: &RpcClient,
+    from: &str,
+    base_address: &str,
+    amount_str: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+
+    // Parse Base address (20 bytes, 0x-prefixed).
+    let base_hex = base_address.strip_prefix("0x").unwrap_or(base_address);
+    if base_hex.len() != 40 {
+        anyhow::bail!("invalid Base address: expected 40 hex chars (20 bytes), got {}", base_hex.len());
+    }
+    let base_bytes = hex_decode(base_hex)?;
+
+    // Parse amount (SOLEN -> base units).
+    let amount = parse_solen_amount(amount_str)?;
+
+    // Build args: base_recipient[20] + amount[16]
+    let mut args = Vec::with_capacity(36);
+    args.extend_from_slice(&base_bytes);
+    args.extend_from_slice(&amount.to_le_bytes());
+
+    let bridge_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x03; // Bridge system contract
+        t
+    };
+
+    let sender_hex = account_to_base58(&sender_id);
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
+        actions: vec![Action::Call {
+            target: bridge_addr,
+            method: "bridge_to_base".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let sim = rpc.simulate_operation(op_json.clone()).await?;
+    if !sim.success {
+        println!("Simulation failed: {}", sim.error.unwrap_or_default());
+        return Ok(());
+    }
+
+    println!("Simulated OK. Bridging {} SOLEN to Base address {}...", amount_str, base_address);
+
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Bridge deposit submitted.");
+        println!("  From:         {} ({})", from, sender_hex);
+        println!("  To (Base):    {}", base_address);
+        println!("  Amount:       {} SOLEN", amount_str);
+        println!("\nThe relayer will mint wSOLEN on Base once this transaction is finalized.");
+    } else {
+        println!("Rejected: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+fn parse_solen_amount(s: &str) -> Result<u128> {
+    const DECIMALS: u128 = 100_000_000; // 1 SOLEN = 1e8 base units
+    if let Some(dot_pos) = s.find('.') {
+        let whole: u128 = s[..dot_pos].parse()?;
+        let frac_str = &s[dot_pos + 1..];
+        let frac_len = frac_str.len().min(8);
+        let frac: u128 = frac_str[..frac_len].parse()?;
+        let multiplier = 10u128.pow(8 - frac_len as u32);
+        Ok(whole * DECIMALS + frac * multiplier)
+    } else {
+        let whole: u128 = s.parse()?;
+        Ok(whole * DECIMALS)
+    }
+}
+
 // ── Balance ─────────────────────────────────────────────────────
 
 pub async fn cmd_balance(rpc: &RpcClient, account: &str) -> Result<()> {

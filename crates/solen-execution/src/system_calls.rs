@@ -864,21 +864,19 @@ fn execute_bridge_call(
                 }
                 Err(e) => return err(&e.to_string()),
             }
-            // Credit bridge contract balance (vault).
-            match state.get_account(&BRIDGE_ADDRESS) {
-                Ok(Some(mut bridge_acct)) => {
-                    bridge_acct.balance = bridge_acct.balance.saturating_add(amount);
-                    let _ = state.save_account(&bridge_acct);
-                }
-                _ => {
-                    // Refund on failure.
-                    if let Ok(mut acct) = state.require_account(sender) {
-                        acct.balance = acct.balance.saturating_add(amount);
-                        let _ = state.save_account(&acct);
-                    }
-                    return err("bridge account not found");
-                }
-            }
+            // Credit bridge contract balance (vault). Create account if it doesn't exist.
+            let mut bridge_acct = state.get_account(&BRIDGE_ADDRESS)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| solen_types::account::Account {
+                    id: BRIDGE_ADDRESS,
+                    code_hash: [0u8; 32],
+                    auth_methods: vec![],
+                    nonce: 0,
+                    balance: 0,
+                });
+            bridge_acct.balance = bridge_acct.balance.saturating_add(amount);
+            let _ = state.save_account(&bridge_acct);
 
             // Emit event: bridge_deposit with sender[32] + base_recipient[20] + amount[16]
             let mut event_data = Vec::with_capacity(68);

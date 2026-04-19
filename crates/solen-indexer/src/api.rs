@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, Query, State};
-use axum::response::Json;
+use axum::response::{Json, IntoResponse};
 use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/rollups", get(get_rollups))
         .route("/api/rollups/:rollup_id", get(get_rollup))
         .route("/api/rollups/:rollup_id/batches", get(get_rollup_batches))
+        .route("/api/totalsupply", get(get_total_supply))
+        .route("/api/circulatingsupply", get(get_circulating_supply))
         .with_state(state)
 }
 
@@ -617,6 +619,65 @@ async fn get_rollup_batches(
     }
 
     Json(vec![])
+}
+
+fn format_supply(raw: u128) -> String {
+    let whole = raw / 100_000_000;
+    let frac = raw % 100_000_000;
+    if frac == 0 { format!("{whole}") } else { format!("{whole}.{frac:08}") }
+}
+
+async fn get_total_supply(State(state): State<ApiState>) -> impl IntoResponse {
+    let engine = match &state.engine {
+        Some(e) => e,
+        None => return "0".to_string(),
+    };
+    let store = engine.store();
+    let store = store.read().unwrap();
+    let total = match store.get(b"__total_supply__") {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&data[..16]);
+            u128::from_le_bytes(buf)
+        }
+        _ => 0,
+    };
+    format_supply(total)
+}
+
+async fn get_circulating_supply(State(state): State<ApiState>) -> impl IntoResponse {
+    let engine = match &state.engine {
+        Some(e) => e,
+        None => return "0".to_string(),
+    };
+    let store = engine.store();
+    let store = store.read().unwrap();
+
+    let total = match store.get(b"__total_supply__") {
+        Ok(Some(data)) if data.len() >= 16 => {
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&data[..16]);
+            u128::from_le_bytes(buf)
+        }
+        _ => 0,
+    };
+
+    use solen_types::system::*;
+    let non_circ_addrs = [
+        TREASURY_ADDRESS, STAKING_POOL_ADDRESS, ECOSYSTEM_FUND_ADDRESS,
+        COMMUNITY_ADDRESS, LIQUIDITY_ADDRESS, TEAM_POOL_ADDRESS,
+        INVESTOR_POOL_ADDRESS, BRIDGE_ADDRESS, VESTING_ADDRESS,
+    ];
+    let state_mgr = solen_execution::state::ReadonlyStateManager::new(store.as_ref());
+    let non_circ: u128 = non_circ_addrs.iter()
+        .map(|addr| state_mgr.get_balance(addr).unwrap_or(0))
+        .sum();
+
+    let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+    let total_staked: u128 = staking.validators.iter().map(|v| v.total_stake()).sum();
+
+    let circulating = total.saturating_sub(non_circ).saturating_sub(total_staked);
+    format_supply(circulating)
 }
 
 pub async fn start_explorer_api(

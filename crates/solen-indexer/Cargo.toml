@@ -9,6 +9,7 @@ license.workspace = true
 solen-types = { workspace = true }
 solen-consensus = { workspace = true }
 solen-system-contracts = { workspace = true }
+solen-execution = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

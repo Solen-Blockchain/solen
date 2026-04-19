@@ -1293,13 +1293,13 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Track when new blocks finalize (from any source).
-            // Only reset the proposal timer for stalled_for tracking,
-            // NOT for min_interval — we want to propose as soon as it's
-            // our turn after a peer's block, not wait an extra block_time.
+            // Reset both timers so the next proposer waits a full block_time
+            // from the last finalized block, enforcing 6s global block time.
             let current_height = engine_clone.height();
             if current_height > last_finalized_height {
                 last_finalized_height = current_height;
                 last_finalized_at = std::time::Instant::now();
+                last_proposed_at = std::time::Instant::now();
 
                 // Check if block time was changed by governance.
                 if current_height % 100 == 0 {

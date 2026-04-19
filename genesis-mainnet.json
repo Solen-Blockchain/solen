@@ -1,0 +1,75 @@
+{
+  "chain_name": "Solen Mainnet",
+  "chain_id": 1,
+  "block_time_ms": 6000,
+  "epoch_length": 100,
+  "governance_voting_period": 201600,
+  "validators": [
+    {
+      "name": "validator-1",
+      "public_key_hex": "14b0699ca8c69bfacbf58e275b63d37c35a846b0cc9502e0d4f4afc5a41a2ded",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-2",
+      "public_key_hex": "2291df20073deb181300e34c64b519c79dbab931e74b7111db472c54ea56f3b4",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-3",
+      "public_key_hex": "92d9843050a76c59dcf4d0dfaa76723d371e3f8876c6f7f261c44cfe19c7fe9c",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-4",
+      "public_key_hex": "92fb79190bfbbc77c272ba0a5e610adbd8b8f124ad259bf8a7daa2995affc3d7",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-5",
+      "public_key_hex": "383dd7fdfbfefd3706f27d65ed9721371160e14674bf3ee7e37118fe913ccf31",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-6",
+      "public_key_hex": "192253800dc54f2447ec39a2ccd0c780ca21b6ef2b4ed9bdd4839468387c889d",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-7",
+      "public_key_hex": "49b5f504a1c55dd3399cd84a4fd0150a44f5dc9775badb80e0ac7d39a150f73d",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-8",
+      "public_key_hex": "2a46819346e5b3ce3eda67901568634619879cfb59b5cc02713641314fe68d2b",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-9",
+      "public_key_hex": "b32c4075c7c5dc3e42fc053163795116d828373a9941ea4ce77f92b4cc65d0a9",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-10",
+      "public_key_hex": "81051845c1340e6c74818ba92c67fee65b9533d805fbc54e9dd381851b8826b6",
+      "stake": 100000000000000
+    },
+    {
+      "name": "validator-11",
+      "public_key_hex": "53f999ec6e738fa274a24d38add1b36430834aa77d8958957d2121a3f1c554a7",
+      "stake": 100000000000000
+    }
+  ],
+  "accounts": [
+    {
+      "name": "liquidity",
+      "id_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123",
+      "balance": 0,
+      "public_key_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123"
+    }
+  ],
+  "faucet": null,
+  "team_vesting": [],
+  "investor_vesting": []
+}

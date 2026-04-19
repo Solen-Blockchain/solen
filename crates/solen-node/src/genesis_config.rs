@@ -227,11 +227,14 @@ impl GenesisConfig {
 
         use solen_types::system::*;
         let d = 100_000_000u128; // 10^8 decimals
+        let is_mainnet = self.chain_id == 1;
 
-        // Treasury: 400M SOLEN
+        // Treasury: 589M on mainnet (400M base + 89M validator reserve + 100M investor reserve)
+        // 400M on testnet/devnet.
+        let treasury_amount = if is_mainnet { 589_000_000 } else { 400_000_000 };
         genesis_accounts.push(GenesisAccount {
             id: TREASURY_ADDRESS,
-            balance: 400_000_000 * d,
+            balance: treasury_amount * d,
             auth_methods: vec![],
         });
 
@@ -270,21 +273,41 @@ impl GenesisConfig {
             auth_methods: vec![],
         });
 
-        // Investor pool: 100M SOLEN (held by vesting contract)
+        // Investor pool: 100M SOLEN on testnet (held by vesting contract).
+        // On mainnet, investor funds are in Treasury for governance-approved distribution.
+        if !is_mainnet {
+            genesis_accounts.push(GenesisAccount {
+                id: INVESTOR_POOL_ADDRESS,
+                balance: 100_000_000 * d,
+                auth_methods: vec![],
+            });
+        }
+
+        // Bridge contract account (empty at genesis, funded on first bridge deposit).
+        if is_mainnet {
+            genesis_accounts.push(GenesisAccount {
+                id: BRIDGE_ADDRESS,
+                balance: 0,
+                auth_methods: vec![],
+            });
+        }
+
+        // Vesting contract account — holds tokens for all vesting schedules.
+        // On mainnet, funded by add_vesting which deducts from Treasury.
+        // On testnet, genesis vesting schedules are pre-funded.
         genesis_accounts.push(GenesisAccount {
-            id: INVESTOR_POOL_ADDRESS,
-            balance: 100_000_000 * d,
+            id: VESTING_ADDRESS,
+            balance: 0,
             auth_methods: vec![],
         });
 
         info!(
-            treasury = 400_000_000u64,
+            treasury = treasury_amount,
             staking_pool = 500_000_000u64,
             ecosystem = 300_000_000u64,
             community = 200_000_000u64,
             liquidity = 100_000_000u64,
             team_vesting = 300_000_000u64,
-            investor_vesting = 100_000_000u64,
             "fund accounts initialized"
         );
 

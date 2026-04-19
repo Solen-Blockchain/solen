@@ -43,10 +43,10 @@ pub struct SlashingEvidence {
     pub reason: SlashingReason,
 }
 
-/// Downtime threshold: jail after this many consecutive missed blocks.
-/// 500 blocks = ~16 minutes at 2s block time. Gives validators enough
-/// time to restart and resync without getting jailed.
-pub const DOWNTIME_THRESHOLD: u64 = 500;
+/// Downtime threshold: jail after this many consecutive missed proposer slots.
+/// With 11 validators at 6s blocks: 100 missed slots ≈ 1,100 blocks ≈ ~1.8 hours.
+/// Enough time for a VPS reboot + resync without getting jailed.
+pub const DOWNTIME_THRESHOLD: u64 = 100;
 
 /// Check for double-sign: two different block headers signed by the same proposer
 /// at the same height. Verifies proposer signatures when present to prevent

@@ -83,6 +83,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/rollups/:rollup_id/batches", get(get_rollup_batches))
         .route("/api/totalsupply", get(get_total_supply))
         .route("/api/circulatingsupply", get(get_circulating_supply))
+        .route("/api/richlist", get(get_richlist))
         .with_state(state)
 }
 
@@ -678,6 +679,74 @@ async fn get_circulating_supply(State(state): State<ApiState>) -> impl IntoRespo
 
     let circulating = total.saturating_sub(non_circ).saturating_sub(total_staked);
     format_supply(circulating)
+}
+
+#[derive(Serialize)]
+struct RichListEntry {
+    rank: usize,
+    address: String,
+    balance: String,
+    staked: String,
+    total: String,
+}
+
+async fn get_richlist(
+    State(state): State<ApiState>,
+    Query(params): Query<PaginationParams>,
+) -> Json<Vec<RichListEntry>> {
+    let engine = match &state.engine {
+        Some(e) => e,
+        None => return Json(vec![]),
+    };
+    let store = engine.store();
+    let store = store.read().unwrap();
+
+    // Scan all accounts
+    let entries = match store.scan_prefix(b"acc/") {
+        Ok(e) => e,
+        Err(_) => return Json(vec![]),
+    };
+
+    // Load staking info for validator lookup
+    let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+
+    let mut accounts: Vec<([u8; 32], u128, u128)> = Vec::new();
+    for (key, value) in &entries {
+        if key.len() != 36 { continue; } // "acc/" + 32 bytes
+        if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(value) {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&key[4..]);
+            let staked = staking.validators.iter()
+                .find(|v| v.id == id)
+                .map(|v| v.self_stake)
+                .unwrap_or(0);
+            let total = account.balance + staked;
+            if total > 0 {
+                accounts.push((id, account.balance, staked));
+            }
+        }
+    }
+
+    // Sort by total (balance + staked) descending
+    accounts.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+
+    let limit = params.limit.min(100);
+    let result: Vec<RichListEntry> = accounts.iter()
+        .skip(params.offset)
+        .take(limit)
+        .enumerate()
+        .map(|(i, (id, balance, staked))| {
+            RichListEntry {
+                rank: params.offset + i + 1,
+                address: account_to_base58(id),
+                balance: balance.to_string(),
+                staked: staked.to_string(),
+                total: (balance + staked).to_string(),
+            }
+        })
+        .collect();
+
+    Json(result)
 }
 
 pub async fn start_explorer_api(

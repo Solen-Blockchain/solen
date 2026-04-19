@@ -1251,17 +1251,23 @@ async fn main() -> anyhow::Result<()> {
             info!(seconds = wait, "waiting for P2P mesh to form...");
             tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
 
-            let is_validator = {
+            let is_val = {
                 let vs = engine_clone.validator_set();
                 let vs = vs.read().unwrap();
                 vs.all().iter().any(|v| v.id == engine_clone.validator_id())
             };
-            if is_validator {
+            if is_val {
                 info!("starting block production (active validator)");
             } else {
                 info!("starting consensus listener (non-validator node)");
             }
         }
+
+        let is_validator = {
+            let vs = engine_clone.validator_set();
+            let vs = vs.read().unwrap();
+            vs.all().iter().any(|v| v.id == engine_clone.validator_id())
+        };
 
         // Poll frequently but enforce block_time between proposals.
         let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(200));
@@ -1514,9 +1520,8 @@ async fn main() -> anyhow::Result<()> {
 
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
-            // Skip partition check at genesis (height 0) — the chain must produce its
-            // first blocks to bootstrap, and peers need time to form the P2P mesh.
-            if engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
+            // Skip for non-validators (they never produce) and at genesis (height 0).
+            if is_validator && engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
                 tracing::warn!("skipping production — partition detected");
                 // Clear all peer bans to allow reconnection.
                 if let Some(ref handle) = net_for_blocks {

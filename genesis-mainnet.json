@@ -67,9 +67,40 @@
       "id_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123",
       "balance": 0,
       "public_key_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123"
+    },
+    {
+      "name": "team-member-1",
+      "balance": 0,
+      "public_key_hex": "f0056b094c3df08b7646917f84e54bd4bbbef6b9e75cfe8aef25a1ee55f23dd7"
+    },
+    {
+      "name": "team-member-2",
+      "balance": 0,
+      "public_key_hex": "86796feb11dbf58ac6b73e4604945ebd59de4c11bd5fcef32d364ea22441ecf2"
+    },
+    {
+      "name": "team-member-3",
+      "balance": 0,
+      "public_key_hex": "2fd6909dbc75beaf1eb18271f17dff0ffa1849543478fbc44231930ec903693a"
     }
   ],
   "faucet": null,
-  "team_vesting": [],
+  "team_vesting": [
+    {
+      "name": "team-member-1",
+      "public_key_hex": "f0056b094c3df08b7646917f84e54bd4bbbef6b9e75cfe8aef25a1ee55f23dd7",
+      "amount": 10000000000000000
+    },
+    {
+      "name": "team-member-2",
+      "public_key_hex": "86796feb11dbf58ac6b73e4604945ebd59de4c11bd5fcef32d364ea22441ecf2",
+      "amount": 10000000000000000
+    },
+    {
+      "name": "team-member-3",
+      "public_key_hex": "2fd6909dbc75beaf1eb18271f17dff0ffa1849543478fbc44231930ec903693a",
+      "amount": 10000000000000000
+    }
+  ],
   "investor_vesting": []
 }

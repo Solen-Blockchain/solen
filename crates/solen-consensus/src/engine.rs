@@ -1996,7 +1996,9 @@ impl ConsensusEngine {
 
                 // Only force-finalize if attesting validators hold 2/3+ stake,
                 // OR if we're in single-validator mode.
-                if active_count > 1 && !has_quorum_stake {
+                // Allow the first few blocks (height <= 3) without quorum to bootstrap
+                // the chain — peers need time to connect and exchange blocks.
+                if active_count > 1 && !has_quorum_stake && height > 3 {
                     let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if force_count > 2 {
                         warn!(

@@ -1502,7 +1502,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
-            if engine_clone.is_likely_partitioned() {
+            // Skip partition check at genesis (height 0) — the chain must produce its
+            // first blocks to bootstrap, and peers need time to form the P2P mesh.
+            if engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
                 tracing::warn!("skipping production — partition detected");
                 // Clear all peer bans to allow reconnection.
                 if let Some(ref handle) = net_for_blocks {

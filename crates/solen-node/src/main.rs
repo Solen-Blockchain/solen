@@ -1085,7 +1085,14 @@ async fn main() -> anyhow::Result<()> {
                                 "synced blocks from peer"
                             );
                         } else if !blocks.is_empty() {
-                            // Received blocks but none applied — likely a fork mismatch.
+                            // Received blocks but none applied.
+                            // Only count as fork mismatch if some blocks were at the right height
+                            // (not just stale duplicates from other peers responding late).
+                            let had_relevant_blocks = blocks.iter().any(|b| b.header.height >= our_height + 1);
+                            if !had_relevant_blocks {
+                                // All blocks were below our height — just stale duplicates, not a fork.
+                                continue;
+                            }
                             sync_fail_count += 1;
                             if sync_fail_count >= 3 {
                                 if !fork_mismatch_detected {

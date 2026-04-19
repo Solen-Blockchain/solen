@@ -9,7 +9,7 @@ use solen_consensus::engine::ConsensusEngine;
 use thiserror::Error;
 use tracing::info;
 
-use crate::methods::{SolenApiServer, SolenRpc};
+use crate::methods::{SolenApiServer, SolenRpc, TxBroadcaster};
 
 #[derive(Debug, Error)]
 pub enum RpcError {
@@ -21,6 +21,15 @@ pub enum RpcError {
 pub async fn start_rpc_server(
     addr: SocketAddr,
     engine: Arc<ConsensusEngine>,
+) -> Result<jsonrpsee::server::ServerHandle, RpcError> {
+    start_rpc_server_with_broadcast(addr, engine, None).await
+}
+
+/// Start the JSON-RPC server with optional P2P broadcast for submitted transactions.
+pub async fn start_rpc_server_with_broadcast(
+    addr: SocketAddr,
+    engine: Arc<ConsensusEngine>,
+    broadcaster: Option<TxBroadcaster>,
 ) -> Result<jsonrpsee::server::ServerHandle, RpcError> {
     // Per-IP rate limiting should be configured at the reverse proxy layer
     // (nginx/caddy) in production. The RPC server provides global rate limits
@@ -39,7 +48,7 @@ pub async fn start_rpc_server(
         .await
         .map_err(|e| RpcError::Server(e.to_string()))?;
 
-    let rpc = SolenRpc::new(engine);
+    let rpc = SolenRpc::new(engine, broadcaster);
     let handle = server.start(rpc.into_rpc());
 
     info!(%addr, "JSON-RPC server started (HTTP + WebSocket)");

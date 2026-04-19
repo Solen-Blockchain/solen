@@ -489,19 +489,25 @@ impl RpcRateLimiter {
     }
 }
 
+/// Callback for broadcasting submitted transactions to the P2P network.
+/// Without this, transactions submitted to non-validator RPC nodes stay in
+/// the local mempool and never reach a block producer.
+pub type TxBroadcaster = Arc<dyn Fn(solen_types::transaction::UserOperation) + Send + Sync>;
+
 /// Implementation of the Solen RPC API.
 pub struct SolenRpc {
     engine: Arc<ConsensusEngine>,
     snapshot_cache: Arc<std::sync::Mutex<Option<CachedSnapshot>>>,
     rate_limiter: Arc<RpcRateLimiter>,
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
+    tx_broadcaster: Option<TxBroadcaster>,
 }
 
 /// Minimum blocks between snapshot regenerations.
 const SNAPSHOT_CACHE_INTERVAL: u64 = 500;
 
 impl SolenRpc {
-    pub fn new(engine: Arc<ConsensusEngine>) -> Self {
+    pub fn new(engine: Arc<ConsensusEngine>, tx_broadcaster: Option<TxBroadcaster>) -> Self {
         let cache = Arc::new(std::sync::Mutex::new(None));
 
         // Pre-warm snapshot cache in background after the node settles.
@@ -555,6 +561,7 @@ impl SolenRpc {
             snapshot_cache: cache,
             rate_limiter: Arc::new(RpcRateLimiter::new()),
             event_tx,
+            tx_broadcaster,
         }
     }
 }
@@ -741,7 +748,13 @@ impl SolenApiServer for SolenRpc {
             }
         }
 
-        let accepted = self.engine.mempool().submit(op);
+        let accepted = self.engine.mempool().submit(op.clone());
+        if accepted {
+            // Broadcast to P2P network so validators can include it in blocks.
+            if let Some(ref broadcast) = self.tx_broadcaster {
+                broadcast(op);
+            }
+        }
         Ok(SubmitResult {
             accepted,
             error: if accepted {

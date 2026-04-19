@@ -1204,7 +1204,18 @@ async fn main() -> anyhow::Result<()> {
 
     // --- RPC server ---
     let rpc_addr: SocketAddr = format!("127.0.0.1:{}", rpc_port).parse()?;
-    let _rpc_handle = start_rpc_server(rpc_addr, engine.clone()).await?;
+    // Wire up P2P broadcast for submitted transactions so non-validator
+    // RPC nodes can relay transactions to the validators.
+    let tx_broadcaster: Option<solen_rpc::methods::TxBroadcaster> = net_handle.as_ref().map(|h| {
+        let handle = h.clone();
+        let broadcaster: solen_rpc::methods::TxBroadcaster = std::sync::Arc::new(move |op| {
+            handle.broadcast(NetworkMessage::NewTransaction(op));
+        });
+        broadcaster
+    });
+    let _rpc_handle = solen_rpc::server::start_rpc_server_with_broadcast(
+        rpc_addr, engine.clone(), tx_broadcaster
+    ).await?;
 
     // --- Event indexer + Explorer API ---
     let index_store = std::sync::Arc::new(std::sync::RwLock::new(

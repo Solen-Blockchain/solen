@@ -794,6 +794,11 @@ async fn main() -> anyhow::Result<()> {
                         // Validate and accept the block.
                         if engine_for_p2p.accept_block(&header, &operations) {
                             // Block accepted from a peer — we have connectivity.
+                            // Clear fork mismatch state — this peer is on the right fork.
+                            if fork_mismatch_detected {
+                                tracing::info!(height = header.height, "valid block received — clearing fork mismatch state");
+                                fork_mismatch_detected = false;
+                            }
                             // Reset partition state so block production can resume.
                             if engine_for_p2p.is_likely_partitioned() {
                                 tracing::info!(
@@ -807,7 +812,6 @@ async fn main() -> anyhow::Result<()> {
                             // Force-finalize it immediately — the network already has
                             // consensus on this block, no need to wait for attestations.
                             if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                                fork_mismatch_detected = false; // valid peer found
                                 // Clear stale pending blocks from BEFORE this height.
                                 engine_for_p2p.clear_stale_pending(header.height.saturating_sub(1));
                                 // Immediately finalize the accepted block (executes it).
@@ -1083,10 +1087,11 @@ async fn main() -> anyhow::Result<()> {
                         } else if !blocks.is_empty() {
                             // Received blocks but none applied — likely a fork mismatch.
                             sync_fail_count += 1;
-                            if sync_fail_count >= 1 {
+                            if sync_fail_count >= 3 {
                                 if !fork_mismatch_detected {
                                     tracing::warn!(
                                         our_height,
+                                        sync_fail_count,
                                         "sync blocks rejected — peers on a different fork, disabling sync from announcements"
                                     );
                                 }

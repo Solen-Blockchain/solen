@@ -688,6 +688,24 @@ struct RichListEntry {
     balance: String,
     staked: String,
     total: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+}
+
+fn system_account_label(id: &[u8; 32]) -> Option<&'static str> {
+    use solen_types::system::*;
+    match *id {
+        _ if *id == TREASURY_ADDRESS => Some("Treasury"),
+        _ if *id == STAKING_POOL_ADDRESS => Some("Staking Rewards Pool"),
+        _ if *id == ECOSYSTEM_FUND_ADDRESS => Some("Ecosystem Fund"),
+        _ if *id == COMMUNITY_ADDRESS => Some("Community & Airdrops"),
+        _ if *id == LIQUIDITY_ADDRESS => Some("Liquidity & Market Making"),
+        _ if *id == TEAM_POOL_ADDRESS => Some("Team Vesting Pool"),
+        _ if *id == INVESTOR_POOL_ADDRESS => Some("Investor Pool"),
+        _ if *id == BRIDGE_ADDRESS => Some("Bridge Vault"),
+        _ if *id == VESTING_ADDRESS => Some("Vesting Contract"),
+        _ => None,
+    }
 }
 
 async fn get_richlist(
@@ -736,12 +754,16 @@ async fn get_richlist(
         .take(limit)
         .enumerate()
         .map(|(i, (id, balance, staked))| {
+            let label = system_account_label(id).map(|s| s.to_string()).or_else(|| {
+                if *staked > 0 { Some("Validator".to_string()) } else { None }
+            });
             RichListEntry {
                 rank: params.offset + i + 1,
                 address: account_to_base58(id),
                 balance: balance.to_string(),
                 staked: staked.to_string(),
                 total: (balance + staked).to_string(),
+                label,
             }
         })
         .collect();

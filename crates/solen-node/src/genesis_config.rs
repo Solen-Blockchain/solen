@@ -248,24 +248,27 @@ impl GenesisConfig {
             auth_methods: vec![],
         });
 
-        // Ecosystem fund: 300M SOLEN (available immediately)
+        // Ecosystem fund: 300M SOLEN
+        // On mainnet, funded via user wallet in genesis config (not system address).
         genesis_accounts.push(GenesisAccount {
             id: ECOSYSTEM_FUND_ADDRESS,
-            balance: 300_000_000 * d,
+            balance: if is_mainnet { 0 } else { 300_000_000 * d },
             auth_methods: vec![],
         });
 
-        // Community & airdrops: 200M SOLEN (available immediately)
+        // Community & airdrops: 200M SOLEN
+        // On mainnet, funded via user wallet in genesis config (not system address).
         genesis_accounts.push(GenesisAccount {
             id: COMMUNITY_ADDRESS,
-            balance: 200_000_000 * d,
+            balance: if is_mainnet { 0 } else { 200_000_000 * d },
             auth_methods: vec![],
         });
 
-        // Liquidity & market making: 100M SOLEN (available immediately)
+        // Liquidity & market making: 100M SOLEN
+        // On mainnet, funded via user wallet in genesis config (not system address).
         genesis_accounts.push(GenesisAccount {
             id: LIQUIDITY_ADDRESS,
-            balance: 100_000_000 * d,
+            balance: if is_mainnet { 0 } else { 100_000_000 * d },
             auth_methods: vec![],
         });
 

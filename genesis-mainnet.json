@@ -64,8 +64,7 @@
   "accounts": [
     {
       "name": "liquidity",
-      "id_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123",
-      "balance": 0,
+      "balance": 10000000000000000,
       "public_key_hex": "f01e99414dba8f83a6214ae020637807c2b230c1897f2490f81afc03feb89123"
     },
     {
@@ -82,6 +81,16 @@
       "name": "team-member-3",
       "balance": 0,
       "public_key_hex": "2fd6909dbc75beaf1eb18271f17dff0ffa1849543478fbc44231930ec903693a"
+    },
+    {
+      "name": "ecosystem",
+      "balance": 30000000000000000,
+      "public_key_hex": "738a9064e1cd4aa981440f9d4b66a203eaebe36925cca849470c31c0dd13ff57"
+    },
+    {
+      "name": "community",
+      "balance": 20000000000000000,
+      "public_key_hex": "ad4d2e42aac3048707c0aa2d46ac302937d02f1e3ceca04160defe24db117d25"
     }
   ],
   "faucet": null,

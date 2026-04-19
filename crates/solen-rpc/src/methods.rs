@@ -24,6 +24,8 @@ pub struct AccountInfo {
     pub balance: String,
     pub nonce: u64,
     pub code_hash: String,
+    /// Amount staked by this account (if validator). "0" for non-validators.
+    pub staked: String,
 }
 
 /// Block info returned by the RPC.
@@ -636,11 +638,19 @@ impl SolenApiServer for SolenRpc {
                 ErrorObjectOwned::owned(-32001, "account not found", None::<()>)
             })?;
 
+        // Look up staked amount from the staking contract.
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let staked = staking.validators.iter()
+            .find(|v| v.id == id)
+            .map(|v| v.self_stake)
+            .unwrap_or(0);
+
         Ok(AccountInfo {
             id: account_to_base58(&account.id),
             balance: account.balance.to_string(),
             nonce: account.nonce,
             code_hash: hex_encode(&account.code_hash),
+            staked: staked.to_string(),
         })
     }
 

@@ -141,6 +141,9 @@ impl GenesisConfig {
         let mut genesis_accounts = Vec::new();
 
         // Add validator accounts. Account ID = public key.
+        // Balance is 0 — the stake is tracked in the staking contract,
+        // not in the account balance (consistent with post-genesis staking
+        // which deducts from balance on registration).
         for v in &self.validators {
             let public_key = resolve_validator_pubkey(v)?;
 
@@ -149,7 +152,7 @@ impl GenesisConfig {
 
             genesis_accounts.push(GenesisAccount {
                 id,
-                balance: v.stake,
+                balance: 0,
                 auth_methods: vec![AuthMethod::Ed25519 { public_key }],
             });
 
@@ -312,9 +315,12 @@ impl GenesisConfig {
         );
 
         // Compute and store total supply before applying genesis.
-        let total_supply: u128 = genesis_accounts.iter().map(|a| a.balance).sum();
+        // Includes both account balances and staked amounts (which are
+        // deducted from balances but tracked in the staking contract).
+        let total_staked: u128 = self.validators.iter().map(|v| v.stake).sum();
+        let total_supply: u128 = genesis_accounts.iter().map(|a| a.balance).sum::<u128>() + total_staked;
         let _ = store.put(b"__total_supply__", &total_supply.to_le_bytes());
-        info!(total_supply, "total supply stored");
+        info!(total_supply, total_staked, "total supply stored");
 
         apply_genesis(store, genesis_accounts)?;
 

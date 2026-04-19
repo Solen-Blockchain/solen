@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(
-                "info,libp2p_gossipsub::peer_score=error,libp2p_gossipsub::behaviour=warn"
+                "info,libp2p_gossipsub::peer_score=error,libp2p_gossipsub::behaviour=warn,libp2p_kad::handler=error"
             )),
         )
         .init();
@@ -1541,14 +1541,14 @@ async fn main() -> anyhow::Result<()> {
                 || (!already_pending && is_backup);
 
             if !should_propose && stalled_for.as_secs() > 5 {
-                tracing::warn!(
+                tracing::debug!(
                     height = next_height,
                     is_proposer,
                     already_pending,
                     is_backup,
                     active_count,
                     stalled_secs = stalled_for.as_secs(),
-                    "stalled — not proposing"
+                    "waiting for proposer"
                 );
             }
 

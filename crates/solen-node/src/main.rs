@@ -842,7 +842,7 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             // Block not accepted — if it's ahead of us, request sync.
                             let our_h = engine_for_p2p.height();
-                            if header.height > our_h + 1 && !fork_mismatch_detected {
+                            if header.height > our_h + 1 {
                                 tracing::info!(
                                     our_height = our_h,
                                     block_height = header.height,

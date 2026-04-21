@@ -630,7 +630,9 @@ impl ConsensusEngine {
 
                 if let Some(sol) = solution {
                     // Build a system call operation: sender calls INTENT_ADDRESS.fulfill(...)
-                    // Args: intent_id[8] + solver[32] + claimed_tip[16] + num_transfers[4] + (to[32]+amount[16])*N
+                    // Args: intent_id[8] + solver[32] + claimed_tip[16]
+                    //       + num_transfers[4] + (to[32]+amount[16])*N
+                    //       + num_constraints[4] + encoded_constraints
                     let mut args = Vec::new();
                     args.extend_from_slice(&intent.id.to_le_bytes()); // intent_id[8]
                     args.extend_from_slice(&sol.solver);              // solver[32]
@@ -652,6 +654,58 @@ impl ConsensusEngine {
 
                     // Patch transfer count.
                     args[count_pos..count_pos+4].copy_from_slice(&transfer_count.to_le_bytes());
+
+                    // Encode constraints so the system call can verify them.
+                    // Format: num_constraints[4] + (type[1] + constraint_data)*N
+                    //   type 0 = MinBalance: account[32] + min_amount[16]
+                    //   type 1 = MaxSpend:   account[32] + max_amount[16]
+                    //   type 2 = RequireTransfer: from[32] + to[32] + min_amount[16]
+                    //   type 3 = RequireCall: target[32] + method_len[4] + method_bytes
+                    let num_constraints = intent.constraints.len() as u32;
+                    args.extend_from_slice(&num_constraints.to_le_bytes());
+                    for c in &intent.constraints {
+                        use solen_intents::types::Constraint;
+                        match c {
+                            Constraint::MinBalance { account, min_amount } => {
+                                args.push(0);
+                                args.extend_from_slice(account);
+                                args.extend_from_slice(&min_amount.to_le_bytes());
+                            }
+                            Constraint::MaxSpend { account, max_amount } => {
+                                args.push(1);
+                                args.extend_from_slice(account);
+                                args.extend_from_slice(&max_amount.to_le_bytes());
+                            }
+                            Constraint::RequireTransfer { from, to, min_amount } => {
+                                args.push(2);
+                                args.extend_from_slice(from);
+                                args.extend_from_slice(to);
+                                args.extend_from_slice(&min_amount.to_le_bytes());
+                            }
+                            Constraint::RequireCall { target, method } => {
+                                args.push(3);
+                                args.extend_from_slice(target);
+                                let method_bytes = method.as_bytes();
+                                args.extend_from_slice(&(method_bytes.len() as u32).to_le_bytes());
+                                args.extend_from_slice(method_bytes);
+                            }
+                            Constraint::CrossChainSwap {
+                                input_amount, min_output, destination_chain,
+                                destination_address, output_token,
+                            } => {
+                                args.push(4); // type 4 = CrossChainSwap
+                                args.extend_from_slice(&input_amount.to_le_bytes());
+                                args.extend_from_slice(&min_output.to_le_bytes());
+                                args.extend_from_slice(&destination_chain.to_le_bytes());
+                                args.extend_from_slice(destination_address);
+                                args.extend_from_slice(output_token);
+                            }
+                            Constraint::Custom { .. } => {
+                                // Custom constraints require verifier contract execution —
+                                // skip for now, will be added with WASM verifier support.
+                            }
+                        }
+                    }
 
                     ops.push(solen_types::transaction::UserOperation {
                         sender: intent.sender,

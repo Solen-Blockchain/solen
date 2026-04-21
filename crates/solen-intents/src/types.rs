@@ -27,6 +27,22 @@ pub enum Constraint {
         target: AccountId,
         method: String,
     },
+    /// Cross-chain swap: lock SOLEN in bridge, solver delivers output on destination chain.
+    /// The L1 verifies the lock; the solver fronts output to the user on the destination chain.
+    CrossChainSwap {
+        /// Amount of SOLEN the user is willing to spend (locked in bridge).
+        input_amount: u128,
+        /// Minimum output the solver must deliver on the destination chain.
+        /// Denominated in destination token base units.
+        min_output: u128,
+        /// Destination chain ID (8453 = Base).
+        destination_chain: u64,
+        /// Recipient address on the destination chain (20 bytes for EVM, zero-padded to 32).
+        destination_address: [u8; 32],
+        /// Output token on destination (contract address, zero-padded to 32).
+        /// Zero = native ETH, otherwise ERC-20 address.
+        output_token: [u8; 32],
+    },
     /// Custom constraint evaluated by a verifier contract.
     Custom {
         verifier: AccountId,

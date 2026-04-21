@@ -174,6 +174,13 @@ pub enum ConstraintInfo {
     MaxSpend { account: String, max_amount: String },
     RequireTransfer { from: String, to: String, min_amount: String },
     RequireCall { target: String, method: String },
+    CrossChainSwap {
+        input_amount: String,
+        min_output: String,
+        destination_chain: u64,
+        destination_address: String,
+        output_token: String,
+    },
     Custom { verifier: String, data: String },
 }
 
@@ -1855,6 +1862,32 @@ fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
             target: parse_account_id(target)?,
             method: method.clone(),
         }),
+        ConstraintInfo::CrossChainSwap {
+            input_amount, min_output, destination_chain,
+            destination_address, output_token,
+        } => {
+            let mut dest_addr = [0u8; 32];
+            let dest_bytes = hex_decode(destination_address)?;
+            let start = 32 - dest_bytes.len().min(32);
+            dest_addr[start..].copy_from_slice(&dest_bytes[..dest_bytes.len().min(32)]);
+
+            let mut out_token = [0u8; 32];
+            let token_bytes = hex_decode(output_token)?;
+            let start = 32 - token_bytes.len().min(32);
+            out_token[start..].copy_from_slice(&token_bytes[..token_bytes.len().min(32)]);
+
+            Ok(Constraint::CrossChainSwap {
+                input_amount: input_amount.parse().map_err(|_| {
+                    ErrorObjectOwned::owned(-32602, "invalid input_amount", None::<()>)
+                })?,
+                min_output: min_output.parse().map_err(|_| {
+                    ErrorObjectOwned::owned(-32602, "invalid min_output", None::<()>)
+                })?,
+                destination_chain: *destination_chain,
+                destination_address: dest_addr,
+                output_token: out_token,
+            })
+        }
         ConstraintInfo::Custom { verifier, data } => Ok(Constraint::Custom {
             verifier: parse_account_id(verifier)?,
             data: hex_decode(data)?,
@@ -1880,6 +1913,16 @@ fn constraint_to_info(c: &Constraint) -> ConstraintInfo {
         Constraint::RequireCall { target, method } => ConstraintInfo::RequireCall {
             target: account_to_base58(target),
             method: method.clone(),
+        },
+        Constraint::CrossChainSwap {
+            input_amount, min_output, destination_chain,
+            destination_address, output_token,
+        } => ConstraintInfo::CrossChainSwap {
+            input_amount: input_amount.to_string(),
+            min_output: min_output.to_string(),
+            destination_chain: *destination_chain,
+            destination_address: hex_encode(destination_address),
+            output_token: hex_encode(output_token),
         },
         Constraint::Custom { verifier, data } => ConstraintInfo::Custom {
             verifier: account_to_base58(verifier),

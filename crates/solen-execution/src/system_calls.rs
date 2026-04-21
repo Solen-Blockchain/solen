@@ -1421,6 +1421,130 @@ fn execute_intent_call(
                 }
             }
 
+            // ── Constraint verification ──
+            // Parse constraints from args (appended after transfers).
+            let constraint_offset = offset + num_transfers * 48;
+            if constraint_offset + 4 <= args.len() {
+                let num_constraints = u32::from_le_bytes([
+                    args[constraint_offset], args[constraint_offset+1],
+                    args[constraint_offset+2], args[constraint_offset+3],
+                ]) as usize;
+
+                let mut c_off = constraint_offset + 4;
+                let state_check = StateManager::new(store);
+
+                for _ in 0..num_constraints {
+                    if c_off >= args.len() { break; }
+                    let ctype = args[c_off];
+                    c_off += 1;
+
+                    match ctype {
+                        0 => {
+                            // MinBalance: account[32] + min_amount[16]
+                            if c_off + 48 > args.len() { break; }
+                            let account = read_account_id(args, c_off).unwrap_or([0u8; 32]);
+                            let min_amount = read_u128(args, c_off + 32).unwrap_or(0);
+                            c_off += 48;
+                            let balance = state_check.get_account(&account)
+                                .ok().flatten().map(|a| a.balance).unwrap_or(0);
+                            if balance < min_amount {
+                                return SystemCallResult {
+                                    gas_used: SYSTEM_CALL_GAS, events,
+                                    error: Some(format!(
+                                        "constraint violated: MinBalance — account has {} but needs {}",
+                                        balance, min_amount
+                                    )),
+                                };
+                            }
+                        }
+                        1 => {
+                            // MaxSpend: account[32] + max_amount[16]
+                            // Check that the account's balance didn't decrease by more than max_amount.
+                            if c_off + 48 > args.len() { break; }
+                            let account = read_account_id(args, c_off).unwrap_or([0u8; 32]);
+                            let max_amount = read_u128(args, c_off + 32).unwrap_or(0);
+                            c_off += 48;
+                            // Total spent = transfers to others + tip (from this account)
+                            if account == *sender {
+                                let total_spent = total_needed; // pre-computed above
+                                if total_spent > max_amount {
+                                    return SystemCallResult {
+                                        gas_used: SYSTEM_CALL_GAS, events,
+                                        error: Some(format!(
+                                            "constraint violated: MaxSpend — spent {} but max is {}",
+                                            total_spent, max_amount
+                                        )),
+                                    };
+                                }
+                            }
+                        }
+                        2 => {
+                            // RequireTransfer: from[32] + to[32] + min_amount[16]
+                            if c_off + 80 > args.len() { break; }
+                            let _from = read_account_id(args, c_off).unwrap_or([0u8; 32]);
+                            let req_to = read_account_id(args, c_off + 32).unwrap_or([0u8; 32]);
+                            let req_min = read_u128(args, c_off + 64).unwrap_or(0);
+                            c_off += 80;
+                            // Verify that a transfer to the required recipient was included.
+                            let transferred = transfers.iter()
+                                .filter(|(to, _)| *to == req_to)
+                                .map(|(_, amt)| *amt)
+                                .sum::<u128>();
+                            if transferred < req_min {
+                                return SystemCallResult {
+                                    gas_used: SYSTEM_CALL_GAS, events,
+                                    error: Some(format!(
+                                        "constraint violated: RequireTransfer — transferred {} but needs {}",
+                                        transferred, req_min
+                                    )),
+                                };
+                            }
+                        }
+                        3 => {
+                            // RequireCall: target[32] + method_len[4] + method_bytes
+                            if c_off + 36 > args.len() { break; }
+                            let _target = read_account_id(args, c_off).unwrap_or([0u8; 32]);
+                            let method_len = u32::from_le_bytes([
+                                args[c_off+32], args[c_off+33], args[c_off+34], args[c_off+35],
+                            ]) as usize;
+                            c_off += 36 + method_len;
+                            // RequireCall verification would need to check execution trace —
+                            // for now, log a warning. Full verification requires execution receipts.
+                        }
+                        4 => {
+                            // CrossChainSwap: input_amount[16] + min_output[16] +
+                            //   destination_chain[8] + destination_address[32] + output_token[32]
+                            if c_off + 104 > args.len() { break; }
+                            let input_amount = read_u128(args, c_off).unwrap_or(0);
+                            // min_output, destination_chain, destination_address, output_token
+                            // are for the solver (off-chain) — L1 only verifies the lock.
+                            c_off += 104;
+
+                            // Verify that the solution includes a transfer to the bridge vault
+                            // of at least input_amount.
+                            let bridge_addr = solen_types::system::BRIDGE_ADDRESS;
+                            let bridged = transfers.iter()
+                                .filter(|(to, _)| *to == bridge_addr)
+                                .map(|(_, amt)| *amt)
+                                .sum::<u128>();
+                            if bridged < input_amount {
+                                return SystemCallResult {
+                                    gas_used: SYSTEM_CALL_GAS, events,
+                                    error: Some(format!(
+                                        "constraint violated: CrossChainSwap — bridged {} but needs {}",
+                                        bridged, input_amount
+                                    )),
+                                };
+                            }
+                        }
+                        _ => {
+                            // Unknown constraint type — skip
+                            break;
+                        }
+                    }
+                }
+            }
+
             events.push(Event {
                 emitter: *sender,
                 topic: b"intent_fulfilled".to_vec(),

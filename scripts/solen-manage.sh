@@ -12,7 +12,7 @@ DATA_DIR="${SOLEN_DATA_DIR:-/opt/solen/data}"
 BINARY="${SOLEN_DIR}/target/release/solen-node"
 CLI="${SOLEN_DIR}/target/release/solen"
 SERVICE_NAME="solen-node"
-DEFAULT_NETWORK="testnet"
+DEFAULT_NETWORK="mainnet"
 NETWORK="${SOLEN_NETWORK:-$DEFAULT_NETWORK}"
 
 # Network defaults

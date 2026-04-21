@@ -11,15 +11,15 @@ Interactive tools for setting up, running, and managing Solen validator nodes.
 ## Usage
 
 ```bash
-# Default network (testnet)
+# Default network (mainnet)
 ./scripts/solen-manage.sh
 
 # Specify network
-./scripts/solen-manage.sh --network mainnet
 ./scripts/solen-manage.sh --network devnet
+./scripts/solen-manage.sh --network testnet
 
 # Or via environment variable
-SOLEN_NETWORK=testnet ./scripts/solen-manage.sh
+SOLEN_NETWORK=devnet ./scripts/solen-manage.sh
 ```
 
 ## Menu Options
@@ -76,7 +76,7 @@ SOLEN_NETWORK=testnet ./scripts/solen-manage.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SOLEN_NETWORK` | `testnet` | Network to connect to (devnet, testnet, mainnet) |
+| `SOLEN_NETWORK` | `mainnet` | Network to connect to (devnet, testnet, mainnet) |
 | `SOLEN_DIR` | Parent of scripts/ | Path to the solen repository root |
 | `SOLEN_DATA_DIR` | `/opt/solen/data` | Default data directory for the node |
 

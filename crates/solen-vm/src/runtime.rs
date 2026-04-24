@@ -203,6 +203,7 @@ fn run_instance(
         events: data.ctx.events.clone(),
         storage: data.ctx.storage.clone(),
         native_transfers: data.ctx.native_transfers.clone(),
+        pending_calls: data.ctx.pending_calls.clone(),
     })
 }
 
@@ -214,6 +215,7 @@ pub struct ExecutionResult {
     pub events: Vec<HostEvent>,
     pub storage: std::collections::HashMap<Vec<u8>, Vec<u8>>,
     pub native_transfers: Vec<crate::host::NativeTransfer>,
+    pub pending_calls: Vec<crate::host::PendingCall>,
 }
 
 /// Safely get memory from a caller. Returns None if memory export is missing.
@@ -465,6 +467,73 @@ fn register_host_functions_typed(
                     None => return,
                 };
                 let _ = safe_write(&mut caller, &memory, out_ptr as usize, &id);
+            },
+        )
+        .map_err(|e| VmError::HostError(e.to_string()))?;
+
+    // queue_contract_call(target_ptr, method_ptr, method_len, args_ptr, args_len) -> i32
+    // Queues a contract→contract call. The call is dispatched by the executor
+    // AFTER this contract's `call()` returns, so it cannot re-enter the
+    // queueing contract. The dispatched call sees `caller = this contract_id`.
+    // Returns 0 on success, -1 on invalid memory / method length / cap reached.
+    linker
+        .func_wrap(
+            "env",
+            "queue_contract_call",
+            |mut caller: Caller<'_, StoreData>,
+             target_ptr: i32,
+             method_ptr: i32,
+             method_len: i32,
+             args_ptr: i32,
+             args_len: i32|
+             -> i32 {
+                // Per-execution cap: prevents a single call from fanning out
+                // an unbounded number of sub-calls. Matches the native_transfers cap.
+                const MAX_PENDING_CALLS: usize = 16;
+                // Hard limits on method/args size to bound memory + downstream gas.
+                const MAX_METHOD_LEN: usize = 64;
+                const MAX_ARGS_LEN: usize = 16 * 1024;
+
+                let mlen = match checked_len(method_len) { Some(n) => n, None => return -1 };
+                let alen = match checked_len(args_len) { Some(n) => n, None => return -1 };
+                if mlen == 0 || mlen > MAX_METHOD_LEN { return -1; }
+                if alen > MAX_ARGS_LEN { return -1; }
+
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+
+                let mut target = [0u8; 32];
+                if !safe_read(&caller, &memory, target_ptr as usize, &mut target) {
+                    return -1;
+                }
+                let mut method = vec![0u8; mlen];
+                if !safe_read(&caller, &memory, method_ptr as usize, &mut method) {
+                    return -1;
+                }
+                let mut args = vec![0u8; alen];
+                if alen > 0 && !safe_read(&caller, &memory, args_ptr as usize, &mut args) {
+                    return -1;
+                }
+
+                // Charge fuel for queuing. Actual sub-call gas is charged
+                // when the executor dispatches the queued call.
+                let queue_cost = 5_000u64 + (mlen as u64 + alen as u64) * 10;
+                {
+                    let remaining = caller.get_fuel().unwrap_or(0);
+                    if remaining < queue_cost { return -1; }
+                    let _ = caller.set_fuel(remaining - queue_cost);
+                }
+
+                if caller.data().ctx.pending_calls.len() >= MAX_PENDING_CALLS {
+                    return -1;
+                }
+
+                caller.data_mut().ctx.pending_calls.push(
+                    crate::host::PendingCall { target, method, args }
+                );
+                0
             },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;

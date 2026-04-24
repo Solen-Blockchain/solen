@@ -892,6 +892,7 @@ impl SolenApiServer for SolenRpc {
             events: Vec::new(),
             return_data: Vec::new(),
             native_transfers: Vec::new(),
+            pending_calls: Vec::new(),
             msg_value: 0,
         };
 
@@ -1252,6 +1253,7 @@ impl SolenApiServer for SolenRpc {
                 events: Vec::new(),
                 return_data: Vec::new(),
                 native_transfers: Vec::new(),
+                pending_calls: Vec::new(),
                 msg_value: 0,
             };
 

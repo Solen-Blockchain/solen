@@ -29,6 +29,13 @@ extern "C" {
     fn transfer_native(to_ptr: i32, amount_ptr: i32) -> i32;
     fn get_self_id(out_ptr: i32);
     fn get_msg_value(out_ptr: i32);
+    fn queue_contract_call(
+        target_ptr: i32,
+        method_ptr: i32,
+        method_len: i32,
+        args_ptr: i32,
+        args_len: i32,
+    ) -> i32;
 }
 
 /// Low-level SDK functions for input/output.
@@ -91,6 +98,34 @@ pub mod sdk {
             get_msg_value(buf.as_mut_ptr() as i32);
         }
         u128::from_le_bytes(buf)
+    }
+
+    /// Queue a contract→contract call. The call is dispatched by the executor
+    /// AFTER this contract's `call()` returns — so it cannot re-enter the
+    /// queueing contract. The called contract sees `caller = self_id()`.
+    ///
+    /// Limits enforced by the VM:
+    /// - Max 16 queued calls per `call()` frame.
+    /// - Method name ≤ 64 bytes, non-empty.
+    /// - Args ≤ 16 KiB.
+    ///
+    /// If any queued call fails, the executor rolls back the whole
+    /// UserOperation (matching existing multi-Action semantics). The caller
+    /// therefore cannot observe or branch on sub-call results; this is the
+    /// intentional trade-off for the no-reentrancy guarantee.
+    ///
+    /// Returns `true` on successful enqueue, `false` on cap-reached or
+    /// invalid argument sizes.
+    pub fn queue_call(target: &[u8; 32], method: &[u8], args: &[u8]) -> bool {
+        unsafe {
+            queue_contract_call(
+                target.as_ptr() as i32,
+                method.as_ptr() as i32,
+                method.len() as i32,
+                args.as_ptr() as i32,
+                args.len() as i32,
+            ) == 0
+        }
     }
 }
 

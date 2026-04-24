@@ -928,111 +928,17 @@ impl BlockExecutor {
                 method,
                 args,
             } => {
-                // System contract calls are handled at the operation level.
-                // If we get here, it's a user contract call.
-                let target_account = state.require_account(target)?;
-
-                // If the account has no code, it's not a contract.
-                let zero_hash = [0u8; 32];
-                if target_account.code_hash == zero_hash {
-                    events.push(Event {
-                        emitter: *target,
-                        topic: format!("call:{method}").into_bytes(),
-                        data: args.clone(),
-                    });
-                    return Ok(CALL_BASE_GAS);
-                }
-
-                // Load the contract bytecode.
-                let bytecode = state
-                    .load_bytecode(&target_account.code_hash)?
-                    .ok_or_else(|| {
-                        ExecutionError::State(StateError::AccountNotFound(
-                            "bytecode not found".into(),
-                        ))
-                    })?;
-
-                // Load contract storage.
-                let contract_storage = state.load_contract_storage(target)?;
-
-                // Build input: method name + args.
-                let mut input = Vec::new();
-                input.extend_from_slice(method.as_bytes());
-                input.push(0); // null separator
-                input.extend_from_slice(args);
-
-                // Execute in the VM.
-                let ctx = solen_vm::host::HostContext::new(*sender, height)
-                    .with_contract_id(*target)
-                    .with_storage(contract_storage)
-                    .with_msg_value(msg_value);
-
-                match self.vm_runtime.execute(&target_account.code_hash, &bytecode, &input, ctx, None) {
-                    Ok(result) => {
-                        // Persist updated contract storage.
-                        state.save_contract_storage(target, &result.storage)?;
-
-                        // Process native SOLEN transfers from the contract.
-                        for transfer in &result.native_transfers {
-                            // Debit the contract's account.
-                            let mut contract_acct = state.require_account(target)?;
-                            if contract_acct.balance < transfer.amount {
-                                return Err(ExecutionError::State(StateError::AccountNotFound(
-                                    "contract insufficient balance for transfer".into(),
-                                )));
-                            }
-                            contract_acct.balance -= transfer.amount;
-                            state.save_account(&contract_acct)?;
-
-                            // Credit the recipient.
-                            match state.require_account(&transfer.to) {
-                                Ok(mut recipient) => {
-                                    recipient.balance = recipient.balance.saturating_add(transfer.amount);
-                                    state.save_account(&recipient)?;
-                                }
-                                Err(_) => {
-                                    // Recipient doesn't exist — create a new account.
-                                    let new_acct = solen_types::account::Account {
-                                        id: transfer.to,
-                                        balance: transfer.amount,
-                                        nonce: 0,
-                                        code_hash: [0u8; 32],
-                                        auth_methods: vec![],
-                                    };
-                                    state.save_account(&new_acct)?;
-                                }
-                            }
-
-                            events.push(Event {
-                                emitter: *target,
-                                topic: b"native_transfer".to_vec(),
-                                data: {
-                                    let mut d = Vec::with_capacity(48);
-                                    d.extend_from_slice(&transfer.to);
-                                    d.extend_from_slice(&transfer.amount.to_le_bytes());
-                                    d
-                                },
-                            });
-                        }
-
-                        // Convert VM events to execution events.
-                        for vm_event in &result.events {
-                            events.push(Event {
-                                emitter: *target,
-                                topic: vm_event.topic.clone(),
-                                data: vm_event.data.clone(),
-                            });
-                        }
-
-                        Ok(CALL_BASE_GAS + result.gas_used)
-                    }
-                    Err(solen_vm::VmError::OutOfGas) => {
-                        Err(ExecutionError::State(StateError::AccountNotFound(
-                            "out of gas".into(),
-                        )))
-                    }
-                    Err(e) => Err(ExecutionError::VmError(e)),
-                }
+                self.dispatch_contract_call(
+                    state,
+                    sender,
+                    target,
+                    method.as_bytes(),
+                    args,
+                    msg_value,
+                    height,
+                    events,
+                    0,
+                )
             }
             Action::SetAuth { auth_methods } => {
                 if auth_methods.is_empty() {
@@ -1119,6 +1025,164 @@ impl BlockExecutor {
                 Ok(DEPLOY_BASE_GAS)
             }
         }
+    }
+
+    /// Invoke a contract call — dispatches into the VM, persists storage,
+    /// processes queued native transfers and queued contract→contract calls.
+    ///
+    /// Used both by `Action::Call` (depth=0, caller=op sender) and by the
+    /// recursive dispatch of pending calls queued via `sdk::queue_call`
+    /// (depth>0, caller=queueing contract).
+    ///
+    /// Returns accumulated gas (this call + all recursively-dispatched
+    /// sub-calls). Propagates errors — which trigger the op's existing
+    /// multi-action rollback.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_contract_call(
+        &self,
+        state: &mut StateManager<'_>,
+        caller: &AccountId,
+        target: &AccountId,
+        method: &[u8],
+        args: &[u8],
+        msg_value: u128,
+        height: u64,
+        events: &mut Vec<Event>,
+        depth: u32,
+    ) -> Result<u64, ExecutionError> {
+        // Cap recursion from pending-call fan-out. Matches actor-style depth
+        // budgets in other chains. Each queued call can itself queue more,
+        // so this bounds the whole chain.
+        const MAX_CALL_DEPTH: u32 = 8;
+        if depth > MAX_CALL_DEPTH {
+            return Err(ExecutionError::State(StateError::AccountNotFound(
+                format!("call depth exceeded: {depth} > {MAX_CALL_DEPTH}"),
+            )));
+        }
+
+        let target_account = state.require_account(target)?;
+
+        // If the account has no code, it's not a contract.
+        let zero_hash = [0u8; 32];
+        if target_account.code_hash == zero_hash {
+            let method_str = String::from_utf8_lossy(method);
+            events.push(Event {
+                emitter: *target,
+                topic: format!("call:{method_str}").into_bytes(),
+                data: args.to_vec(),
+            });
+            return Ok(CALL_BASE_GAS);
+        }
+
+        let bytecode = state
+            .load_bytecode(&target_account.code_hash)?
+            .ok_or_else(|| {
+                ExecutionError::State(StateError::AccountNotFound("bytecode not found".into()))
+            })?;
+
+        let contract_storage = state.load_contract_storage(target)?;
+
+        // Build input: method name + null + args. Matches the dispatcher format
+        // every Solen contract already uses.
+        let mut input = Vec::with_capacity(method.len() + 1 + args.len());
+        input.extend_from_slice(method);
+        input.push(0);
+        input.extend_from_slice(args);
+
+        let ctx = solen_vm::host::HostContext::new(*caller, height)
+            .with_contract_id(*target)
+            .with_storage(contract_storage)
+            .with_msg_value(msg_value);
+
+        let result = match self.vm_runtime.execute(
+            &target_account.code_hash,
+            &bytecode,
+            &input,
+            ctx,
+            None,
+        ) {
+            Ok(r) => r,
+            Err(solen_vm::VmError::OutOfGas) => {
+                return Err(ExecutionError::State(StateError::AccountNotFound(
+                    "out of gas".into(),
+                )));
+            }
+            Err(e) => return Err(ExecutionError::VmError(e)),
+        };
+
+        state.save_contract_storage(target, &result.storage)?;
+
+        // Process native SOLEN transfers from the contract.
+        for transfer in &result.native_transfers {
+            let mut contract_acct = state.require_account(target)?;
+            if contract_acct.balance < transfer.amount {
+                return Err(ExecutionError::State(StateError::AccountNotFound(
+                    "contract insufficient balance for transfer".into(),
+                )));
+            }
+            contract_acct.balance -= transfer.amount;
+            state.save_account(&contract_acct)?;
+
+            match state.require_account(&transfer.to) {
+                Ok(mut recipient) => {
+                    recipient.balance = recipient.balance.saturating_add(transfer.amount);
+                    state.save_account(&recipient)?;
+                }
+                Err(_) => {
+                    let new_acct = solen_types::account::Account {
+                        id: transfer.to,
+                        balance: transfer.amount,
+                        nonce: 0,
+                        code_hash: [0u8; 32],
+                        auth_methods: vec![],
+                    };
+                    state.save_account(&new_acct)?;
+                }
+            }
+
+            events.push(Event {
+                emitter: *target,
+                topic: b"native_transfer".to_vec(),
+                data: {
+                    let mut d = Vec::with_capacity(48);
+                    d.extend_from_slice(&transfer.to);
+                    d.extend_from_slice(&transfer.amount.to_le_bytes());
+                    d
+                },
+            });
+        }
+
+        // Convert VM events to execution events.
+        for vm_event in &result.events {
+            events.push(Event {
+                emitter: *target,
+                topic: vm_event.topic.clone(),
+                data: vm_event.data.clone(),
+            });
+        }
+
+        let mut total_gas = CALL_BASE_GAS + result.gas_used;
+
+        // Drain queued contract→contract calls. Each runs with caller=this
+        // contract; any failure propagates, triggering the op's rollback.
+        // msg_value is 0 for queued calls (no pre-queued Transfer mechanism
+        // yet — can be added later if needed for SOLEN-attached sub-calls).
+        for pending in &result.pending_calls {
+            let sub_gas = self.dispatch_contract_call(
+                state,
+                target, // caller = the contract that queued
+                &pending.target,
+                &pending.method,
+                &pending.args,
+                0,
+                height,
+                events,
+                depth + 1,
+            )?;
+            total_gas = total_gas.saturating_add(sub_gas);
+        }
+
+        Ok(total_gas)
     }
 
     /// Simulate an operation without modifying state. Returns the receipt

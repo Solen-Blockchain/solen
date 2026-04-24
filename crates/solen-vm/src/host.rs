@@ -20,6 +20,12 @@ pub struct HostContext {
     /// Native SOLEN transfers initiated by the contract.
     /// Processed by the executor after WASM execution completes.
     pub native_transfers: Vec<NativeTransfer>,
+    /// Contract→contract calls queued via `sdk::queue_call`. Drained and
+    /// dispatched by the executor AFTER this contract's `call()` returns —
+    /// so they cannot re-enter the queueing contract. Each pending call runs
+    /// with `caller = this contract_id`, and can itself queue further calls
+    /// (subject to the executor's depth cap).
+    pub pending_calls: Vec<PendingCall>,
     /// Sum of preceding unconsumed `Action::Transfer { to: self }` amounts in
     /// the current UserOperation. Each `Action::Call` consumes and resets this
     /// counter at dispatch time, so it reflects exactly the native SOLEN moved
@@ -33,6 +39,15 @@ pub struct HostContext {
 pub struct NativeTransfer {
     pub to: AccountId,
     pub amount: u128,
+}
+
+/// A contract→contract call queued by a contract via host function.
+/// Dispatched by the executor after the queueing contract's `call()` returns.
+#[derive(Debug, Clone)]
+pub struct PendingCall {
+    pub target: AccountId,
+    pub method: Vec<u8>,
+    pub args: Vec<u8>,
 }
 
 /// An event emitted by a contract via host functions.
@@ -52,6 +67,7 @@ impl HostContext {
             events: Vec::new(),
             return_data: Vec::new(),
             native_transfers: Vec::new(),
+            pending_calls: Vec::new(),
             msg_value: 0,
         }
     }

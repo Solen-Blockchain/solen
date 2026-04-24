@@ -28,7 +28,7 @@ extern "C" {
     fn set_return_data(ptr: i32, len: i32);
     fn transfer_native(to_ptr: i32, amount_ptr: i32) -> i32;
     fn get_self_id(out_ptr: i32);
-    fn msg_value(out_ptr: i32);
+    fn get_msg_value(out_ptr: i32);
 }
 
 /// Low-level SDK functions for input/output.
@@ -88,7 +88,7 @@ pub mod sdk {
     pub fn msg_value() -> u128 {
         let mut buf = [0u8; 16];
         unsafe {
-            msg_value(buf.as_mut_ptr() as i32);
+            get_msg_value(buf.as_mut_ptr() as i32);
         }
         u128::from_le_bytes(buf)
     }

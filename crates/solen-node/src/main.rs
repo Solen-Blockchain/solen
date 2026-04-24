@@ -15,7 +15,6 @@ use solen_consensus::mempool::Mempool;
 use solen_crypto::Keypair;
 use solen_p2p::messages::NetworkMessage;
 use solen_p2p::network::{NetworkConfig, NetworkService};
-use solen_rpc::server::start_rpc_server;
 use solen_storage::StateStore;
 use solen_types::encoding::{account_to_base58, hex_encode as encoding_hex_encode};
 use tracing::{info, warn};

@@ -30,7 +30,7 @@ fn sign_op(kp: &Keypair, executor: &BlockExecutor, op: &mut UserOperation) {
 /// topic "mv". Data is the 16-byte u128 LE amount.
 const PROBE_CONTRACT_WAT: &str = r#"
 (module
-    (import "env" "msg_value" (func $msg_value (param i32)))
+    (import "env" "get_msg_value" (func $msg_value (param i32)))
     (import "env" "emit_event" (func $emit (param i32 i32 i32 i32)))
     (memory (export "memory") 1)
     (data (i32.const 16) "mv")

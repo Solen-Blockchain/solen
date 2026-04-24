@@ -433,14 +433,14 @@ fn register_host_functions_typed(
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
 
-    // msg_value(out_ptr: i32) — writes the u128 LE amount of native SOLEN
+    // get_msg_value(out_ptr: i32) — writes the u128 LE amount of native SOLEN
     // transferred to this contract in the current UserOperation (summed across
     // all unconsumed preceding Transfer actions since the last Call to self).
     // Stays constant throughout a single Call frame.
     linker
         .func_wrap(
             "env",
-            "msg_value",
+            "get_msg_value",
             |mut caller: Caller<'_, StoreData>, out_ptr: i32| {
                 let amount = caller.data().ctx.msg_value;
                 let memory = match get_memory(&mut caller) {

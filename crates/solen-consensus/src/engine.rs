@@ -524,7 +524,10 @@ impl ConsensusEngine {
         op: &UserOperation,
         store: &dyn solen_storage::StateStore,
     ) -> solen_execution::receipt::ExecutionReceipt {
-        self.executor.simulate(store, op)
+        // Simulate as if the op were included in the next block, so contracts
+        // reading `sdk::block_height()` see a realistic height.
+        let next_height = self.height().saturating_add(1);
+        self.executor.simulate(store, op, next_height)
     }
 
     pub fn height(&self) -> BlockHeight {

@@ -322,9 +322,9 @@ impl BlockExecutor {
         height: u64,
     ) -> BlockResult {
         let mut result = if operations.len() >= 200 {
-            self.execute_block_parallel(store, operations)
+            self.execute_block_parallel(store, operations, height)
         } else {
-            self.execute_block_sequential(store, operations)
+            self.execute_block_sequential(store, operations, height)
         };
 
         // Distribute epoch rewards deterministically as part of block execution.
@@ -344,12 +344,13 @@ impl BlockExecutor {
         &self,
         store: &mut dyn StateStore,
         operations: &[UserOperation],
+        height: u64,
     ) -> BlockResult {
         let mut receipts = Vec::with_capacity(operations.len());
         let mut total_gas = 0u64;
 
         for op in operations {
-            let receipt = self.execute_operation(store, op);
+            let receipt = self.execute_operation(store, op, height);
             total_gas += receipt.gas_used;
             receipts.push(receipt);
         }
@@ -370,6 +371,7 @@ impl BlockExecutor {
         &self,
         store: &mut dyn StateStore,
         operations: &[UserOperation],
+        height: u64,
     ) -> BlockResult {
         use rayon::prelude::*;
 
@@ -438,7 +440,7 @@ impl BlockExecutor {
                 }
             };
 
-            let mut receipt = self.execute_operation(store, op);
+            let mut receipt = self.execute_operation(store, op, height);
             receipt.auth_method = auth_method_name.to_string();
             total_gas += receipt.gas_used;
             receipts.push(receipt);
@@ -460,6 +462,7 @@ impl BlockExecutor {
         &self,
         store: &mut dyn StateStore,
         op: &UserOperation,
+        height: u64,
     ) -> ExecutionReceipt {
         let mut events = Vec::new();
         let mut gas_used = 0u64;
@@ -584,7 +587,7 @@ impl BlockExecutor {
             }
 
             let mut state = StateManager::new(store);
-            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, &mut events) {
+            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, height, &mut events) {
                 Ok(gas) => gas_used += gas,
                 Err(e) => {
                     action_failed = Some(e.to_string());
@@ -894,6 +897,7 @@ impl BlockExecutor {
         sender: &AccountId,
         action: &Action,
         msg_value: u128,
+        height: u64,
         events: &mut Vec<Event>,
     ) -> Result<u64, ExecutionError> {
         match action {
@@ -958,7 +962,7 @@ impl BlockExecutor {
                 input.extend_from_slice(args);
 
                 // Execute in the VM.
-                let ctx = solen_vm::host::HostContext::new(*sender, 0)
+                let ctx = solen_vm::host::HostContext::new(*sender, height)
                     .with_contract_id(*target)
                     .with_storage(contract_storage)
                     .with_msg_value(msg_value);
@@ -1124,9 +1128,10 @@ impl BlockExecutor {
         &self,
         store: &dyn StateStore,
         op: &UserOperation,
+        height: u64,
     ) -> ExecutionReceipt {
         let mut overlay = solen_storage::OverlayStore::new(store);
-        self.execute_operation(&mut overlay, op)
+        self.execute_operation(&mut overlay, op, height)
     }
 }
 
@@ -1636,7 +1641,7 @@ mod tests {
         };
         sign_op(&kp, &executor, &mut op);
 
-        let receipt = executor.simulate(&store, &op);
+        let receipt = executor.simulate(&store, &op, 0);
         assert!(receipt.success);
 
         // State should be unchanged.

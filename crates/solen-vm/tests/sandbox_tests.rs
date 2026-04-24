@@ -62,13 +62,7 @@ fn host_function_negative_length_does_not_panic() {
     )"#).unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
-    let ctx = HostContext {
-        caller: [0u8; 32],
-        block_height: 1,
-        storage: std::collections::HashMap::new(),
-        events: Vec::new(),
-        return_data: Vec::new(),
-    };
+    let ctx = HostContext::new([0u8; 32], 1);
 
     // Must not panic — should return an error or trap.
     let result = vm.execute(&code_hash, &wasm, &[], ctx, None);
@@ -92,13 +86,7 @@ fn host_function_huge_length_does_not_panic() {
     )"#).unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
-    let ctx = HostContext {
-        caller: [0u8; 32],
-        block_height: 1,
-        storage: std::collections::HashMap::new(),
-        events: Vec::new(),
-        return_data: Vec::new(),
-    };
+    let ctx = HostContext::new([0u8; 32], 1);
 
     let result = vm.execute(&code_hash, &wasm, &[], ctx, None);
     let _ = result; // Must not panic.
@@ -120,13 +108,7 @@ fn set_return_data_bounded() {
     )"#).unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
-    let ctx = HostContext {
-        caller: [0u8; 32],
-        block_height: 1,
-        storage: std::collections::HashMap::new(),
-        events: Vec::new(),
-        return_data: Vec::new(),
-    };
+    let ctx = HostContext::new([0u8; 32], 1);
 
     let result = vm.execute(&code_hash, &wasm, &[], ctx, None);
     // Should complete without OOM or panic.
@@ -166,13 +148,7 @@ fn emit_event_consumes_fuel() {
     )"#).unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
-    let ctx = HostContext {
-        caller: [0u8; 32],
-        block_height: 1,
-        storage: std::collections::HashMap::new(),
-        events: Vec::new(),
-        return_data: Vec::new(),
-    };
+    let ctx = HostContext::new([0u8; 32], 1);
 
     // Execute with limited fuel — should run out before completing all 10000 events.
     let result = vm.execute(&code_hash, &wasm, &[], ctx, Some(100_000));

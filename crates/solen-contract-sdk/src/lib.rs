@@ -28,6 +28,7 @@ extern "C" {
     fn set_return_data(ptr: i32, len: i32);
     fn transfer_native(to_ptr: i32, amount_ptr: i32) -> i32;
     fn get_self_id(out_ptr: i32);
+    fn msg_value(out_ptr: i32);
 }
 
 /// Low-level SDK functions for input/output.
@@ -76,6 +77,20 @@ pub mod sdk {
             get_self_id(buf.as_mut_ptr() as i32);
         }
         buf
+    }
+
+    /// Native SOLEN transferred to this contract in the current UserOperation.
+    ///
+    /// Returns the sum of all `Action::Transfer { to: self }` in the current
+    /// op since the previous `Action::Call` to this contract (or op start).
+    /// Use this in deposit paths to verify a claimed amount: e.g.
+    /// `assert!(claimed <= sdk::msg_value())`.
+    pub fn msg_value() -> u128 {
+        let mut buf = [0u8; 16];
+        unsafe {
+            msg_value(buf.as_mut_ptr() as i32);
+        }
+        u128::from_le_bytes(buf)
     }
 }
 

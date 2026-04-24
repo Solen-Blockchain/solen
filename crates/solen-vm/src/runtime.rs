@@ -433,6 +433,25 @@ fn register_host_functions_typed(
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
 
+    // msg_value(out_ptr: i32) — writes the u128 LE amount of native SOLEN
+    // transferred to this contract in the current UserOperation (summed across
+    // all unconsumed preceding Transfer actions since the last Call to self).
+    // Stays constant throughout a single Call frame.
+    linker
+        .func_wrap(
+            "env",
+            "msg_value",
+            |mut caller: Caller<'_, StoreData>, out_ptr: i32| {
+                let amount = caller.data().ctx.msg_value;
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &amount.to_le_bytes());
+            },
+        )
+        .map_err(|e| VmError::HostError(e.to_string()))?;
+
     // get_self_id(out_ptr: i32) — returns the contract's own account ID.
     // Needed so contracts can reference their own address for token operations.
     linker

@@ -20,6 +20,12 @@ pub struct HostContext {
     /// Native SOLEN transfers initiated by the contract.
     /// Processed by the executor after WASM execution completes.
     pub native_transfers: Vec<NativeTransfer>,
+    /// Sum of preceding unconsumed `Action::Transfer { to: self }` amounts in
+    /// the current UserOperation. Each `Action::Call` consumes and resets this
+    /// counter at dispatch time, so it reflects exactly the native SOLEN moved
+    /// into this contract since the last Call to it. Equivalent to EVM's
+    /// `msg.value`; stays constant throughout a single Call frame.
+    pub msg_value: u128,
 }
 
 /// A native SOLEN transfer initiated by a contract via host function.
@@ -46,6 +52,7 @@ impl HostContext {
             events: Vec::new(),
             return_data: Vec::new(),
             native_transfers: Vec::new(),
+            msg_value: 0,
         }
     }
 
@@ -57,6 +64,12 @@ impl HostContext {
     /// Pre-populate storage from existing contract state.
     pub fn with_storage(mut self, storage: HashMap<Vec<u8>, Vec<u8>>) -> Self {
         self.storage = storage;
+        self
+    }
+
+    /// Set the native SOLEN amount transferred to this contract in the current UserOp.
+    pub fn with_msg_value(mut self, value: u128) -> Self {
+        self.msg_value = value;
         self
     }
 }

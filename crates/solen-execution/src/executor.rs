@@ -547,9 +547,27 @@ impl BlockExecutor {
             None
         };
 
+        // Track native SOLEN transferred to each target within this op, for
+        // msg_value(). Each Action::Call consumes and resets the counter for
+        // its target, giving the called contract the sum of all Transfers to
+        // it since the previous Call to the same target (or op start).
+        let mut pending_transfers: std::collections::HashMap<AccountId, u128> =
+            std::collections::HashMap::new();
+
         let mut action_failed = None;
         for action in &op.actions {
+            let msg_value_for_action = match action {
+                Action::Transfer { to, amount } => {
+                    let entry = pending_transfers.entry(*to).or_insert(0);
+                    *entry = entry.saturating_add(*amount);
+                    0
+                }
+                Action::Call { target, .. } => pending_transfers.remove(target).unwrap_or(0),
+                _ => 0,
+            };
+
             // Check for system contract calls (need raw store access).
+            // System contracts use a direct-debit model and do not consume msg_value.
             if let Action::Call { target, method, args } = action {
                 if solen_types::system::is_system_contract(target) {
                     let result = crate::system_calls::execute_system_call(
@@ -566,7 +584,7 @@ impl BlockExecutor {
             }
 
             let mut state = StateManager::new(store);
-            match self.execute_action(&mut state, &op.sender, action, &mut events) {
+            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, &mut events) {
                 Ok(gas) => gas_used += gas,
                 Err(e) => {
                     action_failed = Some(e.to_string());
@@ -866,11 +884,16 @@ impl BlockExecutor {
     }
 
     /// Execute a single action within an operation.
+    ///
+    /// `msg_value` is the sum of unconsumed `Action::Transfer { to: <call-target> }`
+    /// amounts preceding this action in the op; it is exposed to WASM contracts
+    /// via the `msg_value` host function and is ignored for non-Call actions.
     fn execute_action(
         &self,
         state: &mut StateManager<'_>,
         sender: &AccountId,
         action: &Action,
+        msg_value: u128,
         events: &mut Vec<Event>,
     ) -> Result<u64, ExecutionError> {
         match action {
@@ -937,7 +960,8 @@ impl BlockExecutor {
                 // Execute in the VM.
                 let ctx = solen_vm::host::HostContext::new(*sender, 0)
                     .with_contract_id(*target)
-                    .with_storage(contract_storage);
+                    .with_storage(contract_storage)
+                    .with_msg_value(msg_value);
 
                 match self.vm_runtime.execute(&target_account.code_hash, &bytecode, &input, ctx, None) {
                     Ok(result) => {

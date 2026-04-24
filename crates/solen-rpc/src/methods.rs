@@ -892,6 +892,7 @@ impl SolenApiServer for SolenRpc {
             events: Vec::new(),
             return_data: Vec::new(),
             native_transfers: Vec::new(),
+            msg_value: 0,
         };
 
         let vm = solen_vm::runtime::VmRuntime::new()
@@ -1251,6 +1252,7 @@ impl SolenApiServer for SolenRpc {
                 events: Vec::new(),
                 return_data: Vec::new(),
                 native_transfers: Vec::new(),
+                msg_value: 0,
             };
 
             let vm = match solen_vm::runtime::VmRuntime::new() {

@@ -1118,14 +1118,7 @@ fn resolve_account_id(input: &str) -> Result<[u8; 32]> {
 }
 
 fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
-    let mut msg = Vec::with_capacity(96);
-    msg.extend_from_slice(&chain_id.to_le_bytes());
-    msg.extend_from_slice(&op.sender);
-    msg.extend_from_slice(&op.nonce.to_le_bytes());
-    msg.extend_from_slice(&op.max_fee.to_le_bytes());
-    let actions_bytes = serde_json::to_vec(&op.actions).unwrap_or_default();
-    msg.extend_from_slice(&blake3_hash(&actions_bytes));
-    op.signature = kp.sign(&msg).to_vec();
+    op.signature = kp.sign(&op.signing_message(chain_id)).to_vec();
 }
 
 // ── Multi-sig ──────────────────────────────────────────────────

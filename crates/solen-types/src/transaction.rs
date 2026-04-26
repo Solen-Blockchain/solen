@@ -14,6 +14,25 @@ pub struct UserOperation {
     pub signature: Vec<u8>,
 }
 
+impl UserOperation {
+    /// Bytes that get signed for this operation. Single source of truth — every
+    /// signer and verifier must call this. Format is consensus-critical; any
+    /// change is a hard fork.
+    ///
+    /// Layout: chain_id[8 LE] ‖ sender[32] ‖ nonce[8 LE] ‖ max_fee[16 LE] ‖
+    ///         blake3(serde_json(actions))[32]  = 96 bytes
+    pub fn signing_message(&self, chain_id: u64) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(96);
+        msg.extend_from_slice(&chain_id.to_le_bytes());
+        msg.extend_from_slice(&self.sender);
+        msg.extend_from_slice(&self.nonce.to_le_bytes());
+        msg.extend_from_slice(&self.max_fee.to_le_bytes());
+        let actions_bytes = serde_json::to_vec(&self.actions).unwrap_or_default();
+        msg.extend_from_slice(blake3::hash(&actions_bytes).as_bytes());
+        msg
+    }
+}
+
 /// A single action within a user operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {

@@ -227,6 +227,33 @@ impl IndexStore {
         self.events.iter().rev().skip(offset).take(limit).collect()
     }
 
+    /// Recent events with optional filters. All filters are AND'd. Iterates
+    /// newest→oldest; `emitter` matches are exact-string (caller must pass the
+    /// same Base58 form the indexer stores).
+    pub fn get_events_filtered(
+        &self,
+        emitter: Option<&str>,
+        topic: Option<&str>,
+        from_height: Option<u64>,
+        to_height: Option<u64>,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<&IndexedEvent> {
+        self.events
+            .iter()
+            .rev()
+            .filter(|e| {
+                if let Some(f) = from_height { if e.block_height < f { return false; } }
+                if let Some(t) = to_height   { if e.block_height > t { return false; } }
+                if let Some(em) = emitter    { if e.emitter != em     { return false; } }
+                if let Some(tp) = topic      { if e.topic != tp       { return false; } }
+                true
+            })
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+
     /// Record that an account holds tokens from a contract.
     pub fn track_token_holder(&mut self, account: &str, contract: &str) {
         self.account_tokens

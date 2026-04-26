@@ -1,6 +1,6 @@
 //! Transaction building and signing helpers.
 
-use solen_crypto::{blake3_hash, Keypair};
+use solen_crypto::Keypair;
 use solen_types::transaction::{Action, UserOperation};
 use solen_types::AccountId;
 
@@ -53,16 +53,10 @@ pub fn build_deploy(
 }
 
 /// Compute the signing message for a user operation.
-/// Format: chain_id[8] + sender[32] + nonce[8] + max_fee[16] + blake3(actions)[32]
+/// Thin wrapper around `UserOperation::signing_message` — kept for SDK
+/// ergonomics so callers can do `signing_message(&op, chain_id)`.
 pub fn signing_message(op: &UserOperation, chain_id: u64) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(96);
-    msg.extend_from_slice(&chain_id.to_le_bytes());
-    msg.extend_from_slice(&op.sender);
-    msg.extend_from_slice(&op.nonce.to_le_bytes());
-    msg.extend_from_slice(&op.max_fee.to_le_bytes());
-    let actions_bytes = serde_json::to_vec(&op.actions).unwrap_or_default();
-    msg.extend_from_slice(&blake3_hash(&actions_bytes));
-    msg
+    op.signing_message(chain_id)
 }
 
 /// Sign a user operation in place.

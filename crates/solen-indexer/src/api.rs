@@ -28,6 +28,22 @@ pub struct PaginationParams {
     offset: usize,
 }
 
+/// Query params for `/api/events`. All filters are optional — unset = no
+/// filtering on that dimension. `contract` accepts hex (64 chars, with or
+/// without `0x`) or Base58; it's normalized to the Base58 form events are
+/// stored under.
+#[derive(Deserialize)]
+pub struct EventsQuery {
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+    contract: Option<String>,
+    topic: Option<String>,
+    from_height: Option<u64>,
+    to_height: Option<u64>,
+}
+
 fn default_limit() -> usize {
     20
 }
@@ -164,11 +180,23 @@ async fn get_account_txs(
 
 async fn get_events(
     State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<EventsQuery>,
 ) -> Json<Vec<IndexedEvent>> {
+    // Normalize the contract filter: callers may pass hex (with or without
+    // `0x`) or Base58. Events are stored with Base58 emitters.
+    let emitter_b58 = params.contract.as_deref().and_then(|raw| {
+        parse_address(raw).ok().map(|bytes| account_to_base58(&bytes))
+    });
     let store = state.store.read().unwrap();
     let events: Vec<IndexedEvent> = store
-        .get_recent_events_paged(params.limit, params.offset)
+        .get_events_filtered(
+            emitter_b58.as_deref(),
+            params.topic.as_deref(),
+            params.from_height,
+            params.to_height,
+            params.limit,
+            params.offset,
+        )
         .into_iter()
         .cloned()
         .collect();

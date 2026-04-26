@@ -872,18 +872,10 @@ impl BlockExecutor {
     }
 
     /// Compute the message that must be signed for an operation.
-    /// Format: chain_id[8] + sender[32] + nonce[8] + max_fee[16] + blake3(actions)[32]
+    /// Delegates to `UserOperation::signing_message` — that is the single
+    /// source of truth for the signing-digest format.
     pub fn operation_signing_message(&self, op: &UserOperation) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(96);
-        msg.extend_from_slice(&self.chain_id.to_le_bytes());
-        msg.extend_from_slice(&op.sender);
-        msg.extend_from_slice(&op.nonce.to_le_bytes());
-        msg.extend_from_slice(&op.max_fee.to_le_bytes());
-        // Hash the actions to keep the signing message compact.
-        let actions_bytes =
-            serde_json::to_vec(&op.actions).unwrap_or_default();
-        msg.extend_from_slice(&blake3_hash(&actions_bytes));
-        msg
+        op.signing_message(self.chain_id)
     }
 
     /// Execute a single action within an operation.

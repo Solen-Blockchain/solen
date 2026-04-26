@@ -1,0 +1,203 @@
+{
+  "spec_version": 1,
+  "description": "Solen transaction signing test vectors. See docs.solenchain.io/specs/transaction-signing for the canonical byte-level spec. Regenerate with `cargo run -p solen-vectors -- generate`.",
+  "signer_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "cosigner_seed_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "vectors": [
+    {
+      "name": "transfer_simple_mainnet",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 0,
+        "max_fee_dec": "100000",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":1500000000}}]",
+        "actions_hash_hex": "8c280f6a6a31ad437302a2f00fa70dc61026cf07aa309e8405128225a2d74be2"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370000000000000000a08601000000000000000000000000008c280f6a6a31ad437302a2f00fa70dc61026cf07aa309e8405128225a2d74be2",
+      "signature_hex": "a09196808274e828ff4a24ed551147d28ba211057bfe2af7b616e90ab989ab9366fb990228b648ca1e9a67de600c15012d628bf7d86d85b787cc4f65f7ccb20e"
+    },
+    {
+      "name": "transfer_simple_testnet",
+      "chain_id": 9000,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 42,
+        "max_fee_dec": "200",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":1}}]",
+        "actions_hash_hex": "ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24"
+      },
+      "signing_message_hex": "2823000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787372a00000000000000c8000000000000000000000000000000ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24",
+      "signature_hex": "b98d5cb9326becdae1c45d8506593989a73e163ed95bd0803089ce30c5cc15e4231034a5bf2354df8eb893c21d08105de93b0b8b05bd9dd0b4442266151e7d03"
+    },
+    {
+      "name": "transfer_zero_amount",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 7,
+        "max_fee_dec": "100",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":0}}]",
+        "actions_hash_hex": "e57090b368623869425be609e20969b7ada9bdd2c9ec683235e7ce3ed80fd4d3"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737070000000000000064000000000000000000000000000000e57090b368623869425be609e20969b7ada9bdd2c9ec683235e7ce3ed80fd4d3",
+      "signature_hex": "0f8d9e6919a8b18b04a699cbf99a9774fa7b800d8132251865e56776cf166928bb625c1b8fc117ccd3f3a77e061b4e9dd1cc6fbe834ab39fcb091ebe91bb140c"
+    },
+    {
+      "name": "transfer_max_amount_u128",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 1,
+        "max_fee_dec": "340282366920938463463374607431768211455",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":340282366920938463463374607431768211455}}]",
+        "actions_hash_hex": "7c841c2b144e495f0158b06ba6bd68b91a9714c5413d80609d9cd8bbfeeb69b7"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370100000000000000ffffffffffffffffffffffffffffffff7c841c2b144e495f0158b06ba6bd68b91a9714c5413d80609d9cd8bbfeeb69b7",
+      "signature_hex": "1de2fc1d4290a32a1a0655cf7ef436f694c787328dd1fccdc48fa365b39a19220d1e8c3290043e9738ddcfc0538c6e9c5c3f32b107b02e9417331da6866c7506"
+    },
+    {
+      "name": "transfer_nonce_zero",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 0,
+        "max_fee_dec": "200",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":100}}]",
+        "actions_hash_hex": "c856f3e9d7ce50e4289184e8eca0f68518e12a3166c9139ec6006ef6a3233382"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370000000000000000c8000000000000000000000000000000c856f3e9d7ce50e4289184e8eca0f68518e12a3166c9139ec6006ef6a3233382",
+      "signature_hex": "099fc4f3f7141c3cf35e2fa99c2d79007f810ddf973fbd628ed4aa3ca5161d12fe616fa06c38d1d1f58328c55391b52d1959122eea146e6c941361af1b03f50c"
+    },
+    {
+      "name": "transfer_nonce_max_u64",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 18446744073709551615,
+        "max_fee_dec": "200",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":100}}]",
+        "actions_hash_hex": "c856f3e9d7ce50e4289184e8eca0f68518e12a3166c9139ec6006ef6a3233382"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737ffffffffffffffffc8000000000000000000000000000000c856f3e9d7ce50e4289184e8eca0f68518e12a3166c9139ec6006ef6a3233382",
+      "signature_hex": "01f6d52d76842b60c885fbc1ce38404799706a4f522c19c26cd5d9b7fce5ed7d7359b346bac99212ff4934caef642fcd9ebae7b4351d9b97be0273e9863c0906"
+    },
+    {
+      "name": "transfer_max_fee_zero",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 2,
+        "max_fee_dec": "0",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":1}}]",
+        "actions_hash_hex": "ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737020000000000000000000000000000000000000000000000ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24",
+      "signature_hex": "a111eec8739f83c806b5fda758aa1282aa2b55a006bf70509df73935f34f8e11c53cf0facd1c71a5bfd4acc9df19b8e09014e2884fdd352fdfae77dea20c4705"
+    },
+    {
+      "name": "transfer_to_self",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 3,
+        "max_fee_dec": "100",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[208,74,178,50,116,43,180,171,58,19,104,189,70,21,228,230,208,34,74,183,26,1,107,175,133,32,163,50,201,119,135,55],\"amount\":1}}]",
+        "actions_hash_hex": "f6625560448764e111ee16297ac72472c0397040df7b4a19c61e8486baad7492"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737030000000000000064000000000000000000000000000000f6625560448764e111ee16297ac72472c0397040df7b4a19c61e8486baad7492",
+      "signature_hex": "59b00c424e6cd7bf891a947ce99114c752de1e49fbf90839fea16f97ff07404e732c356174a0157efcd5242fbfe7ea445d0e0357e4d5966369550a134415240f"
+    },
+    {
+      "name": "transfer_devnet_chain_1337",
+      "chain_id": 1337,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 4,
+        "max_fee_dec": "100",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":1}}]",
+        "actions_hash_hex": "ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24"
+      },
+      "signing_message_hex": "3905000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737040000000000000064000000000000000000000000000000ef549c2ea1705e5decf4f5ee1a1e3d3cd901b2cc09e3b0cc432eec3df07d7b24",
+      "signature_hex": "d70ba45bb5deb336de0b8b3b26c757be468918c02349cf92a3ec39170eaf47685249ddc8f9e610944de6cddee09131a2b871b9bf55c98420fe6246def0460000"
+    },
+    {
+      "name": "multi_action_two_transfers",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 5,
+        "max_fee_dec": "500",
+        "actions_canonical_json": "[{\"Transfer\":{\"to\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"amount\":100}},{\"Transfer\":{\"to\":[160,154,165,244,122,103,89,128,47,249,85,248,220,45,42,20,165,201,157,35,190,151,248,100,18,127,249,56,52,85,164,240],\"amount\":200}}]",
+        "actions_hash_hex": "fc7d98953ce8be428ea441cd0abca6c31c0ed45241f9e16091524baae176a482"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370500000000000000f4010000000000000000000000000000fc7d98953ce8be428ea441cd0abca6c31c0ed45241f9e16091524baae176a482",
+      "signature_hex": "0acf78c319cbceb5db9f467e27d232490bacc7e7795faca94a1f61005e0e24c51a034610a50f7c012e2dd2c7ed01ca09fab7678063913508334b20e46fbddd06"
+    },
+    {
+      "name": "call_empty_args",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 10,
+        "max_fee_dec": "10000",
+        "actions_canonical_json": "[{\"Call\":{\"target\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"method\":\"ping\",\"args\":[]}}]",
+        "actions_hash_hex": "0d4c8a657484a3e6d317937a73bf05243846f38527f35a03f6ca17beef7a47a6"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370a00000000000000102700000000000000000000000000000d4c8a657484a3e6d317937a73bf05243846f38527f35a03f6ca17beef7a47a6",
+      "signature_hex": "ba580984ef1da9f0e8a1a5df4dc404af3083f899cdd4c91b051ccb2481246d1fe23857665444a5d957088a28dec0c15a491a84d9ef3d9c315e6916c6d2374d0c"
+    },
+    {
+      "name": "call_with_args",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 11,
+        "max_fee_dec": "10000",
+        "actions_canonical_json": "[{\"Call\":{\"target\":[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206],\"method\":\"transfer\",\"args\":[222,173,190,239]}}]",
+        "actions_hash_hex": "51c5df3495802313fae13ae6c6eda49f03f00d4b880c88ede21a167b858642ab"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787370b000000000000001027000000000000000000000000000051c5df3495802313fae13ae6c6eda49f03f00d4b880c88ede21a167b858642ab",
+      "signature_hex": "f19cfdfcf33ab5666842d22fe3d71cc42c05caf8546f4563cef62088c274f7478d7ba7d21237e4525265b39e2c3d07ae0d897371ce9a60cf73b98e4dc7511006"
+    },
+    {
+      "name": "deploy_small_code",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 20,
+        "max_fee_dec": "1000000",
+        "actions_canonical_json": "[{\"Deploy\":{\"code\":[0,97,115,109,1,0,0,0],\"salt\":[170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170,170]}}]",
+        "actions_hash_hex": "e343255ced1f539d4d29b65fad782a82e50a2e92654b6959ac595917bd1e930d"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737140000000000000040420f00000000000000000000000000e343255ced1f539d4d29b65fad782a82e50a2e92654b6959ac595917bd1e930d",
+      "signature_hex": "8ad7ea3a4833fc11bb8e45aa79f4f9398c4506a196d42acf3114158ee2f886041ccdf08274614cfdc0a0ced4bce8c263f2b08873d429da5eecf1685df9f60b0a"
+    },
+    {
+      "name": "setauth_ed25519",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 30,
+        "max_fee_dec": "1000",
+        "actions_canonical_json": "[{\"SetAuth\":{\"auth_methods\":[{\"Ed25519\":{\"public_key\":[160,154,165,244,122,103,89,128,47,249,85,248,220,45,42,20,165,201,157,35,190,151,248,100,18,127,249,56,52,85,164,240]}}]}}]",
+        "actions_hash_hex": "3c52255c13846427128d5b395c308583665403af9e7814b90a7e30e00320ba89"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787371e00000000000000e80300000000000000000000000000003c52255c13846427128d5b395c308583665403af9e7814b90a7e30e00320ba89",
+      "signature_hex": "fa8dd51c3c80488bb58fd68a27b0c75eae1d62b2278ef42c6a3d072dae43e22af96740ac8635fdd422d827bc50ffbd4be779a6c795363123692a0eaf2d48e506"
+    },
+    {
+      "name": "setauth_threshold_2of3",
+      "chain_id": 1,
+      "operation": {
+        "sender_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "nonce": 31,
+        "max_fee_dec": "1000",
+        "actions_canonical_json": "[{\"SetAuth\":{\"auth_methods\":[{\"Threshold\":{\"signers\":[[208,74,178,50,116,43,180,171,58,19,104,189,70,21,228,230,208,34,74,183,26,1,107,175,133,32,163,50,201,119,135,55],[160,154,165,244,122,103,89,128,47,249,85,248,220,45,42,20,165,201,157,35,190,151,248,100,18,127,249,56,52,85,164,240],[23,203,121,251,43,65,32,242,177,236,101,228,25,141,110,8,178,142,129,63,235,1,228,164,0,131,155,133,225,128,128,206]],\"threshold\":2}}]}}]",
+        "actions_hash_hex": "f4534084540542192640ab9cb2d4208ffcf0d250ce558de8da0680c45b68add9"
+      },
+      "signing_message_hex": "0100000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787371f00000000000000e8030000000000000000000000000000f4534084540542192640ab9cb2d4208ffcf0d250ce558de8da0680c45b68add9",
+      "signature_hex": "d0907b2193c20c97cf75d83fd147f84c34e08b75fe1e1d22ef46262d94cb2af8b7f260787c508d0e5dbfcb3216f9cef2fe10b104f5464bf2849b271b53cc5306"
+    }
+  ]
+}

@@ -26,6 +26,7 @@ members = [
     "sdks/wallet-sdk-rs",
     "tools/submit-batch",
     "tools/bench",
+    "tools/vectors",
 ]
 
 [workspace.package]

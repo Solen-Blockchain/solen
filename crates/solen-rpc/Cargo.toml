@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 solen-types = { workspace = true }
+solen-crypto = { workspace = true }
 solen-execution = { workspace = true }
 solen-consensus = { workspace = true }
 solen-system-contracts = { workspace = true }

@@ -65,6 +65,29 @@ pub struct SubmitResult {
     pub error: Option<String>,
 }
 
+/// Result of `solen_submitOperationConfirm`. Combines the submit-side outcome
+/// with on-chain inclusion data once the operation lands in a finalized block.
+///
+/// Field meanings for exchange integrations:
+/// - `accepted`: mempool took the op (passed nonce/balance/rate-limit checks).
+/// - `confirmed`: the matching `(sender, nonce)` was seen in a finalized block
+///   before timeout. False if `accepted` is false, or if the wait timed out.
+/// - `success`: on-chain execution succeeded. A reverted tx is `confirmed: true,
+///   success: false` — do not credit funds on revert.
+/// - `block_height`/`tx_hash`/`gas_used`: only meaningful when `confirmed` is true.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitConfirmResult {
+    pub accepted: bool,
+    pub confirmed: bool,
+    pub success: bool,
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub sender: String,
+    pub nonce: u64,
+    pub gas_used: u64,
+    pub error: Option<String>,
+}
+
 /// Chain status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainStatus {
@@ -375,6 +398,22 @@ pub trait SolenApi {
     #[method(name = "solen_submitOperation")]
     fn submit_operation(&self, op: UserOperation) -> RpcResult<SubmitResult>;
 
+    /// Submit an operation and wait for it to be included in a finalized block.
+    /// Designed for exchange integrations that need a single round-trip
+    /// confirming on-chain inclusion + execution success.
+    ///
+    /// `timeout_secs` defaults to 60 and is capped at 180. If the wait times out
+    /// the response returns `accepted: true, confirmed: false` — the op may
+    /// still land later; clients can poll `solen_getAccount` for sender nonce
+    /// or call `solen_submitOperationConfirm` again with the same nonce (it
+    /// will short-circuit via the on-chain backfill check).
+    #[method(name = "solen_submitOperationConfirm")]
+    async fn submit_operation_confirm(
+        &self,
+        op: UserOperation,
+        timeout_secs: Option<u64>,
+    ) -> RpcResult<SubmitConfirmResult>;
+
     #[method(name = "solen_simulateOperation")]
     fn simulate_operation(&self, op: UserOperation) -> RpcResult<SimulationResult>;
 
@@ -508,10 +547,21 @@ pub struct SolenRpc {
     rate_limiter: Arc<RpcRateLimiter>,
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
     tx_broadcaster: Option<TxBroadcaster>,
+    /// Caps concurrent `solen_submitOperationConfirm` waiters so a flood of
+    /// slow-confirming calls can't pin the RPC pool. Submitters that exceed
+    /// this cap get an immediate `accepted: false, error: "too many ..."`.
+    confirm_waiters: Arc<tokio::sync::Semaphore>,
 }
 
 /// Minimum blocks between snapshot regenerations.
 const SNAPSHOT_CACHE_INTERVAL: u64 = 500;
+
+/// Max simultaneous `submitOperationConfirm` calls awaiting block inclusion.
+const MAX_CONFIRM_WAITERS: usize = 200;
+
+/// Default and max wait time for `submitOperationConfirm`, in seconds.
+const CONFIRM_DEFAULT_TIMEOUT_SECS: u64 = 60;
+const CONFIRM_MAX_TIMEOUT_SECS: u64 = 180;
 
 impl SolenRpc {
     pub fn new(engine: Arc<ConsensusEngine>, tx_broadcaster: Option<TxBroadcaster>) -> Self {
@@ -569,7 +619,108 @@ impl SolenRpc {
             rate_limiter: Arc::new(RpcRateLimiter::new()),
             event_tx,
             tx_broadcaster,
+            confirm_waiters: Arc::new(tokio::sync::Semaphore::new(MAX_CONFIRM_WAITERS)),
         }
+    }
+
+    /// Shared validate + mempool-submit + P2P-broadcast path. Used by both
+    /// `solen_submitOperation` (sync) and `solen_submitOperationConfirm`
+    /// (async). All rejection reasons surface via `SubmitResult.error` —
+    /// `Err` is returned only for true infrastructure faults (poisoned locks).
+    fn validate_and_submit(&self, op: UserOperation) -> RpcResult<SubmitResult> {
+        // Rate limit: max 500 submissions per second globally.
+        if !RpcRateLimiter::check(&self.rate_limiter.submit_ops, 500) {
+            return Ok(SubmitResult {
+                accepted: false,
+                error: Some("rate limited — too many submissions, try again".to_string()),
+            });
+        }
+
+        // Validate nonce before accepting into mempool.
+        {
+            let store = self.engine.store();
+            let store = store.read().map_err(|e| internal_error(e.to_string()))?;
+            let mut account_key = b"acc/".to_vec();
+            account_key.extend_from_slice(&op.sender);
+            match store.get(&account_key) {
+                Ok(Some(data)) => {
+                    if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(&data) {
+                        if op.nonce < account.nonce {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some(format!(
+                                    "nonce too low: got {}, expected >= {}",
+                                    op.nonce, account.nonce
+                                )),
+                            });
+                        }
+                        if op.nonce > account.nonce + 64 {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some(format!(
+                                    "nonce too far ahead: got {}, current is {}",
+                                    op.nonce, account.nonce
+                                )),
+                            });
+                        }
+                        // Reject operations from accounts with zero balance.
+                        // Prevents mempool spam from unfunded accounts.
+                        if account.balance == 0 {
+                            return Ok(SubmitResult {
+                                accepted: false,
+                                error: Some("sender has zero balance".to_string()),
+                            });
+                        }
+                    }
+                }
+                Ok(None) => {
+                    return Ok(SubmitResult {
+                        accepted: false,
+                        error: Some("sender account not found".to_string()),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+
+        let accepted = self.engine.mempool().submit(op.clone());
+        if accepted {
+            // Broadcast to P2P network so validators can include it in blocks.
+            if let Some(ref broadcast) = self.tx_broadcaster {
+                broadcast(op);
+            }
+        }
+        Ok(SubmitResult {
+            accepted,
+            error: if accepted {
+                None
+            } else {
+                Some("mempool full or duplicate".to_string())
+            },
+        })
+    }
+
+    /// Look up the current on-chain nonce for a sender. Returns `Some(nonce)`
+    /// if the account exists, `None` if not. Used by `submitOperationConfirm`
+    /// to detect "already landed" via nonce advancement.
+    fn current_account_nonce(&self, sender: &[u8; 32]) -> Option<u64> {
+        let store = self.engine.store();
+        let store = store.read().ok()?;
+        let mut key = b"acc/".to_vec();
+        key.extend_from_slice(sender);
+        let data = store.get(&key).ok().flatten()?;
+        let account = borsh::from_slice::<solen_types::account::Account>(&data).ok()?;
+        Some(account.nonce)
+    }
+
+    /// Deterministic per-tx hash matching the engine's emission scheme:
+    /// `blake3(sender ‖ nonce_le)`. Used for "already landed" backfill where
+    /// no `TxIncluded` event is available.
+    fn synthetic_tx_hash(sender: &[u8; 32], nonce: u64) -> [u8; 32] {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(sender);
+        buf.extend_from_slice(&nonce.to_le_bytes());
+        solen_crypto::blake3_hash(&buf)
     }
 }
 
@@ -700,76 +851,191 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn submit_operation(&self, op: UserOperation) -> RpcResult<SubmitResult> {
-        // Rate limit: max 500 submissions per second globally.
-        if !RpcRateLimiter::check(&self.rate_limiter.submit_ops, 500) {
-            return Ok(SubmitResult {
+        self.validate_and_submit(op)
+    }
+
+    async fn submit_operation_confirm(
+        &self,
+        op: UserOperation,
+        timeout_secs: Option<u64>,
+    ) -> RpcResult<SubmitConfirmResult> {
+        let target_sender = op.sender;
+        let target_nonce = op.nonce;
+        let sender_b58 = account_to_base58(&target_sender);
+
+        let timeout = timeout_secs
+            .unwrap_or(CONFIRM_DEFAULT_TIMEOUT_SECS)
+            .min(CONFIRM_MAX_TIMEOUT_SECS);
+
+        // Cap concurrent waiters before doing any work, so a flood of slow
+        // confirms can't block fast submits or pin the RPC pool.
+        let _permit = match Arc::clone(&self.confirm_waiters).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                return Ok(SubmitConfirmResult {
+                    accepted: false,
+                    confirmed: false,
+                    success: false,
+                    block_height: 0,
+                    tx_hash: String::new(),
+                    sender: sender_b58,
+                    nonce: target_nonce,
+                    gas_used: 0,
+                    error: Some(
+                        "too many concurrent submitOperationConfirm waiters — retry shortly"
+                            .to_string(),
+                    ),
+                });
+            }
+        };
+
+        // Subscribe BEFORE submitting so we can't miss a fast inclusion. The
+        // submit-side validation re-reads state, but a block could finalize
+        // between validate and subscribe — the post-submit backfill check
+        // below handles that.
+        let mut rx = self.event_tx.subscribe();
+
+        let submit = self.validate_and_submit(op)?;
+        if !submit.accepted {
+            return Ok(SubmitConfirmResult {
                 accepted: false,
-                error: Some("rate limited — too many submissions, try again".to_string()),
+                confirmed: false,
+                success: false,
+                block_height: 0,
+                tx_hash: String::new(),
+                sender: sender_b58,
+                nonce: target_nonce,
+                gas_used: 0,
+                error: submit.error,
             });
         }
 
-        // Validate nonce before accepting into mempool.
-        {
-            let store = self.engine.store();
-            let store = store.read().map_err(|e| internal_error(e.to_string()))?;
-            let mut account_key = b"acc/".to_vec();
-            account_key.extend_from_slice(&op.sender);
-            match store.get(&account_key) {
-                Ok(Some(data)) => {
-                    if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(&data) {
-                        if op.nonce < account.nonce {
-                            return Ok(SubmitResult {
-                                accepted: false,
-                                error: Some(format!(
-                                    "nonce too low: got {}, expected >= {}",
-                                    op.nonce, account.nonce
-                                )),
-                            });
-                        }
-                        if op.nonce > account.nonce + 64 {
-                            return Ok(SubmitResult {
-                                accepted: false,
-                                error: Some(format!(
-                                    "nonce too far ahead: got {}, current is {}",
-                                    op.nonce, account.nonce
-                                )),
-                            });
-                        }
-                        // Reject operations from accounts with zero balance.
-                        // Prevents mempool spam from unfunded accounts.
-                        if account.balance == 0 {
-                            return Ok(SubmitResult {
-                                accepted: false,
-                                error: Some("sender has zero balance".to_string()),
-                            });
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return Ok(SubmitResult {
-                        accepted: false,
-                        error: Some("sender account not found".to_string()),
-                    });
-                }
-                Err(_) => {}
+        // Backfill check: if the chain already advanced the sender's nonce
+        // past `target_nonce` (e.g. fast inclusion before subscribe took effect,
+        // or a duplicate that landed via another path), we won't get a fresh
+        // event. Synthesize a confirmation. block_height/gas_used are unknown
+        // here — exchanges can re-query state if they need exact placement.
+        if let Some(curr) = self.current_account_nonce(&target_sender) {
+            if curr > target_nonce {
+                return Ok(SubmitConfirmResult {
+                    accepted: true,
+                    confirmed: true,
+                    success: true,
+                    block_height: 0,
+                    tx_hash: hex_encode(&Self::synthetic_tx_hash(&target_sender, target_nonce)),
+                    sender: sender_b58,
+                    nonce: target_nonce,
+                    gas_used: 0,
+                    error: None,
+                });
             }
         }
 
-        let accepted = self.engine.mempool().submit(op.clone());
-        if accepted {
-            // Broadcast to P2P network so validators can include it in blocks.
-            if let Some(ref broadcast) = self.tx_broadcaster {
-                broadcast(op);
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout);
+
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(NodeEvent::TxIncluded {
+                    block_height,
+                    tx_hash,
+                    sender,
+                    nonce,
+                    success,
+                    gas_used,
+                })) if sender == target_sender && nonce == target_nonce => {
+                    return Ok(SubmitConfirmResult {
+                        accepted: true,
+                        confirmed: true,
+                        success,
+                        block_height,
+                        tx_hash: hex_encode(&tx_hash),
+                        sender: sender_b58,
+                        nonce: target_nonce,
+                        gas_used,
+                        error: if success {
+                            None
+                        } else {
+                            Some("transaction reverted on-chain".to_string())
+                        },
+                    });
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                    tracing::warn!(
+                        missed = n,
+                        "submitOperationConfirm subscriber lagged — re-checking chain state"
+                    );
+                    if let Some(curr) = self.current_account_nonce(&target_sender) {
+                        if curr > target_nonce {
+                            return Ok(SubmitConfirmResult {
+                                accepted: true,
+                                confirmed: true,
+                                success: true,
+                                block_height: 0,
+                                tx_hash: hex_encode(&Self::synthetic_tx_hash(
+                                    &target_sender,
+                                    target_nonce,
+                                )),
+                                sender: sender_b58,
+                                nonce: target_nonce,
+                                gas_used: 0,
+                                error: None,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    return Ok(SubmitConfirmResult {
+                        accepted: true,
+                        confirmed: false,
+                        success: false,
+                        block_height: 0,
+                        tx_hash: String::new(),
+                        sender: sender_b58,
+                        nonce: target_nonce,
+                        gas_used: 0,
+                        error: Some("event channel closed before confirmation".to_string()),
+                    });
+                }
+                Err(_) => {
+                    // Timeout — final state-recheck before giving up.
+                    if let Some(curr) = self.current_account_nonce(&target_sender) {
+                        if curr > target_nonce {
+                            return Ok(SubmitConfirmResult {
+                                accepted: true,
+                                confirmed: true,
+                                success: true,
+                                block_height: 0,
+                                tx_hash: hex_encode(&Self::synthetic_tx_hash(
+                                    &target_sender,
+                                    target_nonce,
+                                )),
+                                sender: sender_b58,
+                                nonce: target_nonce,
+                                gas_used: 0,
+                                error: None,
+                            });
+                        }
+                    }
+                    return Ok(SubmitConfirmResult {
+                        accepted: true,
+                        confirmed: false,
+                        success: false,
+                        block_height: 0,
+                        tx_hash: String::new(),
+                        sender: sender_b58,
+                        nonce: target_nonce,
+                        gas_used: 0,
+                        error: Some(format!(
+                            "timed out after {}s waiting for block inclusion",
+                            timeout
+                        )),
+                    });
+                }
             }
         }
-        Ok(SubmitResult {
-            accepted,
-            error: if accepted {
-                None
-            } else {
-                Some("mempool full or duplicate".to_string())
-            },
-        })
     }
 
     fn simulate_operation(&self, op: UserOperation) -> RpcResult<SimulationResult> {

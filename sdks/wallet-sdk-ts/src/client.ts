@@ -8,6 +8,7 @@ import type {
   ChainStatus,
   SimulationResult,
   SubmitResult,
+  SubmitConfirmResult,
   UserOperation,
   JsonRpcRequest,
   JsonRpcResponse,
@@ -77,6 +78,25 @@ export class SolenClient {
   /** Submit a signed user operation. */
   async submitOperation(op: UserOperation): Promise<SubmitResult> {
     return this.call<SubmitResult>("solen_submitOperation", [op]);
+  }
+
+  /**
+   * Submit a signed user operation and wait for it to be included in a
+   * finalized block. Returns once the matching (sender, nonce) lands or after
+   * the timeout (default 60s, max 180s server-side). Designed for exchange
+   * integrations that want a single round-trip with full confirmation data.
+   *
+   * Important: a reverted on-chain tx returns `confirmed: true, success: false`.
+   * Do not credit funds on revert.
+   */
+  async submitOperationConfirm(
+    op: UserOperation,
+    timeoutSecs?: number,
+  ): Promise<SubmitConfirmResult> {
+    return this.call<SubmitConfirmResult>("solen_submitOperationConfirm", [
+      op,
+      timeoutSecs ?? null,
+    ]);
   }
 
   /** Simulate a user operation without modifying state. */

@@ -64,6 +64,30 @@ export interface SubmitResult {
   error: string | null;
 }
 
+/**
+ * Result of `solen_submitOperationConfirm`. Combines submit-side outcome with
+ * on-chain inclusion data once the op lands in a finalized block.
+ *
+ * - `accepted`: mempool took the op (passed nonce/balance/rate-limit checks).
+ * - `confirmed`: the matching (sender, nonce) was seen in a finalized block
+ *   before timeout. False if not accepted, or if the wait timed out.
+ * - `success`: on-chain execution succeeded. A reverted tx is
+ *   `confirmed: true, success: false` — do NOT credit funds on revert.
+ * - `block_height` / `tx_hash` / `gas_used`: only meaningful when
+ *   `confirmed` is true.
+ */
+export interface SubmitConfirmResult {
+  accepted: boolean;
+  confirmed: boolean;
+  success: boolean;
+  block_height: number;
+  tx_hash: string;
+  sender: string;
+  nonce: number;
+  gas_used: number;
+  error: string | null;
+}
+
 /** JSON-RPC request. */
 export interface JsonRpcRequest {
   jsonrpc: "2.0";

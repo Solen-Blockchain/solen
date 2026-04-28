@@ -86,6 +86,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tx/:height/:index", get(get_tx))
         .route("/api/txs", get(get_recent_txs))
         .route("/api/accounts/:account/txs", get(get_account_txs))
+        .route("/api/accounts/:account/transfers", get(get_account_transfers))
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
         .route("/api/validators/stats", get(get_validator_stats))
@@ -176,6 +177,157 @@ async fn get_account_txs(
         .cloned()
         .collect();
     Json(txs)
+}
+
+/// Single transfer projected from an indexed tx's `transfer` event.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferRow {
+    /// "{block_height}-{tx_index}-{event_index}".
+    pub txid: String,
+    pub block_height: u64,
+    pub tx_index: usize,
+    pub event_index: usize,
+    /// Event emitter. For native SOLEN transfers this equals `sender`; for
+    /// token contract transfers it's the contract address.
+    pub emitter: String,
+    pub sender: String,
+    pub recipient: String,
+    /// Base units, decimal string (preserves u128 precision).
+    pub amount: String,
+    /// Human-readable SOLEN amount with 8 decimals (e.g. "10.00000000").
+    pub amount_solen: String,
+    /// Tx fee in base units, attributed once per tx to the primary outgoing
+    /// transfer (where `emitter == sender`). Other rows return "0".
+    pub fee: String,
+    pub fee_solen: String,
+    pub success: bool,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Deserialize)]
+pub struct TransferQuery {
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+    /// "in" (recipient = account), "out" (sender = account), or "all" (default).
+    direction: Option<String>,
+}
+
+const SOLEN_BASE_UNITS_PER_TOKEN: u128 = 100_000_000;
+const SOLEN_DECIMALS: usize = 8;
+
+fn format_solen(base_units: u128) -> String {
+    let whole = base_units / SOLEN_BASE_UNITS_PER_TOKEN;
+    let frac = base_units % SOLEN_BASE_UNITS_PER_TOKEN;
+    format!("{whole}.{frac:0>width$}", width = SOLEN_DECIMALS)
+}
+
+/// Parse 32 hex chars as little-endian u128.
+fn decode_u128_le_hex(hex: &str) -> Option<u128> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(u128::from_le_bytes(bytes))
+}
+
+/// Decode a `transfer` event's data field. Layout: recipient[32] ‖ amount[16, LE u128].
+fn decode_transfer_data(hex: &str) -> Option<(String, u128)> {
+    if hex.len() < 96 {
+        return None;
+    }
+    let mut recipient = [0u8; 32];
+    for i in 0..32 {
+        recipient[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    let amount = decode_u128_le_hex(&hex[64..96])?;
+    Some((account_to_base58(&recipient), amount))
+}
+
+async fn get_account_transfers(
+    State(state): State<ApiState>,
+    Path(account): Path<String>,
+    Query(params): Query<TransferQuery>,
+) -> Json<Vec<TransferRow>> {
+    let lookup = if let Ok(id) = parse_address(&account) {
+        account_to_base58(&id)
+    } else {
+        account
+    };
+    let direction = params.direction.as_deref().unwrap_or("all");
+    let store = state.store.read().unwrap();
+
+    // Walk this account's tx index newest-first, project transfer events,
+    // filter by direction, then paginate at the row level.
+    let txs = store.get_account_txs_paged(&lookup, usize::MAX, 0);
+    let mut rows: Vec<TransferRow> = Vec::new();
+    let mut skipped = 0usize;
+    let limit = params.limit.max(1);
+    let offset = params.offset;
+
+    for tx in txs {
+        // Per-tx fee amount (0 if no fee event).
+        let tx_fee: u128 = tx.events.iter()
+            .find(|e| e.topic == "fee" && e.data.len() >= 32)
+            .and_then(|e| decode_u128_le_hex(&e.data[..32]))
+            .unwrap_or(0);
+
+        let block_ts = store.get_block(tx.block_height).map(|b| b.timestamp_ms).unwrap_or(0);
+        let mut fee_attributed = false;
+
+        for (ev_idx, ev) in tx.events.iter().enumerate() {
+            if ev.topic != "transfer" { continue; }
+            let Some((recipient, amount)) = decode_transfer_data(&ev.data) else { continue };
+
+            let is_out = tx.sender == lookup;
+            let is_in = recipient == lookup;
+            if !is_out && !is_in { continue; }
+            match direction {
+                "in" if !is_in => continue,
+                "out" if !is_out => continue,
+                _ => {}
+            }
+
+            // Attribute the fee once per tx, to the first transfer emitted by
+            // the tx sender (the primary outgoing). Contract fan-out rows get 0.
+            let fee = if !fee_attributed && ev.emitter == tx.sender {
+                fee_attributed = true;
+                tx_fee
+            } else {
+                0
+            };
+
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            rows.push(TransferRow {
+                txid: format!("{}-{}-{}", tx.block_height, tx.index, ev_idx),
+                block_height: tx.block_height,
+                tx_index: tx.index,
+                event_index: ev_idx,
+                emitter: ev.emitter.clone(),
+                sender: tx.sender.clone(),
+                recipient,
+                amount: amount.to_string(),
+                amount_solen: format_solen(amount),
+                fee: fee.to_string(),
+                fee_solen: format_solen(fee),
+                success: tx.success,
+                timestamp_ms: block_ts,
+            });
+
+            if rows.len() >= limit {
+                return Json(rows);
+            }
+        }
+    }
+    Json(rows)
 }
 
 async fn get_events(

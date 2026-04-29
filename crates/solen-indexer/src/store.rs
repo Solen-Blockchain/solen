@@ -32,6 +32,12 @@ pub struct IndexedTx {
     pub gas_used: u64,
     pub error: Option<String>,
     pub events: Vec<IndexedEvent>,
+    /// Hex-encoded `blake3(sender ‖ nonce_le)`. Same scheme the consensus
+    /// engine emits in `NodeEvent::TxIncluded` and the value RPC clients see
+    /// as `tx_hash` in `solen_submitOperationConfirm` / `solen_txConfirmation`.
+    /// Default-empty for backwards compatibility with old serialized records.
+    #[serde(default)]
+    pub tx_hash: String,
 }
 
 /// Published contract source code.
@@ -99,6 +105,8 @@ pub struct IndexStore {
     pub blocks: Vec<IndexedBlock>,
     pub transactions: Vec<IndexedTx>,
     pub events: Vec<IndexedEvent>,
+    /// `tx_hash` (lowercase hex) -> position in `transactions` for O(1) lookup.
+    pub tx_by_hash: HashMap<String, usize>,
     /// Account -> list of tx indices.
     pub account_txs: HashMap<String, Vec<usize>>,
     /// Account -> set of token contract IDs that have sent tokens to this account.
@@ -146,6 +154,9 @@ impl IndexStore {
                     .push(idx);
             }
         }
+        if !tx.tx_hash.is_empty() {
+            self.tx_by_hash.insert(tx.tx_hash.clone(), idx);
+        }
         self.transactions.push(tx);
     }
 
@@ -169,6 +180,18 @@ impl IndexStore {
         self.transactions
             .iter()
             .find(|tx| tx.block_height == block_height && tx.index == index)
+    }
+
+    /// Look up a transaction by its hex-encoded `tx_hash` (with or without `0x`).
+    /// Case-insensitive on the hex digits.
+    pub fn get_tx_by_hash(&self, tx_hash: &str) -> Option<&IndexedTx> {
+        let normalized = tx_hash
+            .strip_prefix("0x")
+            .unwrap_or(tx_hash)
+            .to_ascii_lowercase();
+        self.tx_by_hash
+            .get(&normalized)
+            .and_then(|&i| self.transactions.get(i))
     }
 
     pub fn get_block_txs(&self, block_height: u64) -> Vec<&IndexedTx> {

@@ -84,6 +84,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/blocks/:height", get(get_block))
         .route("/api/blocks/:height/txs", get(get_block_txs))
         .route("/api/tx/:height/:index", get(get_tx))
+        .route("/api/tx/hash/:tx_hash", get(get_tx_by_hash))
         .route("/api/txs", get(get_recent_txs))
         .route("/api/accounts/:account/txs", get(get_account_txs))
         .route("/api/accounts/:account/transfers", get(get_account_transfers))
@@ -149,6 +150,16 @@ async fn get_tx(
 ) -> Json<Option<IndexedTx>> {
     let store = state.store.read().unwrap();
     Json(store.get_tx(height, index).cloned())
+}
+
+/// Lookup by `tx_hash` (= `blake3(sender ‖ nonce_le)`, hex-encoded). Accepts
+/// 64 hex chars with or without a `0x` prefix; case-insensitive.
+async fn get_tx_by_hash(
+    State(state): State<ApiState>,
+    Path(tx_hash): Path<String>,
+) -> Json<Option<IndexedTx>> {
+    let store = state.store.read().unwrap();
+    Json(store.get_tx_by_hash(&tx_hash).cloned())
 }
 
 async fn get_recent_txs(

@@ -284,9 +284,12 @@ impl ConsensusEngine {
         });
 
         // Per-transaction confirmation events.
-        for receipt in &block.result.receipts {
-            let tx_hash = solen_crypto::blake3_hash(
-                &[&receipt.sender[..], &receipt.nonce.to_le_bytes()[..]].concat(),
+        for (i, receipt) in block.result.receipts.iter().enumerate() {
+            let tx_hash = solen_crypto::receipt_tx_hash(
+                block.header.height,
+                i as u32,
+                &receipt.sender,
+                receipt.nonce,
             );
             let _ = self.event_tx.send(NodeEvent::TxIncluded {
                 block_height: block.header.height,

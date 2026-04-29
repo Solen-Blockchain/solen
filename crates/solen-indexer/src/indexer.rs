@@ -227,14 +227,12 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
             }
         }
 
-        // Deterministic per-tx hash. Must match consensus engine's emission
-        // (engine.rs `emit_block_events`): blake3(sender ‖ nonce_le).
-        let tx_hash_bytes = {
-            let mut buf = Vec::with_capacity(40);
-            buf.extend_from_slice(&receipt.sender);
-            buf.extend_from_slice(&receipt.nonce.to_le_bytes());
-            solen_crypto::blake3_hash(&buf)
-        };
+        let tx_hash_bytes = solen_crypto::receipt_tx_hash(
+            block.header.height,
+            i as u32,
+            &receipt.sender,
+            receipt.nonce,
+        );
 
         let tx = IndexedTx {
             block_height: block.header.height,

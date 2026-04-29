@@ -713,15 +713,6 @@ impl SolenRpc {
         Some(account.nonce)
     }
 
-    /// Deterministic per-tx hash matching the engine's emission scheme:
-    /// `blake3(sender ‖ nonce_le)`. Used for "already landed" backfill where
-    /// no `TxIncluded` event is available.
-    fn synthetic_tx_hash(sender: &[u8; 32], nonce: u64) -> [u8; 32] {
-        let mut buf = Vec::with_capacity(40);
-        buf.extend_from_slice(sender);
-        buf.extend_from_slice(&nonce.to_le_bytes());
-        solen_crypto::blake3_hash(&buf)
-    }
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -913,8 +904,9 @@ impl SolenApiServer for SolenRpc {
         // Backfill check: if the chain already advanced the sender's nonce
         // past `target_nonce` (e.g. fast inclusion before subscribe took effect,
         // or a duplicate that landed via another path), we won't get a fresh
-        // event. Synthesize a confirmation. block_height/gas_used are unknown
-        // here — exchanges can re-query state if they need exact placement.
+        // event. Confirm without tx_hash/block_height — those require the
+        // receipt's exact placement, which isn't available here. Callers can
+        // re-query state if they need them.
         if let Some(curr) = self.current_account_nonce(&target_sender) {
             if curr > target_nonce {
                 return Ok(SubmitConfirmResult {
@@ -922,7 +914,7 @@ impl SolenApiServer for SolenRpc {
                     confirmed: true,
                     success: true,
                     block_height: 0,
-                    tx_hash: hex_encode(&Self::synthetic_tx_hash(&target_sender, target_nonce)),
+                    tx_hash: String::new(),
                     sender: sender_b58,
                     nonce: target_nonce,
                     gas_used: 0,
@@ -973,10 +965,7 @@ impl SolenApiServer for SolenRpc {
                                 confirmed: true,
                                 success: true,
                                 block_height: 0,
-                                tx_hash: hex_encode(&Self::synthetic_tx_hash(
-                                    &target_sender,
-                                    target_nonce,
-                                )),
+                                tx_hash: String::new(),
                                 sender: sender_b58,
                                 nonce: target_nonce,
                                 gas_used: 0,
@@ -1008,10 +997,7 @@ impl SolenApiServer for SolenRpc {
                                 confirmed: true,
                                 success: true,
                                 block_height: 0,
-                                tx_hash: hex_encode(&Self::synthetic_tx_hash(
-                                    &target_sender,
-                                    target_nonce,
-                                )),
+                                tx_hash: String::new(),
                                 sender: sender_b58,
                                 nonce: target_nonce,
                                 gas_used: 0,

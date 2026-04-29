@@ -152,8 +152,9 @@ async fn get_tx(
     Json(store.get_tx(height, index).cloned())
 }
 
-/// Lookup by `tx_hash` (= `blake3(sender ‖ nonce_le)`, hex-encoded). Accepts
-/// 64 hex chars with or without a `0x` prefix; case-insensitive.
+/// Lookup by `tx_hash` (= `blake3(block_height_le ‖ tx_index_le ‖ sender ‖ nonce_le)`,
+/// hex-encoded). Accepts 64 hex chars with or without a `0x` prefix;
+/// case-insensitive.
 async fn get_tx_by_hash(
     State(state): State<ApiState>,
     Path(tx_hash): Path<String>,

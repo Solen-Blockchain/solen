@@ -32,10 +32,11 @@ pub struct IndexedTx {
     pub gas_used: u64,
     pub error: Option<String>,
     pub events: Vec<IndexedEvent>,
-    /// Hex-encoded `blake3(sender ‖ nonce_le)`. Same scheme the consensus
-    /// engine emits in `NodeEvent::TxIncluded` and the value RPC clients see
-    /// as `tx_hash` in `solen_submitOperationConfirm` / `solen_txConfirmation`.
-    /// Default-empty for backwards compatibility with old serialized records.
+    /// Hex-encoded `blake3(block_height_le ‖ tx_index_le ‖ sender ‖ nonce_le)`.
+    /// Same scheme the consensus engine emits in `NodeEvent::TxIncluded` and the
+    /// value RPC clients see as `tx_hash` in `solen_submitOperationConfirm` /
+    /// `solen_txConfirmation`. Default-empty for backwards compatibility with
+    /// old serialized records.
     #[serde(default)]
     pub tx_hash: String,
 }

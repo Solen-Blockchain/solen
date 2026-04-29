@@ -196,6 +196,11 @@ async fn get_account_txs(
 pub struct TransferRow {
     /// "{block_height}-{tx_index}-{event_index}".
     pub txid: String,
+    /// Hex-encoded `blake3(block_height_le ‖ tx_index_le ‖ sender ‖ nonce_le)`
+    /// — the same `tx_hash` exposed by the consensus engine and `/api/tx/...`.
+    /// Empty on rows whose underlying tx was indexed before the hash was
+    /// recorded.
+    pub tx_hash: String,
     pub block_height: u64,
     pub tx_index: usize,
     pub event_index: usize,
@@ -320,6 +325,7 @@ async fn get_account_transfers(
 
             rows.push(TransferRow {
                 txid: format!("{}-{}-{}", tx.block_height, tx.index, ev_idx),
+                tx_hash: tx.tx_hash.clone(),
                 block_height: tx.block_height,
                 tx_index: tx.index,
                 event_index: ev_idx,

@@ -1146,6 +1146,7 @@ impl SolenApiServer for SolenRpc {
             native_transfers: Vec::new(),
             pending_calls: Vec::new(),
             msg_value: 0,
+            self_balance: account.balance,
         };
 
         let vm = solen_vm::runtime::VmRuntime::new()
@@ -1507,6 +1508,7 @@ impl SolenApiServer for SolenRpc {
                 native_transfers: Vec::new(),
                 pending_calls: Vec::new(),
                 msg_value: 0,
+                self_balance: 0,
             };
 
             let vm = match solen_vm::runtime::VmRuntime::new() {

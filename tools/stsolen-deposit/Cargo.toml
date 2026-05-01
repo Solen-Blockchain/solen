@@ -1,0 +1,21 @@
+[package]
+name = "stsolen-deposit"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "stsolen-deposit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+solen-crypto = { workspace = true }
+solen-types = { workspace = true }

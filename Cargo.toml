@@ -29,6 +29,7 @@ members = [
     "tools/bench",
     "tools/vectors",
     "tools/stsolen-deploy",
+    "tools/stsolen-deposit",
 ]
 
 [workspace.package]

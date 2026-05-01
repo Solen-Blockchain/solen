@@ -4,3 +4,4 @@
 pub mod api;
 pub mod indexer;
 pub mod store;
+pub mod stsolen_apy;

@@ -18,6 +18,9 @@ use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, Indexed
 pub struct ApiState {
     pub store: Arc<RwLock<IndexStore>>,
     pub engine: Option<Arc<ConsensusEngine>>,
+    /// Rolling buffer feeding `/api/stsolen/apy`. Empty until the sampler
+    /// task fills it.
+    pub stsolen_apy: Arc<crate::stsolen_apy::ApySamples>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +105,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/totalsupply", get(get_total_supply))
         .route("/api/circulatingsupply", get(get_circulating_supply))
         .route("/api/richlist", get(get_richlist))
+        .route("/api/stsolen/apy", get(crate::stsolen_apy::get_stsolen_apy))
         .with_state(state)
 }
 
@@ -974,7 +978,11 @@ pub async fn start_explorer_api(
     store: Arc<RwLock<IndexStore>>,
     engine: Option<Arc<ConsensusEngine>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ApiState { store, engine };
+    let stsolen_apy = Arc::new(crate::stsolen_apy::ApySamples::new());
+    if let Some(e) = engine.as_ref() {
+        crate::stsolen_apy::spawn_sampler(stsolen_apy.clone(), e.clone());
+    }
+    let state = ApiState { store, engine, stsolen_apy };
     let app = router(state);
 
     info!(%addr, "explorer API started");

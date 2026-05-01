@@ -38,8 +38,9 @@
 //! | `wq/{seq}` | 56 bytes | `account[32] ‖ solen_owed[16] ‖ requested_epoch[8]` |
 
 #![no_std]
-// Scaffold pass: lifecycle methods are stubs, so several helpers and
-// constants are deliberately defined-but-unused. The next pass consumes them.
+// Some constants (e.g. `SOLEN_BASE_UNIT`) are exported for external readers
+// of the source; allow dead code here rather than peppering individual
+// `#[allow]` attributes.
 #![allow(dead_code)]
 
 use solen_contract_sdk::{events, sdk, storage};
@@ -408,7 +409,7 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
         b"symbol" => sdk::return_value(SYMBOL),
         b"decimals" => sdk::return_value(&[DECIMALS]),
 
-        // Staking lifecycle (stubs — implemented in subsequent passes)
+        // Staking lifecycle
         b"deposit" => do_deposit(),
         b"request_withdrawal" => do_request_withdrawal(args),
         b"claim_withdrawal" => do_claim_withdrawal(args),
@@ -429,6 +430,7 @@ pub extern "C" fn call(input_ptr: i32, input_len: i32) -> i32 {
         b"set_slash_oracle" => do_set_slash_oracle(args),
         b"pause" => do_pause(),
         b"unpause" => do_unpause(),
+        b"settle_shortfall" => do_settle_shortfall(args),
 
         // Reads
         b"exchange_rate" => do_exchange_rate(),
@@ -518,7 +520,14 @@ fn do_approve(args: &[u8]) -> i32 {
     let spender = match read_account(args, 0) { Some(a) => a, None => return sdk::return_value(b"err:invalid_args") };
     let amount = match read_u128(args, 32) { Some(a) => a, None => return sdk::return_value(b"err:invalid_args") };
     set_allowance(&caller, &spender, amount);
-    events::emit(b"approval", &amount.to_le_bytes());
+
+    // F-08 audit fix: emit owner ‖ spender ‖ amount so indexers can
+    // reconstruct allowances from the event log alone.
+    let mut data = [0u8; 80];
+    data[..32].copy_from_slice(&caller);
+    data[32..64].copy_from_slice(&spender);
+    data[64..80].copy_from_slice(&amount.to_le_bytes());
+    events::emit(b"approval", &data);
     sdk::return_value(b"ok")
 }
 
@@ -599,37 +608,55 @@ fn sync_rewards() {
 ///
 /// Returns `[0u8; 32]` if the allowlist is empty or all slots are zeroed.
 fn pick_operator(amount: u128) -> [u8; 32] {
+    let (chosen, advance_to) = select_operator(amount);
+    if chosen != [0u8; 32] {
+        set_op_cursor(advance_to);
+    }
+    chosen
+}
+
+/// Read-only variant of `pick_operator` — same selection logic, but does NOT
+/// advance `op_cursor`. Used during deposit's validation phase (audit fix
+/// F-01) so we can confirm an operator is available before committing any
+/// state mutation.
+fn peek_operator(amount: u128) -> [u8; 32] {
+    select_operator(amount).0
+}
+
+/// Internal: returns `(chosen, next_cursor)`. The caller decides whether to
+/// commit the cursor advance.
+fn select_operator(amount: u128) -> ([u8; 32], u64) {
     let count = get_op_count();
+    let cursor = get_op_cursor();
     if count == 0 {
-        return [0u8; 32];
+        return ([0u8; 32], cursor);
     }
     let cap_bps = get_op_cap_bps() as u128;
     let pool_after = get_total_pooled().saturating_add(amount);
     let cap = pool_after.saturating_mul(cap_bps) / 10_000;
 
-    let mut cursor = get_op_cursor();
+    let mut walk = cursor;
     let mut fallback = [0u8; 32];
     for _ in 0..count {
-        let op = read_32(&op_key(cursor)).unwrap_or([0u8; 32]);
-        let next_cursor = (cursor + 1) % count;
+        let op = read_32(&op_key(walk)).unwrap_or([0u8; 32]);
+        let next_cursor = (walk + 1) % count;
         if op != [0u8; 32] {
             if fallback == [0u8; 32] {
                 fallback = op;
             }
             if get_op_stake(&op).saturating_add(amount) <= cap {
-                set_op_cursor(next_cursor);
-                return op;
+                return (op, next_cursor);
             }
         }
-        cursor = next_cursor;
+        walk = next_cursor;
     }
     // Every populated slot is over cap. Accept the first non-empty one we saw
     // rather than returning a sentinel — depositors shouldn't be blocked by a
     // pool-wide saturation event.
     if fallback != [0u8; 32] {
-        set_op_cursor((get_op_cursor() + 1) % count);
+        return (fallback, (cursor + 1) % count);
     }
-    fallback
+    ([0u8; 32], cursor)
 }
 
 /// `deposit()` — payable. Reads `msg_value()` for the SOLEN-in.
@@ -648,6 +675,9 @@ fn pick_operator(amount: u128) -> [u8; 32] {
 /// it still backs stSOLEN — so `total_pooled_solen` grows by the full
 /// `msg_value`, not just `to_delegate`.
 fn do_deposit() -> i32 {
+    // ── Validation phase: NO storage mutation may happen here. The Solen VM
+    // does not roll back state on `err:*` return values for single-action ops;
+    // any err returned after a write would persist a partial state.
     if is_paused() {
         return sdk::return_value(b"err:paused");
     }
@@ -656,15 +686,6 @@ fn do_deposit() -> i32 {
         return sdk::return_value(b"err:zero_value");
     }
 
-    sync_rewards();
-
-    let supply = get_total_supply();
-    let pool = get_total_pooled();
-
-    // How much can we delegate without breaking the staking-call reserve
-    // invariant? `bal_now` already includes `msg_value` (Transfer ran first).
-    // After the queued delegate runs, balance = bal_now - to_delegate, which
-    // must remain ≥ MIN_FEE_RESERVE.
     let bal_now = sdk::self_balance();
     let to_delegate = bal_now
         .saturating_sub(MIN_FEE_RESERVE)
@@ -673,14 +694,35 @@ fn do_deposit() -> i32 {
         return sdk::return_value(b"err:deposit_too_small_for_reserve");
     }
 
-    // Compute mint amount + apply bootstrap burn if this is the very first
-    // deposit. Bootstrap burn locks 1000 stSOLEN to a dead address so an
-    // attacker can't deflate `total_supply` to 1 and inflate the rate against
-    // future depositors (Uniswap V2 mitigation).
-    let mint_amount = if supply == 0 {
-        if msg_value < MIN_FIRST_DEPOSIT {
-            return sdk::return_value(b"err:first_deposit_too_small");
-        }
+    let supply_pre = get_total_supply();
+    let is_first_deposit = supply_pre == 0;
+    if is_first_deposit && msg_value < MIN_FIRST_DEPOSIT {
+        return sdk::return_value(b"err:first_deposit_too_small");
+    }
+
+    // Operator availability — must precede any state mutation. F-01 audit fix.
+    if get_op_count() == 0 {
+        return sdk::return_value(b"err:no_operators");
+    }
+    // Peek at operator selection without committing the cursor advance.
+    let chosen_preview = peek_operator(to_delegate);
+    if chosen_preview == [0u8; 32] {
+        return sdk::return_value(b"err:no_operators");
+    }
+
+    // ── Mutation phase. After this point all paths must succeed; remaining
+    // failure modes (queue full, staking call rejection) are unreachable in
+    // practice and use `panic!` to force a VM trap → UserOp rollback.
+    sync_rewards();
+
+    // Re-read after sync (sync may have absorbed rewards into total_pooled_solen
+    // and minted treasury fee, changing supply).
+    let supply = get_total_supply();
+    let pool = get_total_pooled();
+
+    let mint_amount = if is_first_deposit {
+        // Bootstrap burn: locks 1000 stSOLEN to a dead address (Uniswap V2 trick)
+        // to prevent the donate-then-deposit rate-inflation attack.
         let dead_bal = get_balance(&DEAD_ADDRESS);
         set_balance(&DEAD_ADDRESS, dead_bal + BOOTSTRAP_BURN);
         set_total_supply(BOOTSTRAP_BURN);
@@ -693,44 +735,42 @@ fn do_deposit() -> i32 {
         msg_value - BOOTSTRAP_BURN
     } else {
         if pool == 0 {
-            return sdk::return_value(b"err:invariant_pool_zero");
+            // Should be unreachable — supply > 0 implies pool > 0 by invariant
+            // I2. Treat as panic-class.
+            panic!("stSOLEN: invariant violation pool=0 supply>0");
         }
         msg_value.saturating_mul(supply) / pool
     };
 
-    if mint_amount == 0 {
+    // Sanity — mint_amount could be zero only on a dust deposit against a huge
+    // pool. Caught here as the final check before mutation; harmless to abort
+    // since we haven't committed the user-facing mutations yet (the bootstrap
+    // burn above is the only mutation, and it only runs in the else branch).
+    if mint_amount == 0 && !is_first_deposit {
         return sdk::return_value(b"err:mint_zero");
     }
 
-    if get_op_count() == 0 {
-        return sdk::return_value(b"err:no_operators");
-    }
+    // Commit the chosen operator (advance op_cursor).
     let chosen = pick_operator(to_delegate);
-    if chosen == [0u8; 32] {
-        return sdk::return_value(b"err:no_operators");
-    }
 
     let caller = sdk::caller();
     set_balance(&caller, get_balance(&caller) + mint_amount);
     set_total_supply(get_total_supply() + mint_amount);
-
-    // Pool grows by the full deposit, including the part retained as reserve.
     set_total_pooled(pool + msg_value);
-
-    // op_stake reflects what's actually delegated TO that operator.
     set_op_stake(&chosen, get_op_stake(&chosen) + to_delegate);
 
     let mut delegate_args = [0u8; 48];
     delegate_args[..32].copy_from_slice(&chosen);
     delegate_args[32..].copy_from_slice(&to_delegate.to_le_bytes());
     if !sdk::queue_call(&STAKING_ADDRESS, b"delegate", &delegate_args) {
-        return sdk::return_value(b"err:queue_full");
+        // F-05: post-mutation queue exhaustion. Panic forces VM trap → UserOp
+        // rollback, which is the only correct behavior since we've already
+        // mutated state. Unreachable in practice (queue cap=16, we use 1).
+        panic!("stSOLEN: delegate queue full");
     }
 
     // Adjust last_balance_seen to reflect the post-return balance: the queued
-    // delegate will subtract `to_delegate`. Without this, the next sync would
-    // see a phantom "outflow" (or, after rewards land, miscount the reward
-    // delta).
+    // delegate will subtract `to_delegate`.
     let last_seen = storage::get_u128(b"last_balance_seen").unwrap_or(0);
     storage::set_u128(b"last_balance_seen", last_seen.saturating_sub(to_delegate));
 
@@ -758,6 +798,9 @@ fn do_deposit() -> i32 {
 /// via the cranker keeps us comfortably under the staking module's 7-row
 /// per-(delegator,validator) limit.
 fn do_request_withdrawal(args: &[u8]) -> i32 {
+    // ── Validation phase: NO storage mutation. F-02 audit fix. The Solen VM
+    // does not roll back state on `err:*` returns for single-action ops, so
+    // any err here must precede any write.
     if is_paused() {
         return sdk::return_value(b"err:paused");
     }
@@ -774,32 +817,18 @@ fn do_request_withdrawal(args: &[u8]) -> i32 {
         return sdk::return_value(b"err:insufficient_balance");
     }
 
-    sync_rewards();
-
-    let supply = get_total_supply();
-    let pool = get_total_pooled();
-    if supply == 0 || pool == 0 {
+    let supply_pre = get_total_supply();
+    let pool_pre = get_total_pooled();
+    if supply_pre == 0 || pool_pre == 0 {
         return sdk::return_value(b"err:empty_pool");
     }
-    // Lock at today's rate. Truncates — depositor side has the same truncation
-    // direction (depositor loses ≤1 unit on mint, claimant loses ≤1 unit here).
-    let solen_owed = stsolen_burn.saturating_mul(pool) / supply;
-    if solen_owed == 0 {
+    // Pre-sync sanity check on owed; we re-derive below post-sync.
+    if stsolen_burn.saturating_mul(pool_pre) / supply_pre == 0 {
         return sdk::return_value(b"err:owed_zero");
     }
 
-    // Burn stSOLEN.
-    set_balance(&caller, bal - stsolen_burn);
-    set_total_supply(supply - stsolen_burn);
-
-    // Pool shrinks; pending bookkeeping grows.
-    set_total_pooled(pool - solen_owed);
-    set_pending_withdrawals_solen(get_pending_withdrawals_solen() + solen_owed);
-
-    // Allocate pro-rata across operators by their current op_stake. The
-    // first pass computes total stake; the second pass distributes.
-    // Residual due to truncation goes to the last non-empty operator to
-    // ensure we account for exactly `solen_owed`.
+    // Verify there is delegated stake to undelegate against, BEFORE burning
+    // the user's stSOLEN. This is the F-02 fix.
     let count = get_op_count();
     let mut total_op_stake: u128 = 0;
     for i in 0..count {
@@ -813,6 +842,32 @@ fn do_request_withdrawal(args: &[u8]) -> i32 {
         return sdk::return_value(b"err:no_delegated_stake");
     }
 
+    // ── Mutation phase. All preconditions are validated.
+    sync_rewards();
+
+    // Re-read after sync; the rate may have moved if rewards landed.
+    let supply = get_total_supply();
+    let pool = get_total_pooled();
+    let solen_owed = stsolen_burn.saturating_mul(pool) / supply;
+    if solen_owed == 0 {
+        // Rate moved enough that owed truncates to 0. Treat as benign:
+        // sync_rewards has already absorbed any pending rewards (no harm),
+        // so we just abort without burning.
+        return sdk::return_value(b"err:owed_zero");
+    }
+    // Re-read total_op_stake post-sync — sync doesn't touch op_stake but be
+    // defensive (a slash report between pre-check and here would only reduce
+    // it, so the pre-check still bounds the post-sync invariant).
+
+    // Burn stSOLEN.
+    set_balance(&caller, get_balance(&caller) - stsolen_burn);
+    set_total_supply(supply - stsolen_burn);
+
+    // Pool shrinks; pending bookkeeping grows.
+    set_total_pooled(pool - solen_owed);
+    set_pending_withdrawals_solen(get_pending_withdrawals_solen() + solen_owed);
+
+    // Allocate pro-rata across operators. Residual to last non-empty op.
     let mut allocated: u128 = 0;
     let mut last_op = [0u8; 32];
     for i in 0..count {
@@ -872,7 +927,11 @@ fn do_crank_undelegations() -> i32 {
     let matured = walk_matured_log(now, /* commit = */ true);
     if matured > 0 {
         if !sdk::queue_call(&STAKING_ADDRESS, b"withdraw", &[]) {
-            return sdk::return_value(b"err:queue_full");
+            // F-05: post-mutation queue exhaustion. Panic forces VM trap →
+            // UserOp rollback so the drained log entries / freed inflight
+            // slots aren't permanently committed without the matching
+            // withdraw call. Unreachable in practice (queue cap=16, used 1).
+            panic!("stSOLEN: withdraw queue full");
         }
         set_withdrawal_buffer(get_withdrawal_buffer() + matured);
         // Pre-emptively reflect the post-return inflow so sync_rewards in the
@@ -923,7 +982,9 @@ fn do_crank_undelegations() -> i32 {
         undel_args[..32].copy_from_slice(&op);
         undel_args[32..].copy_from_slice(&amount.to_le_bytes());
         if !sdk::queue_call(&STAKING_ADDRESS, b"undelegate", &undel_args) {
-            return sdk::return_value(b"err:queue_full");
+            // F-05: per-op state has already been mutated. Panic for
+            // VM-trap rollback. Unreachable in practice (cap=16, max=12).
+            panic!("stSOLEN: undelegate queue full");
         }
         operators_processed += 1;
         total_undelegated = total_undelegated.saturating_add(amount);
@@ -970,15 +1031,18 @@ fn do_claim_withdrawal(args: &[u8]) -> i32 {
         return sdk::return_value(b"err:not_yet_eligible");
     }
 
-    sync_rewards();
-
     let buffer = get_withdrawal_buffer();
     if buffer < solen_owed {
         return sdk::return_value(b"err:buffer_insufficient");
     }
 
+    // ── Mutation phase. All checks pass; full-pay path is straightforward.
+    sync_rewards();
+
     if !sdk::transfer(&account, solen_owed) {
-        return sdk::return_value(b"err:transfer_queue_full");
+        // Post-mutation only if sync_rewards mutated; the actual claim writes
+        // come below. Panic for VM-trap rollback; unreachable in practice.
+        panic!("stSOLEN: claim transfer queue full");
     }
     set_withdrawal_buffer(buffer - solen_owed);
     set_pending_withdrawals_solen(
@@ -1002,6 +1066,75 @@ fn do_claim_withdrawal(args: &[u8]) -> i32 {
     sdk::return_value(b"ok")
 }
 
+/// `settle_shortfall(seq[8])` — owner-only. Force-settle a queue head whose
+/// `solen_owed` exceeds `withdrawal_buffer` by paying out *what's available*
+/// and writing off the rest. Advances the queue so subsequent claims unblock.
+///
+/// **F-04 audit fix.** Without this method, a slash-induced shortfall at the
+/// queue head permanently blocks every later withdrawal under strict FIFO.
+/// Owner-gated rather than permissionless because the user is taking a real
+/// haircut — the residual is dropped from the protocol's obligation pool
+/// rather than honored later. Owner is responsible for off-chain compensation
+/// to the affected user if desired.
+///
+/// Emits `claim_shortfall(account, seq, owed, paid, shortfall)` (88 bytes).
+fn do_settle_shortfall(args: &[u8]) -> i32 {
+    if let Err(r) = require_owner() { return r; }
+    let seq = match read_u64(args, 0) {
+        Some(s) => s,
+        None => return sdk::return_value(b"err:invalid_args"),
+    };
+    let head = get_wq_head();
+    if seq != head {
+        return sdk::return_value(b"err:not_head_of_queue");
+    }
+    let (account, solen_owed, requested_epoch) = match read_wq(seq) {
+        Some(e) => e,
+        None => return sdk::return_value(b"err:no_such_request"),
+    };
+    let now = current_epoch();
+    if now < requested_epoch + UNBONDING_EPOCHS + 1 {
+        return sdk::return_value(b"err:not_yet_eligible");
+    }
+
+    let buffer = get_withdrawal_buffer();
+    let paid = buffer.min(solen_owed);
+    let shortfall = solen_owed - paid;
+
+    // ── Mutation phase.
+    sync_rewards();
+
+    if paid > 0 {
+        if !sdk::transfer(&account, paid) {
+            panic!("stSOLEN: shortfall transfer queue full");
+        }
+        set_withdrawal_buffer(buffer - paid);
+        let last_seen = storage::get_u128(b"last_balance_seen").unwrap_or(0);
+        storage::set_u128(b"last_balance_seen", last_seen.saturating_sub(paid));
+    }
+
+    // Resolve the queue obligation in full from the protocol's perspective.
+    // The shortfall is dropped — the protocol's books reflect that this seq
+    // is settled. The user lost real value; ops should handle compensation
+    // off-chain if appropriate.
+    set_pending_withdrawals_solen(
+        get_pending_withdrawals_solen().saturating_sub(solen_owed),
+    );
+
+    clear_wq(seq);
+    set_wq_head(head + 1);
+
+    let mut data = [0u8; 88];
+    data[..32].copy_from_slice(&account);
+    data[32..40].copy_from_slice(&seq.to_le_bytes());
+    data[40..56].copy_from_slice(&solen_owed.to_le_bytes());
+    data[56..72].copy_from_slice(&paid.to_le_bytes());
+    data[72..88].copy_from_slice(&shortfall.to_le_bytes());
+    events::emit(b"claim_shortfall", &data);
+
+    sdk::return_value(b"ok")
+}
+
 /// `recompound_rewards()` — re-delegate idle reward SOLEN sitting in the
 /// contract account. Permissionless; rate-limited to once per epoch so the
 /// staking contract isn't spammed with tiny delegations.
@@ -1009,13 +1142,25 @@ fn do_claim_withdrawal(args: &[u8]) -> i32 {
 /// Conservatively skips when `available < 100 SOLEN` (10^10 base units): not
 /// worth the gas for sub-100-SOLEN dust until rewards accumulate.
 fn do_recompound_rewards() -> i32 {
+    // ── Validation phase: NO storage mutation. F-05 + F-07 audit fix.
     let now = current_epoch();
     let last_recomp = storage::get_u64(b"last_recompound_epoch").unwrap_or(0);
-    // Allow the very first recompound when last_recomp == 0 == now (epoch 0).
-    if get_total_pooled() > 0 && now <= last_recomp {
+    // Rate-limit: skip if a recompound has already happened this epoch. The
+    // `last_recomp != 0` guard distinguishes "first ever" from "already done
+    // this epoch"; without it, the first recompound at epoch 0 would be
+    // blocked. F-07 audit fix.
+    if last_recomp != 0 && now <= last_recomp {
         return sdk::return_value(b"err:rate_limited");
     }
 
+    if get_op_count() == 0 {
+        return sdk::return_value(b"err:no_operators");
+    }
+    if peek_operator(0) == [0u8; 32] {
+        return sdk::return_value(b"err:no_operators");
+    }
+
+    // ── Mutation phase. Validation has confirmed an operator exists.
     sync_rewards();
 
     let bal = sdk::self_balance();
@@ -1026,16 +1171,12 @@ fn do_recompound_rewards() -> i32 {
 
     const MIN_RECOMPOUND: u128 = 100 * 100_000_000; // 100 SOLEN
     if available < MIN_RECOMPOUND {
+        // sync_rewards may have moved state but no recompound-specific
+        // mutation has happened; safe to err.
         return sdk::return_value(b"err:insufficient_to_recompound");
     }
 
-    if get_op_count() == 0 {
-        return sdk::return_value(b"err:no_operators");
-    }
     let chosen = pick_operator(available);
-    if chosen == [0u8; 32] {
-        return sdk::return_value(b"err:no_operators");
-    }
 
     set_op_stake(&chosen, get_op_stake(&chosen) + available);
     // total_pooled_solen already reflects this SOLEN — sync_rewards absorbed
@@ -1046,7 +1187,8 @@ fn do_recompound_rewards() -> i32 {
     args[..32].copy_from_slice(&chosen);
     args[32..].copy_from_slice(&available.to_le_bytes());
     if !sdk::queue_call(&STAKING_ADDRESS, b"delegate", &args) {
-        return sdk::return_value(b"err:queue_full");
+        // F-05: post-mutation queue exhaustion. Panic for VM-trap rollback.
+        panic!("stSOLEN: recompound delegate queue full");
     }
 
     // The delegate will deduct `available` from balance post-return; refresh
@@ -1116,11 +1258,29 @@ fn require_owner() -> Result<(), i32> {
 
 /// `set_operator(index[8] || operator[32])` — write or replace allowlist slot.
 /// Initializes `op_stake[operator] = 0` if it was unset.
+/// `set_operator(index[8] || operator[32])` — install an operator at a slot.
+///
+/// **Refuses to overwrite a slot whose current occupant has non-zero state**
+/// (`op_stake > 0`, pending undelegate > 0, or in-flight undelegations > 0).
+/// F-03 audit fix: the previous implementation would orphan the old
+/// operator's accounting outside the active allowlist, breaking
+/// withdrawal-allocation invariants. To replace a busy operator, the owner
+/// must first drain the old position via the normal withdrawal path or use
+/// the migration helper (TODO v1.1).
 fn do_set_operator(args: &[u8]) -> i32 {
     if let Err(r) = require_owner() { return r; }
     let i = match read_u64(args, 0) { Some(v) => v, None => return sdk::return_value(b"err:invalid_args") };
     let op = match read_account(args, 8) { Some(a) => a, None => return sdk::return_value(b"err:invalid_args") };
     if i >= MAX_OPERATORS { return sdk::return_value(b"err:index_out_of_range"); }
+
+    // Reject if the existing slot occupant still has accounting we'd strand.
+    let existing = read_32(&op_key(i)).unwrap_or([0u8; 32]);
+    if existing != [0u8; 32] && existing != op {
+        if has_active_position(&existing) {
+            return sdk::return_value(b"err:slot_occupant_has_position");
+        }
+    }
+
     storage::set(&op_key(i), &op);
 
     let mut data = [0u8; 40];
@@ -1130,8 +1290,8 @@ fn do_set_operator(args: &[u8]) -> i32 {
     sdk::return_value(b"ok")
 }
 
-/// `remove_operator(index[8])` — refuses if `op_stake[operator] > 0`.
-/// The owner must drain stake to zero (via crank + claims) before removal.
+/// `remove_operator(index[8])` — refuses if the current occupant has any
+/// active position.
 fn do_remove_operator(args: &[u8]) -> i32 {
     if let Err(r) = require_owner() { return r; }
     let i = match read_u64(args, 0) { Some(v) => v, None => return sdk::return_value(b"err:invalid_args") };
@@ -1140,17 +1300,45 @@ fn do_remove_operator(args: &[u8]) -> i32 {
         Some(v) => v,
         None => return sdk::return_value(b"err:slot_empty"),
     };
-    if get_op_stake(&op) > 0 {
-        return sdk::return_value(b"err:operator_has_stake");
+    if has_active_position(&op) {
+        return sdk::return_value(b"err:operator_has_position");
     }
     storage::set(&key, &[0u8; 32]);
     sdk::return_value(b"ok")
 }
 
+/// True iff `op` has any position the contract is tracking (delegated stake,
+/// queued undelegate amount, or in-flight undelegations). Used by
+/// `set_operator` and `set_op_count` to prevent stranding accounting outside
+/// the active allowlist.
+fn has_active_position(op: &[u8; 32]) -> bool {
+    get_op_stake(op) > 0
+        || get_pending_undelegate(op) > 0
+        || get_inflight_undelegations(op) > 0
+}
+
+/// `set_op_count(count[8])` — change the active allowlist length.
+///
+/// **Refuses to shrink below any slot whose operator has an active
+/// position.** F-03 audit fix: shrinking would hide that operator's stake
+/// from `request_withdrawal` and `crank_undelegations`, stranding accounting.
 fn do_admin_set_op_count(args: &[u8]) -> i32 {
     if let Err(r) = require_owner() { return r; }
     let n = match read_u64(args, 0) { Some(v) => v, None => return sdk::return_value(b"err:invalid_args") };
     if n > MAX_OPERATORS { return sdk::return_value(b"err:exceeds_max_operators"); }
+
+    let current = get_op_count();
+    if n < current {
+        // Walk the slots that would be hidden and ensure none have active
+        // positions.
+        for i in n..current {
+            let op = read_32(&op_key(i)).unwrap_or([0u8; 32]);
+            if op != [0u8; 32] && has_active_position(&op) {
+                return sdk::return_value(b"err:slot_in_range_has_position");
+            }
+        }
+    }
+
     set_op_count(n);
     sdk::return_value(b"ok")
 }

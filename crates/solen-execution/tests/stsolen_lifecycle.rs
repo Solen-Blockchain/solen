@@ -1141,3 +1141,354 @@ fn recompound_redelegates_idle_rewards() {
     let acct = mgr.require_account(&contract).unwrap();
     assert_eq!(acct.balance, 10_000, "reserve preserved");
 }
+
+// ── Audit-fix regression tests ──────────────────────────────────────
+//
+// These tests pin the behavior of bugs identified by the GPT-5.5 audit pass
+// (F-01..F-09). Each test reproduces the pre-fix bug condition and asserts
+// the post-fix correct behavior, so the bug can't silently regress.
+
+/// F-01: deposit before operators are configured must NOT mutate state.
+///
+/// Pre-fix: bootstrap-burn mint to DEAD landed before the op_count check,
+/// so a deposit with op_count == 0 left total_supply = 1000 and the user's
+/// SOLEN stranded in the contract.
+#[test]
+fn audit_f01_deposit_without_operators_makes_no_mutations() {
+    let wasm = build_and_load_wasm();
+    let (mut store, kp) = setup();
+    let executor = zero_fee_executor();
+
+    let (contract, mut nonce) = deploy_stsolen(&mut store, &executor, &kp, &wasm);
+    init_contract(&mut store, &executor, &kp, contract, nonce);
+    nonce += 1;
+    // Deliberately do NOT call set_op_count / set_operator. op_count = 0.
+
+    let dead_addr: AccountId = [0xDE; 32];
+    let total_supply_before = total_supply(&store, &contract);
+    assert_eq!(total_supply_before, 0);
+
+    // Attempt a deposit. The op succeeds at the executor level (Transfer
+    // lands), but the contract's deposit Call should refuse with
+    // err:no_operators and leave token state untouched.
+    let mut op = UserOperation {
+        sender: alice_id(),
+        nonce,
+        actions: vec![
+            Action::Transfer { to: contract, amount: 1_000_000 },
+            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+        ],
+        max_fee: 1_000_000,
+        signature: vec![],
+    };
+    sign_op(&kp, &executor, &mut op);
+    let r = executor.execute_block(&mut store, &[op]);
+    assert!(r.receipts[0].success, "executor accepts the op (Transfer lands)");
+
+    // Critical: NO mutations to the dead-address balance, total_supply, or
+    // total_pooled_solen. The Transfer DID land (action-level), but the
+    // contract did not commit ANY bookkeeping.
+    assert_eq!(
+        stsolen_balance(&store, &contract, &dead_addr),
+        0,
+        "F-01: dead-address must not have a phantom mint"
+    );
+    assert_eq!(
+        total_supply(&store, &contract),
+        0,
+        "F-01: total_supply must remain 0 when deposit fails"
+    );
+    assert_eq!(
+        total_pooled(&store, &contract),
+        0,
+        "F-01: total_pooled_solen must remain 0 when deposit fails"
+    );
+}
+
+/// F-02: request_withdrawal with zero delegated stake must NOT burn shares.
+///
+/// Pre-fix: caller's stSOLEN was burned and pool/pending updated before the
+/// total_op_stake == 0 check, leaving an unclaimable obligation. Reachable
+/// via report_slash(op, 0) when there's only one operator.
+#[test]
+fn audit_f02_request_withdrawal_without_delegated_stake_makes_no_mutations() {
+    let wasm = build_and_load_wasm();
+    let (mut store, kp) = setup();
+    let executor = zero_fee_executor();
+
+    let (contract, mut nonce) = deploy_stsolen(&mut store, &executor, &kp, &wasm);
+    init_contract(&mut store, &executor, &kp, contract, nonce);
+    nonce += 1;
+    add_operator(&mut store, &executor, &kp, contract, nonce);
+    nonce += 2;
+
+    // Bootstrap deposit so the user has stSOLEN.
+    let mut dep = UserOperation {
+        sender: alice_id(),
+        nonce,
+        actions: vec![
+            Action::Transfer { to: contract, amount: 1_000_000 },
+            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+        ],
+        max_fee: 1_000_000,
+        signature: vec![],
+    };
+    sign_op(&kp, &executor, &mut dep);
+    let r = executor.execute_block(&mut store, &[dep]);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    // Slash the only operator down to zero — `report_slash` accepts any
+    // realized < prior, including 0.
+    let mut slash_args = Vec::with_capacity(48);
+    slash_args.extend_from_slice(&validator_id());
+    slash_args.extend_from_slice(&0u128.to_le_bytes());
+    let slash_op = call_op(&executor, &kp, nonce, contract, "report_slash", slash_args);
+    let r = executor.execute_block(&mut store, &[slash_op]);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    // Snapshot state before the failing request.
+    let alice_stsolen_before = stsolen_balance(&store, &contract, &alice_id());
+    let supply_before = total_supply(&store, &contract);
+    let pool_before = total_pooled(&store, &contract);
+    let pending_before =
+        read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen"));
+    let wq_tail_before = read_u64_at(&store, &cs_key(&contract, b"wq_tail"));
+
+    // Request withdrawal — should refuse with err:no_delegated_stake without
+    // mutating any of the above.
+    let mut req_args = Vec::with_capacity(16);
+    req_args.extend_from_slice(&100_000u128.to_le_bytes());
+    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let r = executor.execute_block(&mut store, &[req]);
+    assert!(r.receipts[0].success, "op accepted, but contract should refuse");
+
+    assert_eq!(
+        stsolen_balance(&store, &contract, &alice_id()),
+        alice_stsolen_before,
+        "F-02: alice's stSOLEN must not be burned"
+    );
+    assert_eq!(total_supply(&store, &contract), supply_before, "F-02: supply unchanged");
+    assert_eq!(total_pooled(&store, &contract), pool_before, "F-02: pool unchanged");
+    assert_eq!(
+        read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen")),
+        pending_before,
+        "F-02: pending unchanged"
+    );
+    assert_eq!(
+        read_u64_at(&store, &cs_key(&contract, b"wq_tail")),
+        wq_tail_before,
+        "F-02: queue tail unchanged"
+    );
+}
+
+/// F-03: set_operator on a slot whose current occupant has non-zero stake
+/// must be rejected. Same for set_op_count when shrinking would hide stake.
+#[test]
+fn audit_f03_admin_cannot_strand_op_stake() {
+    let wasm = build_and_load_wasm();
+    let (mut store, kp) = setup();
+    let executor = zero_fee_executor();
+
+    let (contract, mut nonce) = deploy_stsolen(&mut store, &executor, &kp, &wasm);
+    init_contract(&mut store, &executor, &kp, contract, nonce);
+    nonce += 1;
+    add_operator(&mut store, &executor, &kp, contract, nonce);
+    nonce += 2;
+
+    // Deposit to give slot 0's operator non-zero stake.
+    let mut dep = UserOperation {
+        sender: alice_id(),
+        nonce,
+        actions: vec![
+            Action::Transfer { to: contract, amount: 1_000_000 },
+            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+        ],
+        max_fee: 1_000_000,
+        signature: vec![],
+    };
+    sign_op(&kp, &executor, &mut dep);
+    let r = executor.execute_block(&mut store, &[dep]);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    // Try to overwrite slot 0 with a different operator.
+    let new_op: AccountId = [0x42; 32];
+    let mut args = Vec::with_capacity(40);
+    args.extend_from_slice(&0u64.to_le_bytes());
+    args.extend_from_slice(&new_op);
+    let set_op = call_op(&executor, &kp, nonce, contract, "set_operator", args);
+    let r = executor.execute_block(&mut store, &[set_op]);
+    assert!(r.receipts[0].success, "executor accepts the op");
+
+    // Verify slot 0 still holds the original validator (set_operator refused).
+    let mut op0_inner = b"op/".to_vec();
+    op0_inner.extend_from_slice(&0u64.to_le_bytes());
+    let slot0 = read_32_at(&store, &cs_key(&contract, &op0_inner));
+    assert_eq!(
+        slot0,
+        validator_id(),
+        "F-03: set_operator must NOT overwrite a busy slot"
+    );
+    nonce += 1;
+
+    // Same protection: set_op_count(0) must fail when slot 0 has stake.
+    let args = 0u64.to_le_bytes().to_vec();
+    let shrink = call_op(&executor, &kp, nonce, contract, "set_op_count", args);
+    let r = executor.execute_block(&mut store, &[shrink]);
+    assert!(r.receipts[0].success);
+
+    let op_count = read_u64_at(&store, &cs_key(&contract, b"op_count"));
+    assert_eq!(
+        op_count, 1,
+        "F-03: set_op_count must NOT shrink below an active operator"
+    );
+}
+
+/// F-04: `settle_shortfall` admin path advances the queue when the buffer
+/// can't cover a head claim, paying out partially and emitting the
+/// shortfall event.
+#[test]
+fn audit_f04_settle_shortfall_advances_blocked_queue() {
+    let wasm = build_and_load_wasm();
+    let (mut store, kp) = setup();
+    let executor = zero_fee_executor();
+
+    let (contract, mut nonce) = deploy_stsolen(&mut store, &executor, &kp, &wasm);
+    init_contract(&mut store, &executor, &kp, contract, nonce);
+    nonce += 1;
+    add_operator(&mut store, &executor, &kp, contract, nonce);
+    nonce += 2;
+
+    // Deposit + request_withdrawal to create a queue head with solen_owed.
+    let mut dep = UserOperation {
+        sender: alice_id(),
+        nonce,
+        actions: vec![
+            Action::Transfer { to: contract, amount: 1_000_000 },
+            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+        ],
+        max_fee: 1_000_000,
+        signature: vec![],
+    };
+    sign_op(&kp, &executor, &mut dep);
+    let r = executor.execute_block_with_height(&mut store, &[dep], 0);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    let burn: u128 = 100_000;
+    let mut req_args = Vec::with_capacity(16);
+    req_args.extend_from_slice(&burn.to_le_bytes());
+    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let r = executor.execute_block_with_height(&mut store, &[req], 0);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    // Advance to eligibility but DON'T crank — buffer stays at 0.
+    set_chain_height(&mut store, 800);
+
+    // Buffer is empty; full claim would fail. settle_shortfall should advance
+    // the head with paid=0, shortfall=burn.
+    let alice_native_before = StateManager::new(&mut store)
+        .get_balance(&alice_id())
+        .unwrap();
+
+    let mut shortfall_args = Vec::with_capacity(8);
+    shortfall_args.extend_from_slice(&0u64.to_le_bytes());
+    let settle = call_op(&executor, &kp, nonce, contract, "settle_shortfall", shortfall_args);
+    let r = executor.execute_block_with_height(&mut store, &[settle], 800);
+    assert!(r.receipts[0].success, "settle_shortfall failed: {:?}", r.receipts[0]);
+
+    // Queue head advanced from 0 → 1.
+    let head = read_u64_at(&store, &cs_key(&contract, b"wq_head"));
+    assert_eq!(head, 1, "F-04: head advances on settle");
+
+    // pending_withdrawal_solen drained.
+    let pending = read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen"));
+    assert_eq!(pending, 0, "F-04: pending obligation cleared");
+
+    // Alice received zero (buffer was empty) — the shortfall is total.
+    let alice_native_after = StateManager::new(&mut store)
+        .get_balance(&alice_id())
+        .unwrap();
+    assert_eq!(
+        alice_native_after, alice_native_before,
+        "F-04: empty-buffer settle pays 0; shortfall is total"
+    );
+
+    // Subsequent claims should work — the queue is unblocked.
+    // Bonus: a new request_withdrawal should succeed since pool/state are
+    // consistent (modulo the user's loss).
+    let bal_now = stsolen_balance(&store, &contract, &alice_id());
+    if bal_now > 0 {
+        let mut req2_args = Vec::with_capacity(16);
+        req2_args.extend_from_slice(&100u128.to_le_bytes());
+        let req2 = call_op(&executor, &kp, nonce + 1, contract, "request_withdrawal", req2_args);
+        let r = executor.execute_block_with_height(&mut store, &[req2], 800);
+        assert!(r.receipts[0].success);
+        let new_tail = read_u64_at(&store, &cs_key(&contract, b"wq_tail"));
+        assert!(new_tail > 1, "F-04: subsequent withdrawals can still be queued");
+    }
+}
+
+/// F-07: `recompound_rewards` must work at epoch 0 (the comment in the
+/// previous code claimed it did, but the condition blocked it).
+#[test]
+fn audit_f07_recompound_works_at_epoch_zero() {
+    let wasm = build_and_load_wasm();
+    let (mut store, kp) = setup();
+    let executor = zero_fee_executor();
+
+    let (contract, mut nonce) = deploy_stsolen(&mut store, &executor, &kp, &wasm);
+    init_contract(&mut store, &executor, &kp, contract, nonce);
+    nonce += 1;
+    add_operator(&mut store, &executor, &kp, contract, nonce);
+    nonce += 2;
+
+    // Bootstrap with a large deposit so available > 100 SOLEN floor when the
+    // reward arrives.
+    {
+        let mut mgr = StateManager::new(&mut store);
+        let mut acct = mgr.require_account(&alice_id()).unwrap();
+        acct.balance += 100_000_000_000;
+        mgr.save_account(&acct).unwrap();
+    }
+    let mut dep = UserOperation {
+        sender: alice_id(),
+        nonce,
+        actions: vec![
+            Action::Transfer { to: contract, amount: 50_000_000_000 },
+            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+        ],
+        max_fee: 5_000_000,
+        signature: vec![],
+    };
+    sign_op(&kp, &executor, &mut dep);
+    let r = executor.execute_block_with_height(&mut store, &[dep], 0);
+    assert!(r.receipts[0].success);
+    nonce += 1;
+
+    // Inject a big reward.
+    let reward: u128 = 200 * 100_000_000;
+    {
+        let mut mgr = StateManager::new(&mut store);
+        let mut acct = mgr.require_account(&contract).unwrap();
+        acct.balance += reward;
+        mgr.save_account(&acct).unwrap();
+    }
+
+    // Stay at epoch 0. recompound should succeed (F-07 fix).
+    let recompound = call_op(&executor, &kp, nonce, contract, "recompound_rewards", vec![]);
+    let r = executor.execute_block_with_height(&mut store, &[recompound], 0);
+    assert!(
+        r.receipts[0].success,
+        "F-07: recompound at epoch 0 should succeed, got {:?}",
+        r.receipts[0]
+    );
+
+    // Verify last_recompound_epoch was set to 0 (the new condition uses
+    // `last_recomp != 0` so first call always allowed).
+    let last = read_u64_at(&store, &cs_key(&contract, b"last_recompound_epoch"));
+    assert_eq!(last, 0, "F-07: last_recompound_epoch should be 0 after first recompound at epoch 0");
+}

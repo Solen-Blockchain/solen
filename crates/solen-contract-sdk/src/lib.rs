@@ -28,6 +28,7 @@ extern "C" {
     fn set_return_data(ptr: i32, len: i32);
     fn transfer_native(to_ptr: i32, amount_ptr: i32) -> i32;
     fn get_self_id(out_ptr: i32);
+    fn get_self_balance(out_ptr: i32);
     fn get_msg_value(out_ptr: i32);
     fn queue_contract_call(
         target_ptr: i32,
@@ -84,6 +85,22 @@ pub mod sdk {
             get_self_id(buf.as_mut_ptr() as i32);
         }
         buf
+    }
+
+    /// This contract's own SOLEN balance, snapshotted at frame start.
+    ///
+    /// Includes any preceding `Action::Transfer { to: self }` from the current
+    /// op (so it includes `msg_value()`), but does NOT reflect outflows queued
+    /// during this frame — `sdk::transfer` and `sdk::queue_call` only execute
+    /// after `call()` returns. Useful for detecting exogenous inflows such as
+    /// auto-credited staking rewards: `self_balance() - msg_value() - tracked_principal`
+    /// gives the unaccounted-for delta.
+    pub fn self_balance() -> u128 {
+        let mut buf = [0u8; 16];
+        unsafe {
+            get_self_balance(buf.as_mut_ptr() as i32);
+        }
+        u128::from_le_bytes(buf)
     }
 
     /// Native SOLEN transferred to this contract in the current UserOperation.

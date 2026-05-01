@@ -32,6 +32,12 @@ pub struct HostContext {
     /// into this contract since the last Call to it. Equivalent to EVM's
     /// `msg.value`; stays constant throughout a single Call frame.
     pub msg_value: u128,
+    /// Snapshot of this contract's account balance at frame start. Includes any
+    /// preceding `Action::Transfer` to self (so it includes msg_value), but does
+    /// not reflect outflows queued during this frame (native_transfers and
+    /// pending_calls are processed by the executor after WASM returns). Used by
+    /// guests to detect exogenous inflows like auto-credited staking rewards.
+    pub self_balance: u128,
 }
 
 /// A native SOLEN transfer initiated by a contract via host function.
@@ -69,6 +75,7 @@ impl HostContext {
             native_transfers: Vec::new(),
             pending_calls: Vec::new(),
             msg_value: 0,
+            self_balance: 0,
         }
     }
 
@@ -86,6 +93,12 @@ impl HostContext {
     /// Set the native SOLEN amount transferred to this contract in the current UserOp.
     pub fn with_msg_value(mut self, value: u128) -> Self {
         self.msg_value = value;
+        self
+    }
+
+    /// Set the contract's own account balance at frame start.
+    pub fn with_self_balance(mut self, balance: u128) -> Self {
+        self.self_balance = balance;
         self
     }
 }

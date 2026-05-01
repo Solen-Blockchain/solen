@@ -471,6 +471,28 @@ fn register_host_functions_typed(
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
 
+    // get_self_balance(out_ptr: i32) — writes the u128 LE balance of this
+    // contract's own account, snapshotted at frame start. Includes any
+    // preceding Action::Transfer to self in the same op (so it includes
+    // msg_value), but does NOT reflect outflows queued during this frame —
+    // sdk::transfer and sdk::queue_call only execute after WASM returns.
+    // Use cases: detect exogenous inflows like auto-credited staking rewards,
+    // assert pool invariants in liquid-staking-style contracts.
+    linker
+        .func_wrap(
+            "env",
+            "get_self_balance",
+            |mut caller: Caller<'_, StoreData>, out_ptr: i32| {
+                let balance = caller.data().ctx.self_balance;
+                let memory = match get_memory(&mut caller) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &balance.to_le_bytes());
+            },
+        )
+        .map_err(|e| VmError::HostError(e.to_string()))?;
+
     // queue_contract_call(target_ptr, method_ptr, method_len, args_ptr, args_len) -> i32
     // Queues a contract→contract call. The call is dispatched by the executor
     // AFTER this contract's `call()` returns, so it cannot re-enter the

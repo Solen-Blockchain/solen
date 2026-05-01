@@ -1052,6 +1052,36 @@ impl BlockExecutor {
             )));
         }
 
+        // Queued calls to system contracts route through the same path that
+        // top-level Action::Call uses (see ~line 575). The `caller` becomes the
+        // system call's `sender`, so a contract can invoke STAKING_ADDRESS,
+        // BRIDGE_ADDRESS, etc. on its own behalf. Without this branch, queued
+        // calls to system addresses fall through to the `code_hash == 0` path
+        // below and silently no-op. msg_value is intentionally ignored —
+        // system contracts use a direct-debit model against caller balance,
+        // matching the top-level routing.
+        if solen_types::system::is_system_contract(target) {
+            let method_str = std::str::from_utf8(method).map_err(|_| {
+                ExecutionError::State(StateError::AccountNotFound(
+                    "system call method not utf-8".into(),
+                ))
+            })?;
+            let result = crate::system_calls::execute_system_call(
+                state.store_mut(),
+                caller,
+                target,
+                method_str,
+                args,
+            );
+            events.extend(result.events);
+            if let Some(err) = result.error {
+                return Err(ExecutionError::State(StateError::AccountNotFound(
+                    format!("system call failed: {err}"),
+                )));
+            }
+            return Ok(CALL_BASE_GAS + result.gas_used);
+        }
+
         let target_account = state.require_account(target)?;
 
         // If the account has no code, it's not a contract.
@@ -1084,7 +1114,8 @@ impl BlockExecutor {
         let ctx = solen_vm::host::HostContext::new(*caller, height)
             .with_contract_id(*target)
             .with_storage(contract_storage)
-            .with_msg_value(msg_value);
+            .with_msg_value(msg_value)
+            .with_self_balance(target_account.balance);
 
         let result = match self.vm_runtime.execute(
             &target_account.code_hash,
@@ -1761,5 +1792,257 @@ mod tests {
         let state = StateManager::new(&mut store);
         assert_eq!(state.get_balance(&alice).unwrap(), 10_000 - 100 - 1000);
         assert_eq!(state.get_balance(&treasury_id()).unwrap(), 500);
+    }
+
+    /// Fixture: a contract whose `call(input)` queues a single
+    /// `STAKING_ADDRESS:delegate` with args = input[5..53] (i.e. the bytes
+    /// after the leading `"init\0"` dispatcher prefix). Sized to forward
+    /// exactly `validator[32] || amount[16]` to the system call.
+    const QUEUE_DELEGATE_WAT: &str = r#"
+    (module
+        (import "env" "queue_contract_call" (func $queue_contract_call
+            (param i32 i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        ;; offset 0:  STAKING_ADDRESS = 0xFF * 31 ‖ 0x01
+        ;; offset 32: "delegate" method name (8 bytes)
+        (data (i32.const 0)
+            "\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\01")
+        (data (i32.const 32) "delegate")
+        (func (export "call") (param $input_ptr i32) (param $input_len i32) (result i32)
+            ;; Skip the leading "init\0" (5 bytes). The remaining 48 bytes
+            ;; passed by the caller are validator[32] || amount[16].
+            (drop (call $queue_contract_call
+                (i32.const 0)
+                (i32.const 32)
+                (i32.const 8)
+                (i32.add (local.get $input_ptr) (i32.const 5))
+                (i32.const 48)))
+            (i32.const 0)
+        )
+    )
+    "#;
+
+    /// Setup with a richer alice (1 SOLEN at 8 decimals = 10^8 base units)
+    /// and a pre-registered staking validator. Used by the queued-system-call
+    /// tests since validator registration via the system contract requires
+    /// MIN_VALIDATOR_STAKE = 500_000 SOLEN — far more than the standard
+    /// `setup()` budgets.
+    fn setup_with_validator() -> (MemoryStore, Keypair, AccountId, [u8; 32]) {
+        use solen_system_contracts::staking::{StakingContract, MIN_VALIDATOR_STAKE};
+
+        let mut store = MemoryStore::new();
+        let kp = Keypair::generate();
+
+        let alice_id = {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(b"alic");
+            id
+        };
+        let validator_id: [u8; 32] = {
+            let mut v = [0u8; 32];
+            v[0] = 7;
+            v
+        };
+
+        // Pre-populate the staking system contract with one validator.
+        // Bypasses the registration system call (which would require staking
+        // 500_000 SOLEN from a sender) — fine for unit tests.
+        {
+            let mut sc = StakingContract::new();
+            sc.register_validator(validator_id, MIN_VALIDATOR_STAKE).unwrap();
+            sc.save(&mut store);
+        }
+
+        apply_genesis(
+            &mut store,
+            vec![
+                GenesisAccount {
+                    id: alice_id,
+                    balance: 1_000_000,
+                    auth_methods: vec![AuthMethod::Ed25519 {
+                        public_key: kp.public_key(),
+                    }],
+                },
+                GenesisAccount {
+                    id: treasury_id(),
+                    balance: 0,
+                    auth_methods: vec![],
+                },
+            ],
+        )
+        .unwrap();
+
+        (store, kp, alice_id, validator_id)
+    }
+
+    /// Deploy `QUEUE_DELEGATE_WAT` from `alice` and return the contract id.
+    fn deploy_queue_delegate(
+        store: &mut MemoryStore,
+        executor: &BlockExecutor,
+        kp: &Keypair,
+        alice: AccountId,
+    ) -> AccountId {
+        let wasm = wat::parse_str(QUEUE_DELEGATE_WAT).expect("WAT parse failed");
+        let mut deploy_op = UserOperation {
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Deploy {
+                code: wasm.to_vec(),
+                salt: [0xAB; 32],
+            }],
+            max_fee: 200_000,
+            signature: vec![],
+        };
+        sign_op(kp, executor, &mut deploy_op);
+        let result = executor.execute_block(store, &[deploy_op]);
+        assert!(
+            result.receipts[0].success,
+            "deploy failed: {:?}",
+            result.receipts[0]
+        );
+        let mut contract_id = [0u8; 32];
+        contract_id.copy_from_slice(&result.receipts[0].events[0].data);
+        contract_id
+    }
+
+    #[test]
+    fn queued_call_routes_to_staking_system_contract() {
+        use solen_system_contracts::staking::StakingContract;
+
+        let (mut store, kp, alice, validator) = setup_with_validator();
+        let executor = zero_fee_executor();
+        let contract_id = deploy_queue_delegate(&mut store, &executor, &kp, alice);
+
+        // Ask the contract to delegate `amount` to `validator`.
+        let amount: u128 = 100_000;
+        let mut args = Vec::with_capacity(48);
+        args.extend_from_slice(&validator);
+        args.extend_from_slice(&amount.to_le_bytes());
+
+        // The staking system call needs `caller.balance >= amount + MIN_FEE_RESERVE`
+        // (10_000), so fund the contract slightly above `amount` and expect the
+        // post-delegate balance to equal that overage.
+        let funding = amount + 10_000;
+
+        let mut op = UserOperation {
+            sender: alice,
+            nonce: 1,
+            actions: vec![
+                Action::Transfer {
+                    to: contract_id,
+                    amount: funding,
+                },
+                Action::Call {
+                    target: contract_id,
+                    method: "init".to_string(),
+                    args,
+                },
+            ],
+            max_fee: 200_000,
+            signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut op);
+
+        let result = executor.execute_block(&mut store, &[op]);
+        assert!(
+            result.receipts[0].success,
+            "op failed: {:?}",
+            result.receipts[0]
+        );
+
+        // The contract is now the on-chain delegator-of-record for `amount`.
+        let sc = StakingContract::load(&store);
+        assert_eq!(
+            sc.delegator_total_stake(&contract_id),
+            amount,
+            "contract should be the delegator on the staking system contract"
+        );
+
+        // Validator's `total_delegated` should reflect the delegation.
+        let val = sc.get_validator(&validator).expect("validator");
+        assert_eq!(val.total_delegated, amount);
+
+        // Contract's account balance should be `funding - amount` — the
+        // overage we left for MIN_FEE_RESERVE.
+        let state = StateManager::new(&mut store);
+        let acct = state.require_account(&contract_id).unwrap();
+        assert_eq!(
+            acct.balance, 10_000,
+            "contract should retain only the fee-reserve overage"
+        );
+    }
+
+    #[test]
+    fn queued_system_call_failure_rolls_back_op() {
+        use solen_system_contracts::staking::StakingContract;
+
+        let (mut store, kp, alice, _validator) = setup_with_validator();
+        let executor = zero_fee_executor();
+        let contract_id = deploy_queue_delegate(&mut store, &executor, &kp, alice);
+
+        // Snapshot pre-op state so we can assert nothing moved on rollback.
+        let alice_balance_before = StateManager::new(&mut store)
+            .get_balance(&alice)
+            .unwrap();
+        let contract_balance_before = StateManager::new(&mut store)
+            .get_balance(&contract_id)
+            .unwrap();
+
+        // Address a delegation at a validator that does NOT exist. The queued
+        // staking call returns `ValidatorNotFound`, my patch surfaces that as
+        // `Err`, and the executor rolls the whole UserOp back per
+        // `executor.rs:600` — so the Transfer must also revert and no
+        // delegation should be recorded.
+        let bogus_validator = [0xCC; 32];
+        let amount: u128 = 100_000;
+        let mut args = Vec::with_capacity(48);
+        args.extend_from_slice(&bogus_validator);
+        args.extend_from_slice(&amount.to_le_bytes());
+
+        let mut op = UserOperation {
+            sender: alice,
+            nonce: 1,
+            actions: vec![
+                Action::Transfer {
+                    to: contract_id,
+                    amount: amount + 10_000,
+                },
+                Action::Call {
+                    target: contract_id,
+                    method: "init".to_string(),
+                    args,
+                },
+            ],
+            max_fee: 200_000,
+            signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut op);
+
+        let result = executor.execute_block(&mut store, &[op]);
+        assert!(!result.receipts[0].success, "op should have failed");
+
+        // No delegation recorded.
+        let sc = StakingContract::load(&store);
+        assert_eq!(sc.delegator_total_stake(&contract_id), 0);
+
+        // Transfer rolled back: contract balance unchanged from pre-op.
+        let state = StateManager::new(&mut store);
+        assert_eq!(
+            state.get_balance(&contract_id).unwrap(),
+            contract_balance_before,
+            "Transfer to contract should have rolled back"
+        );
+
+        // Alice loses at most `max_fee` on a failed multi-action op — the
+        // reservation taken at executor.rs:531 is held by the failure path
+        // (only the success path refunds at line 668). The transfer to the
+        // contract must not stack on top of that.
+        let alice_after = state.get_balance(&alice).unwrap();
+        assert!(
+            alice_after >= alice_balance_before.saturating_sub(200_000),
+            "alice should have lost at most max_fee (200_000); got {} → {}",
+            alice_balance_before,
+            alice_after
+        );
     }
 }

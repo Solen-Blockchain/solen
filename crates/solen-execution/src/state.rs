@@ -98,6 +98,13 @@ impl<'a> StateManager<'a> {
         Self { store }
     }
 
+    /// Borrow the underlying store mutably. Used by `dispatch_contract_call`
+    /// when routing a queued call to a system contract via `execute_system_call`,
+    /// which operates directly on the store rather than through `StateManager`.
+    pub fn store_mut(&mut self) -> &mut dyn StateStore {
+        self.store
+    }
+
     /// Convenience constructor that returns a read-only manager.
     pub fn new_readonly(store: &'a dyn StateStore) -> ReadonlyStateManager<'a> {
         ReadonlyStateManager::new(store)

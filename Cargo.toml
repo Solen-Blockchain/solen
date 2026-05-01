@@ -5,6 +5,7 @@ exclude = [
     "examples/contracts/token",
     "examples/contracts/nft",
     "examples/contracts/attack",
+    "examples/contracts/stsolen",
     "fuzz",
 ]
 members = [

@@ -28,6 +28,7 @@ members = [
     "tools/submit-batch",
     "tools/bench",
     "tools/vectors",
+    "tools/stsolen-deploy",
 ]
 
 [workspace.package]

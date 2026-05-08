@@ -1321,13 +1321,34 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Track when new blocks finalize (from any source).
-            // Reset both timers so the next proposer waits a full block_time
-            // from the last finalized block, enforcing 6s global block time.
+            //
+            // `last_finalized_at` is reset to "now" because backup-proposer
+            // logic (in is_backup_proposer) uses elapsed time since the
+            // last *observed* finalization to decide if the chain has
+            // stalled.
+            //
+            // `last_proposed_at` is reset to the BLOCK HEADER's timestamp
+            // (not "now") so the proposal-spam gate measures from when the
+            // block was actually produced rather than when we observed it
+            // finalize. Otherwise attestation propagation + collection
+            // (~1-2s on a healthy network) gets added to every block,
+            // pushing effective block_time ~25% above the configured value.
             let current_height = engine_clone.height();
             if current_height > last_finalized_height {
                 last_finalized_height = current_height;
                 last_finalized_at = std::time::Instant::now();
-                last_proposed_at = std::time::Instant::now();
+                let block_ts_ms = engine_clone
+                    .latest_block()
+                    .map(|b| b.header.timestamp_ms)
+                    .unwrap_or(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let age_ms = now_ms.saturating_sub(block_ts_ms);
+                last_proposed_at = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(age_ms))
+                    .unwrap_or_else(std::time::Instant::now);
 
                 // Check if block time was changed by governance.
                 if current_height % 100 == 0 {

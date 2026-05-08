@@ -1280,7 +1280,11 @@ async fn main() -> anyhow::Result<()> {
         };
 
         // Poll frequently but enforce block_time between proposals.
-        let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(200));
+        // 50ms keeps gate-opening latency tight (avg ~25ms slack vs ~100ms
+        // at the previous 200ms cadence) without meaningful CPU cost —
+        // each iteration is lightweight (height check, governance peek,
+        // is_next_proposer hash, sync flag).
+        let mut poll = tokio::time::interval(tokio::time::Duration::from_millis(50));
         let mut min_interval = std::time::Duration::from_millis(block_time);
         let quorum_timeout = std::time::Duration::from_secs(10);
         let mut last_finalized_height = engine_clone.height();

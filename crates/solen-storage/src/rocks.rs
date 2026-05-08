@@ -13,8 +13,15 @@ use tracing::info;
 use crate::traits::{StateStore, StorageError};
 
 /// Persistent state store backed by RocksDB.
+///
+/// The state root is cached to avoid scanning the whole database on every
+/// block. The cache is invalidated on any `put` / `delete` / `delete_prefix`
+/// and recomputed on the next `state_root()` call. For empty / read-only
+/// blocks (the common case on a quiet chain), this turns a full DB scan
+/// into a single read of the cached hash.
 pub struct RocksStore {
     db: DB,
+    cached_root: std::sync::RwLock<Option<Hash>>,
 }
 
 impl RocksStore {
@@ -28,7 +35,47 @@ impl RocksStore {
 
         info!(path = %path.display(), "RocksDB opened");
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            cached_root: std::sync::RwLock::new(None),
+        })
+    }
+
+    fn invalidate_root_cache(&mut self) {
+        *self.cached_root.write().unwrap() = None;
+    }
+
+    /// Recompute the state root from scratch by iterating the entire DB.
+    /// Excludes consensus-only keys (per-validator timing differences would
+    /// otherwise look like state divergence).
+    fn compute_state_root(&self) -> Hash {
+        let mut leaves: Vec<Hash> = Vec::new();
+
+        let iter = self.db.iterator(IteratorMode::Start);
+        for item in iter {
+            let (k, v) = match item {
+                Ok(kv) => kv,
+                Err(e) => {
+                    // Fail loudly on RocksDB iteration errors. Silent skip would
+                    // produce an incomplete merkle root, causing state divergence
+                    // between nodes with partial disk corruption.
+                    tracing::error!(error = %e, "RocksDB iteration error during state_root — aborting");
+                    panic!("RocksDB iteration error in state_root: {e}");
+                }
+            };
+            // Exclude non-execution keys from the state root.
+            // Block storage and chain metadata differ across validators
+            // based on timing, which would cause false state divergence.
+            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") || k.starts_with(b"__last_attestation__") {
+                continue;
+            }
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&k);
+            hasher.update(&v);
+            leaves.push(*hasher.finalize().as_bytes());
+        }
+
+        merkle_root(&leaves)
     }
 
     /// Create a native RocksDB checkpoint (hard-linked, near-instant).
@@ -147,45 +194,46 @@ impl StateStore for RocksStore {
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        // Invalidate root cache before the write so a concurrent reader
+        // never observes a stale cached root paired with a fresh value.
+        // Non-execution keys could be excluded from invalidation as a future
+        // optimization, but they're rare on the hot path.
+        self.invalidate_root_cache();
         self.db
             .put(key, value)
             .map_err(|e| StorageError::Backend(e.to_string()))
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), StorageError> {
+        self.invalidate_root_cache();
         self.db
             .delete(key)
             .map_err(|e| StorageError::Backend(e.to_string()))
     }
 
     fn state_root(&self) -> Hash {
-        let mut leaves: Vec<Hash> = Vec::new();
-
-        let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            let (k, v) = match item {
-                Ok(kv) => kv,
-                Err(e) => {
-                    // Fail loudly on RocksDB iteration errors. Silent skip would
-                    // produce an incomplete merkle root, causing state divergence
-                    // between nodes with partial disk corruption.
-                    tracing::error!(error = %e, "RocksDB iteration error during state_root — aborting");
-                    panic!("RocksDB iteration error in state_root: {e}");
-                }
-            };
-            // Exclude non-execution keys from the state root.
-            // Block storage and chain metadata differ across validators
-            // based on timing, which would cause false state divergence.
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") || k.starts_with(b"__last_attestation__") {
-                continue;
-            }
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&k);
-            hasher.update(&v);
-            leaves.push(*hasher.finalize().as_bytes());
+        // Fast path: cache hit (no put/delete since last computation).
+        // Empty blocks and read-only contract calls hit this branch and
+        // skip the full DB iteration — the dominant per-block CPU cost.
+        if let Some(root) = *self.cached_root.read().unwrap() {
+            return root;
         }
+        let root = self.compute_state_root();
+        *self.cached_root.write().unwrap() = Some(root);
+        root
+    }
 
-        merkle_root(&leaves)
+    fn commit_root(&mut self) {
+        // Make sure the cache is populated so the next state_root() call
+        // (e.g. from RPC or the next block's executor) is free.
+        let mut cache = self.cached_root.write().unwrap();
+        if cache.is_none() {
+            // Drop the lock before computing — compute is expensive and
+            // doesn't need the lock held.
+            drop(cache);
+            let root = self.compute_state_root();
+            *self.cached_root.write().unwrap() = Some(root);
+        }
     }
 
     fn snapshot(&self) -> Box<dyn StateStore> {
@@ -241,6 +289,9 @@ impl StateStore for RocksStore {
             .collect();
 
         let count = keys_to_delete.len();
+        if count > 0 {
+            self.invalidate_root_cache();
+        }
         for key in keys_to_delete {
             self.db
                 .delete(&key)

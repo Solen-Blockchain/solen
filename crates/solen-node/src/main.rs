@@ -344,92 +344,89 @@ async fn main() -> anyhow::Result<()> {
                     "seed consensus verified"
                 );
 
-                // Step 3: Download snapshot from first reachable seed.
-                let snapshot_body = serde_json::json!({
+                // Step 3: Verify the finalized checkpoint via lightweight metadata
+                // and select a seed URL. The actual download happens in the unified
+                // snapshot-load path below, which fetches via chunked transfer.
+                //
+                // We deliberately do NOT download here with the single-call
+                // `solen_getSnapshot`: a full mainnet snapshot base64-encodes well
+                // past the RPC max response body size (100 MB), so the single call
+                // always fails and the node would silently fall back to genesis
+                // block-sync. `getSnapshotMeta` returns the state root + finalized
+                // checkpoint (cheap), which is all we need to validate before
+                // streaming the body in 4 MB chunks.
+                let meta_body = serde_json::json!({
                     "jsonrpc": "2.0", "id": 1,
-                    "method": "solen_getSnapshot", "params": []
+                    "method": "solen_getSnapshotMeta", "params": []
                 });
 
                 for (url, _, _) in &at_max {
-                    info!(url = %url, "downloading snapshot...");
+                    info!(url = %url, "fetching snapshot metadata...");
                     match client.post(url.as_str())
                         .header("Content-Type", "application/json")
-                        .body(snapshot_body.to_string()).send()
+                        .body(meta_body.to_string()).send()
                     {
                         Ok(resp) if resp.status().is_success() => {
                             if let Ok(json) = resp.json::<serde_json::Value>() {
-                                if let Some(b64) = json["result"]["data"].as_str() {
-                                    let snap_root = json["result"]["state_root"].as_str().unwrap_or("");
+                                let snap_root = json["result"]["state_root"].as_str().unwrap_or("");
 
-                                    // Accept the snapshot for download. The actual state root
-                                    // verification happens in restore_snapshot() after
-                                    // decompression — it recomputes the merkle root over all
-                                    // loaded entries and rejects if it doesn't match the header.
-                                    // Pre-download, we just log for diagnostics.
-                                    if snap_root != consensus_root {
-                                        info!(
-                                            snap_root,
-                                            consensus_root = %consensus_root,
-                                            "snapshot root differs from consensus (may be cached) — will verify after restore"
-                                        );
-                                    }
-                                    {
-                                        // Verify finalized checkpoint if present.
-                                        // The checkpoint proves 2/3+ of validators attested
-                                        // to this state root, preventing long-range attacks.
-                                        let checkpoint_valid = if let Some(cp) = json["result"]["checkpoint"].as_object() {
-                                            let cp_state_root = cp.get("state_root")
-                                                .and_then(|v| v.as_str()).unwrap_or("");
-                                            let cp_height = cp.get("height")
-                                                .and_then(|v| v.as_u64()).unwrap_or(0);
-                                            let attestations = cp.get("attestations")
-                                                .and_then(|v| v.as_array())
-                                                .map(|a| a.len()).unwrap_or(0);
-
-                                            if attestations == 0 {
-                                                info!("snapshot has no checkpoint attestations — accepting on seed consensus only");
-                                                true
-                                            } else {
-                                                info!(
-                                                    cp_height,
-                                                    attestations,
-                                                    cp_state_root,
-                                                    "snapshot includes finalized checkpoint"
-                                                );
-                                                // Verify checkpoint state_root matches snapshot.
-                                                // Full attestation signature verification happens after restore.
-                                                cp_state_root == snap_root || cp_state_root.is_empty()
-                                            }
-                                        } else {
-                                            // No checkpoint in response — older node or genesis.
-                                            info!("snapshot has no checkpoint — accepting on seed consensus only");
-                                            true
-                                        };
-
-                                        if !checkpoint_valid {
-                                            warn!("snapshot checkpoint state_root doesn't match — trying next seed");
-                                            continue;
-                                        }
-
-                                        match base64_decode(b64) {
-                                            Ok(data) => {
-                                                let tmp = format!("{}/snapshot.bin", data_dir);
-                                                if std::fs::write(&tmp, &data).is_ok() {
-                                                    info!(
-                                                        height = json["result"]["height"].as_u64().unwrap_or(0),
-                                                        "snapshot downloaded and verified against seed consensus"
-                                                    );
-                                                    found = Some(tmp);
-                                                    break;
-                                                }
-                                            }
-                                            Err(e) => { info!(error = %e, "snapshot decode failed"); }
-                                        }
-                                    }
+                                // The merkle root is re-verified against the header in
+                                // restore_snapshot() after decompression; here we only
+                                // log if the (possibly cached) snapshot root differs.
+                                if !snap_root.is_empty() && snap_root != consensus_root {
+                                    info!(
+                                        snap_root,
+                                        consensus_root = %consensus_root,
+                                        "snapshot root differs from consensus (may be cached) — will verify after restore"
+                                    );
                                 }
+
+                                // Verify finalized checkpoint if present. The checkpoint
+                                // proves 2/3+ of validators attested to this state root,
+                                // preventing long-range attacks.
+                                let checkpoint_valid = if let Some(cp) = json["result"]["checkpoint"].as_object() {
+                                    let cp_state_root = cp.get("state_root")
+                                        .and_then(|v| v.as_str()).unwrap_or("");
+                                    let cp_height = cp.get("height")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let attestations = cp.get("attestations")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.len()).unwrap_or(0);
+
+                                    if attestations == 0 {
+                                        info!("snapshot has no checkpoint attestations — accepting on seed consensus only");
+                                        true
+                                    } else {
+                                        info!(
+                                            cp_height,
+                                            attestations,
+                                            cp_state_root,
+                                            "snapshot includes finalized checkpoint"
+                                        );
+                                        // Verify checkpoint state_root matches snapshot.
+                                        // Full attestation signature verification happens after restore.
+                                        cp_state_root == snap_root || cp_state_root.is_empty()
+                                    }
+                                } else {
+                                    info!("snapshot has no checkpoint — accepting on seed consensus only");
+                                    true
+                                };
+
+                                if !checkpoint_valid {
+                                    warn!("snapshot checkpoint state_root doesn't match — trying next seed");
+                                    continue;
+                                }
+
+                                info!(
+                                    url = %url,
+                                    height = json["result"]["height"].as_u64().unwrap_or(0),
+                                    "snapshot seed selected — will download via chunked transfer"
+                                );
+                                found = Some(url.clone());
+                                break;
                             }
                         }
-                        _ => { info!(url = %url, "snapshot download failed, trying next..."); }
+                        _ => { info!(url = %url, "snapshot metadata fetch failed, trying next..."); }
                     }
                 }
             } else {
@@ -455,90 +452,69 @@ async fn main() -> anyhow::Result<()> {
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .map_err(|e| anyhow::anyhow!("http client failed: {e}"))?;
-                // Try single-call snapshot first, fall back to chunked download.
+                // Download via chunked transfer. A full snapshot base64-encodes
+                // past the RPC max response body size (100 MB), so the single-call
+                // solen_getSnapshot fails for any non-trivial chain — chunked (4 MB)
+                // works for any size and is the only reliable transport.
                 let snapshot_url = snapshot_source.as_str();
-                let single_result = (|| -> Result<Vec<u8>, anyhow::Error> {
-                    let rpc_body = serde_json::json!({
+                let meta_body = serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "solen_getSnapshotMeta", "params": []
+                });
+                let meta_resp = client.post(snapshot_url)
+                    .header("Content-Type", "application/json")
+                    .body(meta_body.to_string())
+                    .send()
+                    .map_err(|e| anyhow::anyhow!("snapshot meta failed: {e}"))?
+                    .text()?;
+                let meta_json: serde_json::Value = serde_json::from_str(&meta_resp)?;
+                let total_bytes = meta_json["result"]["total_bytes"].as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("snapshot meta missing total_bytes"))? as usize;
+
+                info!(total_bytes, "downloading snapshot in chunks...");
+
+                let chunk_size: usize = 4 * 1024 * 1024; // 4MB chunks
+                let mut snapshot_data = Vec::with_capacity(total_bytes);
+                let mut offset: usize = 0;
+
+                loop {
+                    let chunk_body = serde_json::json!({
                         "jsonrpc": "2.0", "id": 1,
-                        "method": "solen_getSnapshot", "params": []
+                        "method": "solen_getSnapshotChunk",
+                        "params": [offset, chunk_size]
                     });
-                    let body = client.post(snapshot_url)
+                    let chunk_resp = client.post(snapshot_url)
                         .header("Content-Type", "application/json")
-                        .body(rpc_body.to_string())
-                        .send()?
+                        .body(chunk_body.to_string())
+                        .send()
+                        .map_err(|e| anyhow::anyhow!("chunk download failed at offset {offset}: {e}"))?
                         .text()?;
-                    let json: serde_json::Value = serde_json::from_str(&body)?;
-                    let b64 = json["result"]["data"].as_str()
-                        .ok_or_else(|| anyhow::anyhow!("snapshot response missing data field"))?;
-                    Ok(base64_decode(b64)?)
-                })();
+                    let chunk_json: serde_json::Value = serde_json::from_str(&chunk_resp)?;
 
-                match single_result {
-                    Ok(data) => data,
-                    Err(e) => {
-                        info!("single-call snapshot failed ({e}), trying chunked download...");
-
-                        // Get metadata first.
-                        let meta_body = serde_json::json!({
-                            "jsonrpc": "2.0", "id": 1,
-                            "method": "solen_getSnapshotMeta", "params": []
-                        });
-                        let meta_resp = client.post(snapshot_url)
-                            .header("Content-Type", "application/json")
-                            .body(meta_body.to_string())
-                            .send()
-                            .map_err(|e| anyhow::anyhow!("snapshot meta failed: {e}"))?
-                            .text()?;
-                        let meta_json: serde_json::Value = serde_json::from_str(&meta_resp)?;
-                        let total_bytes = meta_json["result"]["total_bytes"].as_u64()
-                            .ok_or_else(|| anyhow::anyhow!("snapshot meta missing total_bytes"))? as usize;
-
-                        info!(total_bytes, "downloading snapshot in chunks...");
-
-                        let chunk_size: usize = 4 * 1024 * 1024; // 4MB chunks
-                        let mut snapshot_data = Vec::with_capacity(total_bytes);
-                        let mut offset: usize = 0;
-
-                        loop {
-                            let chunk_body = serde_json::json!({
-                                "jsonrpc": "2.0", "id": 1,
-                                "method": "solen_getSnapshotChunk",
-                                "params": [offset, chunk_size]
-                            });
-                            let chunk_resp = client.post(snapshot_url)
-                                .header("Content-Type", "application/json")
-                                .body(chunk_body.to_string())
-                                .send()
-                                .map_err(|e| anyhow::anyhow!("chunk download failed at offset {offset}: {e}"))?
-                                .text()?;
-                            let chunk_json: serde_json::Value = serde_json::from_str(&chunk_resp)?;
-
-                            if let Some(err) = chunk_json["error"]["message"].as_str() {
-                                return Err(anyhow::anyhow!("chunk error: {err}"));
-                            }
-
-                            let chunk_b64 = chunk_json["result"]["data"].as_str()
-                                .ok_or_else(|| anyhow::anyhow!("chunk missing data"))?;
-                            let chunk_bytes = base64_decode(chunk_b64)?;
-                            let done = chunk_json["result"]["done"].as_bool().unwrap_or(false);
-
-                            info!(
-                                offset,
-                                chunk_len = chunk_bytes.len(),
-                                progress = format!("{:.1}%", (offset + chunk_bytes.len()) as f64 / total_bytes as f64 * 100.0),
-                                "downloaded chunk"
-                            );
-
-                            snapshot_data.extend_from_slice(&chunk_bytes);
-                            offset += chunk_bytes.len();
-
-                            if done || chunk_bytes.is_empty() { break; }
-                        }
-
-                        info!(total = snapshot_data.len(), "chunked snapshot download complete");
-                        snapshot_data
+                    if let Some(err) = chunk_json["error"]["message"].as_str() {
+                        return Err(anyhow::anyhow!("chunk error: {err}"));
                     }
+
+                    let chunk_b64 = chunk_json["result"]["data"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("chunk missing data"))?;
+                    let chunk_bytes = base64_decode(chunk_b64)?;
+                    let done = chunk_json["result"]["done"].as_bool().unwrap_or(false);
+
+                    info!(
+                        offset,
+                        chunk_len = chunk_bytes.len(),
+                        progress = format!("{:.1}%", (offset + chunk_bytes.len()) as f64 / total_bytes as f64 * 100.0),
+                        "downloaded chunk"
+                    );
+
+                    snapshot_data.extend_from_slice(&chunk_bytes);
+                    offset += chunk_bytes.len();
+
+                    if done || chunk_bytes.is_empty() { break; }
                 }
+
+                info!(total = snapshot_data.len(), "chunked snapshot download complete");
+                snapshot_data
             } else {
                 // Load from file.
                 std::fs::read(snapshot_source)

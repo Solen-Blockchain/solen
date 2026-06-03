@@ -1556,21 +1556,38 @@ async fn main() -> anyhow::Result<()> {
             // Don't produce blocks if we appear to be partitioned from the network.
             // This prevents divergent chains from force-finalization during partitions.
             // Skip for non-validators (they never produce) and at genesis (height 0).
+            //
+            // Exception: periodically (PARTITION_PROBE_INTERVAL) fall through and
+            // attempt one recovery probe. If the partition has cleared, the probe
+            // block gathers quorum, finalizes, and unlatches every node (each
+            // clears its flag on accepting a valid block). If the partition is
+            // real, the probe harmlessly fails the quorum gate. Without this, an
+            // all-validator latch deadlocks permanently — every node stays silent,
+            // so no node ever receives the block that would clear its own flag.
             if is_validator && engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
-                tracing::warn!("skipping production — partition detected");
-                // Clear all peer bans to allow reconnection.
-                if let Some(ref handle) = net_for_blocks {
-                    handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
-                    // Also request sync to try to reconnect.
-                    let our_h = engine_clone.height();
-                    handle.broadcast(NetworkMessage::SyncRequest {
-                        from_height: our_h + 1,
-                        to_height: our_h + 10,
-                    });
+                if engine_clone.partition_probe_due() {
+                    tracing::warn!("partition detected — attempting recovery probe");
+                    // Clear bans so the probe can reach as many peers as possible.
+                    if let Some(ref handle) = net_for_blocks {
+                        handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
+                    }
+                    // Fall through to normal production below.
+                } else {
+                    tracing::warn!("skipping production — partition detected");
+                    // Clear all peer bans to allow reconnection.
+                    if let Some(ref handle) = net_for_blocks {
+                        handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
+                        // Also request sync to try to reconnect.
+                        let our_h = engine_clone.height();
+                        handle.broadcast(NetworkMessage::SyncRequest {
+                            from_height: our_h + 1,
+                            to_height: our_h + 10,
+                        });
+                    }
+                    // Still check for dropped blocks.
+                    let _ = engine_clone.take_dropped_block_height();
+                    continue;
                 }
-                // Still check for dropped blocks.
-                let _ = engine_clone.take_dropped_block_height();
-                continue;
             }
 
             let is_proposer = engine_clone.is_next_proposer();

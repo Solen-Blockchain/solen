@@ -226,7 +226,7 @@ impl StateStore for RocksStore {
     fn commit_root(&mut self) {
         // Make sure the cache is populated so the next state_root() call
         // (e.g. from RPC or the next block's executor) is free.
-        let mut cache = self.cached_root.write().unwrap();
+        let cache = self.cached_root.write().unwrap();
         if cache.is_none() {
             // Drop the lock before computing — compute is expensive and
             // doesn't need the lock held.

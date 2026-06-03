@@ -131,6 +131,11 @@ pub struct ConsensusEngine {
     /// Consecutive force-finalizations without quorum. When this exceeds a
     /// threshold, the validator stops producing blocks (likely partitioned).
     consecutive_force_finalizes: Arc<std::sync::atomic::AtomicU32>,
+    /// Wall-clock time of the most recent failed (no-quorum) force-finalization.
+    /// Drives self-healing of the partitioned state: if no new failed
+    /// force-finalization occurs for `PARTITION_PROBE_INTERVAL`, the partition
+    /// may have cleared and the node resumes producing to probe the network.
+    last_force_finalize_at: Arc<RwLock<Option<std::time::Instant>>>,
     /// Buffered attestations for blocks not yet received. Bounded and time-limited
     /// to prevent memory exhaustion while allowing out-of-order gossip delivery.
     early_attestations: Arc<RwLock<Vec<(ValidatorId, u64, Hash, std::time::Instant)>>>,
@@ -231,6 +236,7 @@ impl ConsensusEngine {
             },
             pending_slashing: Arc::new(std::sync::Mutex::new(Vec::new())),
             consecutive_force_finalizes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_force_finalize_at: Arc::new(RwLock::new(None)),
             early_attestations: Arc::new(RwLock::new(Vec::new())),
             trusted_checkpoints: match chain_id {
                 1 => crate::checkpoint::TrustedCheckpoints::mainnet(),
@@ -411,15 +417,37 @@ impl ConsensusEngine {
         self.dropped_block_height.write().unwrap().take()
     }
 
+    /// How long the node stays in the partitioned state with no *new* failed
+    /// force-finalization before it probes the network again (see
+    /// `is_likely_partitioned`). Roughly five block times.
+    const PARTITION_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Returns true if the validator appears to be partitioned from the network
     /// (too many consecutive force-finalizations without quorum).
+    ///
+    /// This state is self-healing. Once `PARTITION_PROBE_INTERVAL` has elapsed
+    /// without a *new* failed force-finalization, we report not-partitioned so
+    /// production resumes and probes the network. The probe is safe: a block can
+    /// only be finalized with 2/3+ attesting stake (see the force-finalize
+    /// quorum gate below), so a probe sent into a still-broken partition cannot
+    /// finalize a divergent chain — it simply fails to gather quorum and re-arms
+    /// this state. Without the time-based escape, an all-validator latch
+    /// deadlocks permanently: every node stops producing, so no node ever
+    /// receives the block that would clear its own partition flag.
     pub fn is_likely_partitioned(&self) -> bool {
-        self.consecutive_force_finalizes.load(std::sync::atomic::Ordering::Relaxed) > 3
+        if self.consecutive_force_finalizes.load(std::sync::atomic::Ordering::Relaxed) <= 3 {
+            return false;
+        }
+        match *self.last_force_finalize_at.read().unwrap() {
+            Some(t) => t.elapsed() < Self::PARTITION_PROBE_INTERVAL,
+            None => false,
+        }
     }
 
     /// Reset partition state — called when connectivity is restored.
     pub fn reset_partition_state(&self) {
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        *self.last_force_finalize_at.write().unwrap() = None;
     }
 
     /// Signal that the node needs a full snapshot resync.
@@ -449,6 +477,7 @@ impl ConsensusEngine {
         self.early_attestations.write().unwrap().clear();
         self.mempool.clear();
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        *self.last_force_finalize_at.write().unwrap() = None;
         *self.dropped_block_height.write().unwrap() = None;
 
         // Update epoch manager.
@@ -2060,6 +2089,7 @@ impl ConsensusEngine {
                 // the chain — peers need time to connect and exchange blocks.
                 if active_count > 1 && !has_quorum_stake && height > 3 {
                     let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    *self.last_force_finalize_at.write().unwrap() = Some(std::time::Instant::now());
                     if force_count > 2 {
                         warn!(
                             height,
@@ -2081,6 +2111,7 @@ impl ConsensusEngine {
             }
 
             let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            *self.last_force_finalize_at.write().unwrap() = Some(std::time::Instant::now());
 
             // If we've force-finalized too many blocks in a row, we're likely
             // partitioned from the network. Stop finalizing to prevent divergence.

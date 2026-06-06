@@ -403,9 +403,29 @@ async fn main() -> anyhow::Result<()> {
                                             cp_state_root,
                                             "snapshot includes finalized checkpoint"
                                         );
-                                        // Verify checkpoint state_root matches snapshot.
-                                        // Full attestation signature verification happens after restore.
-                                        cp_state_root == snap_root || cp_state_root.is_empty()
+                                        // The finalized checkpoint sits at cp_height <= the
+                                        // snapshot height, so its state_root legitimately
+                                        // differs from the snapshot tip root (snap_root)
+                                        // whenever any state changed after the checkpoint.
+                                        // Comparing the two was wrong: it rejected every
+                                        // snapshot taken after the last checkpoint and forced
+                                        // a fall back to slow genesis block-sync. Trust here
+                                        // rests on (1) the seed consensus verified above and
+                                        // (2) the merkle re-derivation of snap_root inside
+                                        // restore_snapshot(). As a cheap anti-forgery gate we
+                                        // require the checkpoint to carry a BFT 2/3 quorum of
+                                        // attestations — genesis validators are equal-stake, so
+                                        // an attestation count check matches the stake-weighted
+                                        // rule (attested*3 > total*2).
+                                        let quorum = attestations * 3 > genesis.validators.len() * 2;
+                                        if !quorum {
+                                            warn!(
+                                                attestations,
+                                                validators = genesis.validators.len(),
+                                                "snapshot checkpoint lacks 2/3 attestation quorum — trying next seed"
+                                            );
+                                        }
+                                        quorum
                                     }
                                 } else {
                                     info!("snapshot has no checkpoint — accepting on seed consensus only");
@@ -413,7 +433,6 @@ async fn main() -> anyhow::Result<()> {
                                 };
 
                                 if !checkpoint_valid {
-                                    warn!("snapshot checkpoint state_root doesn't match — trying next seed");
                                     continue;
                                 }
 

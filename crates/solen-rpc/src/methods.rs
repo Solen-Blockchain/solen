@@ -556,6 +556,10 @@ pub struct SolenRpc {
 /// Minimum blocks between snapshot regenerations.
 const SNAPSHOT_CACHE_INTERVAL: u64 = 500;
 
+/// How often the background refresher wakes to check whether the snapshot
+/// cache has gone stale (tip advanced >= SNAPSHOT_CACHE_INTERVAL past it).
+const SNAPSHOT_REFRESH_POLL_SECS: u64 = 60;
+
 /// Max simultaneous `submitOperationConfirm` calls awaiting block inclusion.
 const MAX_CONFIRM_WAITERS: usize = 200;
 
@@ -567,48 +571,75 @@ impl SolenRpc {
     pub fn new(engine: Arc<ConsensusEngine>, tx_broadcaster: Option<TxBroadcaster>) -> Self {
         let cache = Arc::new(std::sync::Mutex::new(None));
 
-        // Pre-warm snapshot cache in background after the node settles.
+        // Keep the snapshot cache fresh in the background. The chunked download
+        // path (getSnapshotMeta/getSnapshotChunk) serves straight from this cache
+        // and never regenerates on its own, so without this loop the cache stays
+        // frozen at the first pre-warm and every restoring node lands tens of
+        // thousands of blocks stale and has to replay them (slow — each replayed
+        // block recomputes the full state root). Regenerate whenever the tip has
+        // advanced at least SNAPSHOT_CACHE_INTERVAL blocks past the cached snapshot.
         let engine_bg = engine.clone();
         let cache_bg = cache.clone();
         std::thread::spawn(move || {
+            // Let the node settle before the first (expensive) snapshot build.
             std::thread::sleep(std::time::Duration::from_secs(30));
 
-            let height = engine_bg.height();
-            if height == 0 { return; }
+            loop {
+                let height = engine_bg.height();
+                if height == 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(SNAPSHOT_REFRESH_POLL_SECS));
+                    continue;
+                }
 
-            tracing::info!(height, "pre-warming snapshot cache...");
+                let cached_height: Option<u64> = {
+                    let guard = cache_bg.lock().unwrap();
+                    guard.as_ref().map(|c: &CachedSnapshot| c.height)
+                };
+                let stale = match cached_height {
+                    None => true,
+                    Some(h) => height.saturating_sub(h) >= SNAPSHOT_CACHE_INTERVAL,
+                };
 
-            let (store_snapshot, epoch) = {
-                let store = engine_bg.store();
-                let store = store.read().unwrap();
-                let snap = store.snapshot();
-                let chain = engine_bg.chain();
-                let chain = chain.read().unwrap();
-                let epoch = chain.last().map(|b| b.header.epoch).unwrap_or(0);
-                (snap, epoch)
-            };
+                if stale {
+                    tracing::info!(height, prev = ?cached_height, "refreshing snapshot cache...");
 
-            match solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch) {
-                Ok(data) => {
-                    if let Ok(meta) = solen_consensus::snapshot::read_snapshot_meta(&data) {
-                        let entries = store_snapshot.len() as u64;
-                        let compressed_bytes = data.len() - 56;
-                        let b64 = base64_encode(&data);
-                        let info = SnapshotInfo {
-                            height,
-                            epoch,
-                            state_root: hex_encode(&meta.state_root),
-                            entries,
-                            compressed_bytes,
-                            uncompressed_bytes: meta.uncompressed_size,
-                            data: b64,
-                            checkpoint: None, // cache doesn't have engine access
-                        };
-                        *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
-                        tracing::info!(height, "snapshot cache warmed");
+                    // Take a CoW snapshot under a brief read lock so block
+                    // production is not stalled during the scan + compress.
+                    let (store_snapshot, epoch) = {
+                        let store = engine_bg.store();
+                        let store = store.read().unwrap();
+                        let snap = store.snapshot();
+                        let chain = engine_bg.chain();
+                        let chain = chain.read().unwrap();
+                        let epoch = chain.last().map(|b| b.header.epoch).unwrap_or(0);
+                        (snap, epoch)
+                    };
+
+                    match solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch) {
+                        Ok(data) => {
+                            if let Ok(meta) = solen_consensus::snapshot::read_snapshot_meta(&data) {
+                                let entries = store_snapshot.len() as u64;
+                                let compressed_bytes = data.len() - 56;
+                                let b64 = base64_encode(&data);
+                                let info = SnapshotInfo {
+                                    height,
+                                    epoch,
+                                    state_root: hex_encode(&meta.state_root),
+                                    entries,
+                                    compressed_bytes,
+                                    uncompressed_bytes: meta.uncompressed_size,
+                                    data: b64,
+                                    checkpoint: None, // overlaid live from the engine at serve time
+                                };
+                                *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
+                                tracing::info!(height, "snapshot cache refreshed");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "snapshot cache refresh failed"),
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "snapshot pre-warm failed"),
+
+                std::thread::sleep(std::time::Duration::from_secs(SNAPSHOT_REFRESH_POLL_SECS));
             }
         });
 

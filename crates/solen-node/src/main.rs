@@ -360,6 +360,40 @@ async fn main() -> anyhow::Result<()> {
                     "method": "solen_getSnapshotMeta", "params": []
                 });
 
+                // Build the trusted genesis validator set (public_key -> stake)
+                // for verifying snapshot checkpoint attestations. The genesis keys
+                // are the ONLY validator set we can trust without already having a
+                // snapshot, so they anchor long-range-attack protection: a forged
+                // snapshot cannot fabricate a checkpoint carrying valid signatures
+                // from a 2/3 stake supermajority of these keys.
+                //
+                // This assumes the active validator set still descends from genesis
+                // (true on Solen mainnet: all 11 active validators are the genesis
+                // validators). If staking ever rotates the set away from genesis,
+                // this must evolve to track validator-set changes through a verified
+                // epoch/header chain rather than trusting genesis alone.
+                let genesis_vset: Vec<([u8; 32], u128)> = {
+                    let mut vs = Vec::with_capacity(genesis.validators.len());
+                    for v in &genesis.validators {
+                        let pk = if let Some(seed_hex) = &v.seed_hex {
+                            let bytes = hex_decode(seed_hex)?;
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            Keypair::from_seed(&arr).public_key()
+                        } else if let Some(pk_hex) = &v.public_key_hex {
+                            let bytes = hex_decode(pk_hex)?;
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            arr
+                        } else {
+                            anyhow::bail!("validator '{}' needs seed_hex or public_key_hex", v.name);
+                        };
+                        vs.push((pk, v.stake));
+                    }
+                    vs
+                };
+                let genesis_total_stake: u128 = genesis_vset.iter().map(|(_, s)| *s).sum();
+
                 for (url, _, _) in &at_max {
                     info!(url = %url, "fetching snapshot metadata...");
                     match client.post(url.as_str())
@@ -381,54 +415,106 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                 }
 
-                                // Verify finalized checkpoint if present. The checkpoint
-                                // proves 2/3+ of validators attested to this state root,
-                                // preventing long-range attacks.
+                                // Verify the finalized checkpoint if present. The
+                                // checkpoint sits at cp_height <= the snapshot height, so
+                                // its state_root legitimately differs from the snapshot tip
+                                // root (snap_root) whenever state changed after it — so we do
+                                // NOT compare the two (that was the old bug that rejected
+                                // every real snapshot). Instead we cryptographically verify
+                                // that a 2/3 stake supermajority of the trusted GENESIS
+                                // validators actually signed this checkpoint. Combined with
+                                // the post-restore merkle re-derivation of snap_root, this
+                                // means a forged snapshot cannot be accepted unless the
+                                // attacker also holds 2/3 of the genesis signing keys.
                                 let checkpoint_valid = if let Some(cp) = json["result"]["checkpoint"].as_object() {
                                     let cp_state_root = cp.get("state_root")
+                                        .and_then(|v| v.as_str()).unwrap_or("");
+                                    let cp_block_hash = cp.get("block_hash")
                                         .and_then(|v| v.as_str()).unwrap_or("");
                                     let cp_height = cp.get("height")
                                         .and_then(|v| v.as_u64()).unwrap_or(0);
                                     let attestations = cp.get("attestations")
-                                        .and_then(|v| v.as_array())
-                                        .map(|a| a.len()).unwrap_or(0);
+                                        .and_then(|v| v.as_array());
 
-                                    if attestations == 0 {
-                                        info!("snapshot has no checkpoint attestations — accepting on seed consensus only");
-                                        true
-                                    } else {
-                                        info!(
-                                            cp_height,
-                                            attestations,
-                                            cp_state_root,
-                                            "snapshot includes finalized checkpoint"
-                                        );
-                                        // The finalized checkpoint sits at cp_height <= the
-                                        // snapshot height, so its state_root legitimately
-                                        // differs from the snapshot tip root (snap_root)
-                                        // whenever any state changed after the checkpoint.
-                                        // Comparing the two was wrong: it rejected every
-                                        // snapshot taken after the last checkpoint and forced
-                                        // a fall back to slow genesis block-sync. Trust here
-                                        // rests on (1) the seed consensus verified above and
-                                        // (2) the merkle re-derivation of snap_root inside
-                                        // restore_snapshot(). As a cheap anti-forgery gate we
-                                        // require the checkpoint to carry a BFT 2/3 quorum of
-                                        // attestations — genesis validators are equal-stake, so
-                                        // an attestation count check matches the stake-weighted
-                                        // rule (attested*3 > total*2).
-                                        let quorum = attestations * 3 > genesis.validators.len() * 2;
-                                        if !quorum {
-                                            warn!(
-                                                attestations,
-                                                validators = genesis.validators.len(),
-                                                "snapshot checkpoint lacks 2/3 attestation quorum — trying next seed"
-                                            );
+                                    // Rebuild the exact message the validators signed:
+                                    // signing_message(height, block_hash, state_root).
+                                    let signing_msg = match (hex_decode(cp_block_hash), hex_decode(cp_state_root)) {
+                                        (Ok(bh), Ok(sr)) if bh.len() == 32 && sr.len() == 32 => {
+                                            let mut bha = [0u8; 32]; bha.copy_from_slice(&bh);
+                                            let mut sra = [0u8; 32]; sra.copy_from_slice(&sr);
+                                            Some(solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                                                cp_height, &bha, &sra,
+                                            ))
                                         }
-                                        quorum
+                                        _ => None,
+                                    };
+
+                                    match (signing_msg, attestations) {
+                                        (Some(msg), Some(atts)) => {
+                                            // Sum the genesis stake of every distinct genesis
+                                            // validator whose signature over this checkpoint
+                                            // verifies. Dedupe so a repeated attester (or a
+                                            // proposer self-attestation) can't be double-counted.
+                                            let mut counted: Vec<[u8; 32]> = Vec::new();
+                                            let mut verified_stake: u128 = 0;
+                                            for att in atts {
+                                                let (vb58, sig_hex) = match att.as_array() {
+                                                    Some(p) => (
+                                                        p.first().and_then(|x| x.as_str()).unwrap_or(""),
+                                                        p.get(1).and_then(|x| x.as_str()).unwrap_or(""),
+                                                    ),
+                                                    None => continue,
+                                                };
+                                                // Match attester to a genesis validator by base58(pubkey).
+                                                let entry = genesis_vset.iter()
+                                                    .find(|(pk, _)| account_to_base58(pk) == vb58);
+                                                let (pk, stake) = match entry {
+                                                    Some(e) => (e.0, e.1),
+                                                    None => continue, // not a genesis validator — ignore
+                                                };
+                                                if counted.contains(&pk) {
+                                                    continue; // already counted this validator
+                                                }
+                                                let sig_bytes = match hex_decode(sig_hex) {
+                                                    Ok(b) if b.len() == 64 => b,
+                                                    _ => continue,
+                                                };
+                                                let mut sig = [0u8; 64];
+                                                sig.copy_from_slice(&sig_bytes);
+                                                if solen_crypto::verify(&pk, &msg, &sig).is_ok() {
+                                                    counted.push(pk);
+                                                    verified_stake = verified_stake.saturating_add(stake);
+                                                }
+                                            }
+
+                                            // 2/3 stake supermajority of the genesis set.
+                                            let quorum = verified_stake.saturating_mul(3)
+                                                > genesis_total_stake.saturating_mul(2);
+                                            if quorum {
+                                                info!(
+                                                    cp_height,
+                                                    signers = counted.len(),
+                                                    "snapshot checkpoint verified — 2/3 genesis-validator stake signed"
+                                                );
+                                            } else {
+                                                warn!(
+                                                    cp_height,
+                                                    signers = counted.len(),
+                                                    validators = genesis_vset.len(),
+                                                    "snapshot checkpoint not signed by 2/3 of genesis validators — trying next seed"
+                                                );
+                                            }
+                                            quorum
+                                        }
+                                        _ => {
+                                            warn!("snapshot checkpoint missing/malformed signing fields — trying next seed");
+                                            false
+                                        }
                                     }
                                 } else {
-                                    info!("snapshot has no checkpoint — accepting on seed consensus only");
+                                    // No checkpoint to anchor trust. Accept only on seed
+                                    // consensus + post-restore merkle (weaker — flagged loudly).
+                                    warn!("snapshot has no checkpoint — accepting on seed consensus only (UNVERIFIED)");
                                     true
                                 };
 

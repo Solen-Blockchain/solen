@@ -923,6 +923,41 @@ impl ConsensusEngine {
         order[backup_position] == self.config.validator_id
     }
 
+    /// Deterministic, wall-clock-synchronized recovery-probe proposer.
+    ///
+    /// While the network is latched (`is_likely_partitioned`), every node must
+    /// agree on a SINGLE validator to re-attempt production each
+    /// `PARTITION_PROBE_INTERVAL` window, otherwise multiple nodes act as backup
+    /// proposer — each deriving its turn from its own *local* `stalled_for` — and
+    /// emit competing blocks at the wedged height whose attestations split, so no
+    /// block reaches quorum and the latch never clears (the deadlock seen on
+    /// 2026-06-08). We pick the prober from shared wall-clock time so all nodes
+    /// choose the same one, rotating through the proposer order each window so a
+    /// down proposer is skipped in the next window. Recovery therefore converges
+    /// within `order.len()` windows even if several proposers are offline.
+    pub fn partition_probe_proposer(&self) -> Option<ValidatorId> {
+        let next_height = self.height() + 1;
+        let seed = self.epoch_seed();
+        let vs = self.validator_set.read().unwrap();
+        let order = vs.proposer_order_for_height(next_height, &seed);
+        if order.is_empty() {
+            return None;
+        }
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let window = now_secs / Self::PARTITION_PROBE_INTERVAL.as_secs().max(1);
+        Some(order[(window as usize) % order.len()])
+    }
+
+    /// Whether this node is the recovery-probe proposer for the current window.
+    pub fn is_partition_probe_proposer(&self) -> bool {
+        self.partition_probe_proposer()
+            .map(|id| id == self.config.validator_id)
+            .unwrap_or(false)
+    }
+
     /// Accept a block proposed by another validator.
     ///
     /// Following the Tendermint pattern: do NOT execute the block here.

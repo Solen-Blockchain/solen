@@ -392,7 +392,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                     vs
                 };
-                let genesis_total_stake: u128 = genesis_vset.iter().map(|(_, s)| *s).sum();
 
                 for (url, _, _) in &at_max {
                     info!(url = %url, "fetching snapshot metadata...");
@@ -456,7 +455,6 @@ async fn main() -> anyhow::Result<()> {
                                             // verifies. Dedupe so a repeated attester (or a
                                             // proposer self-attestation) can't be double-counted.
                                             let mut counted: Vec<[u8; 32]> = Vec::new();
-                                            let mut verified_stake: u128 = 0;
                                             for att in atts {
                                                 let (vb58, sig_hex) = match att.as_array() {
                                                     Some(p) => (
@@ -466,10 +464,10 @@ async fn main() -> anyhow::Result<()> {
                                                     None => continue,
                                                 };
                                                 // Match attester to a genesis validator by base58(pubkey).
-                                                let entry = genesis_vset.iter()
-                                                    .find(|(pk, _)| account_to_base58(pk) == vb58);
-                                                let (pk, stake) = match entry {
-                                                    Some(e) => (e.0, e.1),
+                                                let pk = match genesis_vset.iter()
+                                                    .find(|(pk, _)| account_to_base58(pk) == vb58)
+                                                {
+                                                    Some(e) => e.0,
                                                     None => continue, // not a genesis validator — ignore
                                                 };
                                                 if counted.contains(&pk) {
@@ -483,25 +481,37 @@ async fn main() -> anyhow::Result<()> {
                                                 sig.copy_from_slice(&sig_bytes);
                                                 if solen_crypto::verify(&pk, &msg, &sig).is_ok() {
                                                     counted.push(pk);
-                                                    verified_stake = verified_stake.saturating_add(stake);
                                                 }
                                             }
 
-                                            // 2/3 stake supermajority of the genesis set.
-                                            let quorum = verified_stake.saturating_mul(3)
-                                                > genesis_total_stake.saturating_mul(2);
+                                            // Require a strict MAJORITY of genesis validators to
+                                            // have signed. We deliberately do NOT use a 2/3-stake
+                                            // test: checkpoints finalize on 2/3 of *current* stake,
+                                            // which has diverged from the equal genesis stakes, so a
+                                            // legitimately finalized checkpoint can carry as few as
+                                            // ~7 of 11 genesis signatures — fewer during a partition,
+                                            // when checkpoints finalize with a bare quorum, which is
+                                            // exactly when fast snapshot restore matters most. A
+                                            // majority-of-genesis-keys floor still prevents forgery
+                                            // (an attacker would need a majority of genesis signing
+                                            // keys, a compromise that would already break consensus
+                                            // directly) while tolerating those reduced signer counts.
+                                            // Primary integrity still rests on seed consensus + the
+                                            // post-restore merkle re-derivation in restore_snapshot().
+                                            let quorum = counted.len().saturating_mul(2) > genesis_vset.len();
                                             if quorum {
                                                 info!(
                                                     cp_height,
                                                     signers = counted.len(),
-                                                    "snapshot checkpoint verified — 2/3 genesis-validator stake signed"
+                                                    validators = genesis_vset.len(),
+                                                    "snapshot checkpoint verified — majority of genesis validators signed"
                                                 );
                                             } else {
                                                 warn!(
                                                     cp_height,
                                                     signers = counted.len(),
                                                     validators = genesis_vset.len(),
-                                                    "snapshot checkpoint not signed by 2/3 of genesis validators — trying next seed"
+                                                    "snapshot checkpoint lacks a majority of genesis-validator signatures — trying next seed"
                                                 );
                                             }
                                             quorum
@@ -1638,27 +1648,32 @@ async fn main() -> anyhow::Result<()> {
             // This prevents divergent chains from force-finalization during partitions.
             // Skip for non-validators (they never produce) and at genesis (height 0).
             //
-            // Exception: periodically (PARTITION_PROBE_INTERVAL) fall through and
-            // attempt one recovery probe. If the partition has cleared, the probe
-            // block gathers quorum, finalizes, and unlatches every node (each
-            // clears its flag on accepting a valid block). If the partition is
-            // real, the probe harmlessly fails the quorum gate. Without this, an
-            // all-validator latch deadlocks permanently — every node stays silent,
-            // so no node ever receives the block that would clear its own flag.
+            // Recovery probe: while latched, exactly ONE validator — chosen
+            // deterministically from shared wall-clock time and rotating through the
+            // proposer order each PARTITION_PROBE_INTERVAL window — re-attempts
+            // production. Every node agrees on who that is, so there is a single
+            // probe block per window; the others accept and attest it, it reaches
+            // quorum, finalizes, and unlatches the whole network. The earlier design
+            // let each node probe on its own timer and pick a backup proposer from
+            // its own *local* `stalled_for`, so several nodes emitted competing
+            // blocks at once whose attestations split and never reached quorum — a
+            // permanent deadlock (2026-06-08). Pending blocks are cleared on
+            // partition detection (engine force-finalize loop), so there is no stale
+            // block to compete with the prober's across windows.
+            let mut probe_producer = false;
             if is_validator && engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
-                if engine_clone.partition_probe_due() {
-                    tracing::warn!("partition detected — attempting recovery probe");
-                    // Clear bans so the probe can reach as many peers as possible.
-                    if let Some(ref handle) = net_for_blocks {
-                        handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
-                    }
-                    // Fall through to normal production below.
+                // Clear bans either way so probe + attestation traffic can flow.
+                if let Some(ref handle) = net_for_blocks {
+                    handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
+                }
+                if engine_clone.is_partition_probe_proposer() && engine_clone.partition_probe_due() {
+                    tracing::warn!("partition detected — recovery probe (this node is the prober this window)");
+                    probe_producer = true;
+                    // Fall through to production below.
                 } else {
-                    tracing::warn!("skipping production — partition detected");
-                    // Clear all peer bans to allow reconnection.
+                    tracing::warn!("skipping production — partition detected (not the prober this window)");
                     if let Some(ref handle) = net_for_blocks {
-                        handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
-                        // Also request sync to try to reconnect.
+                        // Request sync to try to reconnect / catch up.
                         let our_h = engine_clone.height();
                         handle.broadcast(NetworkMessage::SyncRequest {
                             from_height: our_h + 1,
@@ -1676,7 +1691,8 @@ async fn main() -> anyhow::Result<()> {
             let active_count = engine_clone.active_validator_count();
             let should_propose = active_count <= 1
                 || (is_proposer && !already_pending)
-                || (!already_pending && is_backup);
+                || (!already_pending && is_backup)
+                || (probe_producer && !already_pending);
 
             if !should_propose && stalled_for.as_secs() > 5 {
                 tracing::debug!(

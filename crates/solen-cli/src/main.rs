@@ -93,6 +93,36 @@ enum Commands {
         description: String,
     },
 
+    /// Propose moving the team pool into the vesting vault (governance).
+    /// One-time, supply-neutral, idempotent migration that backs team vesting.
+    ProposeMigrateTeamPoolToVesting {
+        /// Your key name
+        from: String,
+        /// Description of the proposal
+        description: String,
+    },
+
+    /// Propose setting the authorized bridge relayer (governance).
+    /// Until set, bridge_from_base releases are disabled (fail-closed).
+    ProposeSetBridgeRelayer {
+        /// Your key name
+        from: String,
+        /// Relayer account (hex, Base58, or a known key/name)
+        relayer: String,
+        /// Description of the proposal
+        description: String,
+    },
+
+    /// Propose setting/rotating the vesting-contract admin (governance).
+    ProposeSetVestingAdmin {
+        /// Your key name
+        from: String,
+        /// Admin account (hex, Base58, or a known key/name)
+        admin: String,
+        /// Description of the proposal
+        description: String,
+    },
+
     /// Vote on a governance proposal
     Vote {
         /// Your key name
@@ -369,6 +399,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::ProposeMinStake { from, new_min_stake, description } => {
             let base = parse_solen_amount(&new_min_stake)?;
             commands::cmd_propose_min_stake(&rpc, &from, base, &description, chain_id).await?
+        }
+        Commands::ProposeMigrateTeamPoolToVesting { from, description } => {
+            commands::cmd_propose_migrate_team_pool_to_vesting(&rpc, &from, &description, chain_id).await?
+        }
+        Commands::ProposeSetBridgeRelayer { from, relayer, description } => {
+            commands::cmd_propose_set_bridge_relayer(&rpc, &from, &relayer, &description, chain_id).await?
+        }
+        Commands::ProposeSetVestingAdmin { from, admin, description } => {
+            commands::cmd_propose_set_vesting_admin(&rpc, &from, &admin, &description, chain_id).await?
         }
         Commands::Vote { from, proposal_id, yes, weight } => {
             let base = parse_solen_amount(&weight)?;

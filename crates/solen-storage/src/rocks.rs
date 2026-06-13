@@ -104,9 +104,9 @@ impl RocksStore {
             .map_err(|e| StorageError::Backend(format!("checkpoint open: {e}")))?;
 
         // Hand the temp dir's lifetime to the store; CheckpointStore::drop
-        // removes it (into_path disables tempfile's own auto-cleanup so there's
+        // removes it (keep() disables tempfile's own auto-cleanup so there's
         // exactly one owner).
-        let dir = parent.into_path();
+        let dir = parent.keep();
         info!(path = %dir.display(), "RocksDB checkpoint created");
 
         Ok(CheckpointStore { db, dir })

@@ -1156,18 +1156,21 @@ fn execute_bridge_call(
             }
             let proof_type = String::from_utf8_lossy(&args[name_end+4..pt_end]).to_string();
 
-            // Block mock proofs on mainnet — only allow on devnet/testnet.
-            if proof_type == "mock" {
-                let chain_id = match store.get(b"__chain_id__") {
-                    Ok(Some(data)) if data.len() >= 8 => {
-                        u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]))
-                    }
-                    _ => 0,
-                };
-                // Mainnet chain_id = 1.
-                if chain_id == 1 {
-                    return err("mock proof type is not allowed on mainnet");
+            let chain_id = match store.get(b"__chain_id__") {
+                Ok(Some(data)) if data.len() >= 8 => {
+                    u64::from_le_bytes(data[..8].try_into().unwrap_or([0; 8]))
                 }
+                _ => 0,
+            };
+            let is_mainnet = chain_id == 1; // Mainnet chain_id = 1.
+
+            // Only proof types with a real on-chain verifier may be used on
+            // mainnet. Today that is "committee" (validity-committee attestations,
+            // verified in submit_batch). "mock" is insecure and dev/test-only;
+            // any other type has no verifier yet, so a posted root would be an
+            // unverified operator assertion — reject it on mainnet.
+            if is_mainnet && proof_type != "committee" {
+                return err("mainnet rollups must use a verifiable proof type ('committee')");
             }
 
             // Parse sequencer and genesis_state_root
@@ -1177,6 +1180,38 @@ fn execute_bridge_call(
             };
             let mut genesis_state_root = [0u8; 32];
             genesis_state_root.copy_from_slice(&args[pt_end+32..pt_end+64]);
+
+            // For committee rollups, parse the validity committee that must
+            // attest each batch: threshold[4] + num_attestors[4] + pubkey[32]*N,
+            // appended after genesis_state_root.
+            let (committee_threshold, committee_attestors): (u32, Vec<[u8; 32]>) =
+                if proof_type == "committee" {
+                    let coff = pt_end + 64;
+                    if args.len() < coff + 8 {
+                        return err("invalid args: committee needs threshold[4] + num_attestors[4]");
+                    }
+                    let threshold = u32::from_le_bytes(args[coff..coff+4].try_into().unwrap());
+                    let num = u32::from_le_bytes(args[coff+4..coff+8].try_into().unwrap()) as usize;
+                    if num == 0 || num > 100 {
+                        return err("invalid committee: num_attestors must be 1..=100");
+                    }
+                    if threshold == 0 || threshold as usize > num {
+                        return err("invalid committee: threshold must be 1..=num_attestors");
+                    }
+                    let aoff = coff + 8;
+                    if args.len() < aoff + num * 32 {
+                        return err("invalid args: committee attestor list truncated");
+                    }
+                    let mut attestors = Vec::with_capacity(num);
+                    for i in 0..num {
+                        let mut pk = [0u8; 32];
+                        pk.copy_from_slice(&args[aoff + i * 32..aoff + i * 32 + 32]);
+                        attestors.push(pk);
+                    }
+                    (threshold, attestors)
+                } else {
+                    (0, vec![])
+                };
 
             // Require a registration deposit (10,000 SOLEN).
             let deposit: u128 = 10_000 * 100_000_000;
@@ -1221,6 +1256,9 @@ fn execute_bridge_call(
                         "proof_type": bridge.get_rollup(rollup_id).map(|r| r.proof_type.clone()).unwrap_or_default(),
                         "genesis_state_root": hex_encode(&genesis_state_root),
                         "sequencer": hex_encode(&sequencer),
+                        "committee_threshold": committee_threshold,
+                        "committee_attestors": committee_attestors
+                            .iter().map(|a| hex_encode(a)).collect::<Vec<_>>(),
                     });
                     if let Ok(data) = serde_json::to_vec(&reg_data) {
                         let _ = store.put(reg_key.as_bytes(), &data);
@@ -1288,47 +1326,89 @@ fn execute_bridge_call(
                 None => return err("rollup not registered"),
             };
 
-            // Enforce sequential, append-only batch indices. A batch must extend
-            // the rollup's history by exactly one: the first batch is 0, each
-            // subsequent batch is latest_batch + 1. Without this a sequencer
-            // could skip or reorder batches, or re-submit an old index to
-            // overwrite latest_state_root with a disconnected root.
-            {
+            // Read the rollup registration once: it carries the batch-chain tip
+            // (latest_batch / latest_state_root), the genesis root, and the
+            // validity committee that must attest each batch.
+            let reg_json: serde_json::Value = {
                 let reg_key = format!("__rollup_{}__", rollup_id);
-                let expected_index = match store.get(reg_key.as_bytes()).ok().flatten() {
-                    Some(existing) => serde_json::from_slice::<serde_json::Value>(&existing)
-                        .ok()
-                        .and_then(|reg| reg.get("latest_batch").and_then(|v| v.as_u64()))
-                        .map(|last| last + 1)
-                        .unwrap_or(0),
-                    None => 0,
-                };
-                if batch_index != expected_index {
-                    return err(&format!(
-                        "batch index out of sequence: expected {expected_index} got {batch_index}"
-                    ));
+                store.get(reg_key.as_bytes()).ok().flatten()
+                    .and_then(|d| serde_json::from_slice(&d).ok())
+                    .unwrap_or_else(|| serde_json::json!({}))
+            };
+
+            fn decode_hex32(s: &str) -> Option<[u8; 32]> {
+                if s.len() != 64 {
+                    return None;
                 }
+                let mut out = [0u8; 32];
+                for i in 0..32 {
+                    out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+                }
+                Some(out)
             }
 
-            // Proof handling. NOTE: there is NO real validity/fraud-proof
-            // verification yet — only a structural length check. The posted
-            // state_root is therefore an UNVERIFIED operator assertion, trusted
-            // only because the sender is the registered sequencer. No
-            // value-bearing L1 logic must treat this root as proven until a real
-            // ProverBackend::verify_proof (binding pre→post state over data_hash)
-            // is wired in here. Empty proofs are rejected unless the rollup uses
-            // the "mock" proof type (blocked on mainnet at registration).
-            if proof.is_empty() && rollup.proof_type != "mock" {
-                return err("batch submission requires a valid proof");
+            // Enforce sequential, append-only batch indices. A batch must extend
+            // the rollup's history by exactly one: the first batch is 0, each
+            // subsequent batch is latest_batch + 1. Prevents skipping/reordering
+            // or re-submitting an old index to overwrite latest_state_root with a
+            // disconnected root.
+            let expected_index = reg_json.get("latest_batch")
+                .and_then(|v| v.as_u64())
+                .map(|last| last + 1)
+                .unwrap_or(0);
+            if batch_index != expected_index {
+                return err(&format!(
+                    "batch index out of sequence: expected {expected_index} got {batch_index}"
+                ));
             }
-            let proof_verified = if !proof.is_empty() && rollup.proof_type != "mock" {
-                if proof.len() < 32 {
-                    return err("proof too short — invalid proof data");
-                }
-                // Structural check only — not cryptographic verification.
-                false
+
+            // The transition being attested: pre = genesis root for batch 0,
+            // else the rollup's current latest_state_root (guaranteed to be the
+            // previous batch's post root by the sequencing check above).
+            let pre_state_root = if batch_index == 0 {
+                reg_json.get("genesis_state_root").and_then(|v| v.as_str())
+                    .and_then(decode_hex32).unwrap_or([0u8; 32])
             } else {
-                false
+                reg_json.get("latest_state_root").and_then(|v| v.as_str())
+                    .and_then(decode_hex32).unwrap_or([0u8; 32])
+            };
+
+            // Verify the batch proof. The posted state_root is accepted ONLY if
+            // its proof cryptographically attests the pre->post transition over
+            // data_hash — not merely because the sender is the sequencer.
+            let proof_verified = match rollup.proof_type.as_str() {
+                "committee" => {
+                    let threshold = reg_json.get("committee_threshold")
+                        .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let attestors: Vec<[u8; 32]> = reg_json.get("committee_attestors")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|x| x.as_str().and_then(decode_hex32))
+                            .collect())
+                        .unwrap_or_default();
+                    match solen_rollup_kit::prover::verify_committee_attestation(
+                        rollup_id, batch_index, &pre_state_root, &state_root,
+                        &data_hash, &attestors, threshold, &proof,
+                    ) {
+                        Ok(true) => true,
+                        Ok(false) => return err("batch proof: insufficient valid committee attestations"),
+                        Err(_) => return err("batch proof: malformed committee attestation data"),
+                    }
+                }
+                "mock" => {
+                    // Dev/test only (blocked on mainnet at registration). The
+                    // mock proof is NOT cryptographically secure.
+                    if proof.is_empty() {
+                        return err("batch submission requires a proof");
+                    }
+                    false
+                }
+                other => {
+                    // No verifier for this proof type — refuse rather than
+                    // record an unverified root. (Mainnet registration only
+                    // permits "committee", so this is reachable only off-mainnet.)
+                    return err(&format!("no verifier for proof type '{other}'"));
+                }
             };
 
             // Store the batch commitment.

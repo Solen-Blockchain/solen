@@ -522,10 +522,20 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                 } else {
-                                    // No checkpoint to anchor trust. Accept only on seed
-                                    // consensus + post-restore merkle (weaker — flagged loudly).
-                                    warn!("snapshot has no checkpoint — accepting on seed consensus only (UNVERIFIED)");
-                                    true
+                                    // No checkpoint to anchor trust. On mainnet this is
+                                    // refused outright: without a checkpoint signed by a
+                                    // majority of genesis validators we cannot prove the
+                                    // snapshot's authenticity, and accepting it would let a
+                                    // malicious seed substitute fabricated state. Off mainnet
+                                    // (devnet/testnet bootstrap) we still accept on seed
+                                    // consensus + post-restore merkle, flagged loudly.
+                                    if matches!(net, Network::Mainnet) {
+                                        warn!("snapshot has no finalized checkpoint — REFUSING on mainnet (cannot verify authenticity), trying next seed");
+                                        false
+                                    } else {
+                                        warn!("snapshot has no checkpoint — accepting on seed consensus only (UNVERIFIED, non-mainnet)");
+                                        true
+                                    }
                                 };
 
                                 if !checkpoint_valid {
@@ -904,12 +914,22 @@ async fn main() -> anyhow::Result<()> {
                             if syncing_for_p2p.swap(false, std::sync::atomic::Ordering::Relaxed) {
                                 // Clear stale pending blocks from BEFORE this height.
                                 engine_for_p2p.clear_stale_pending(header.height.saturating_sub(1));
-                                // Immediately finalize the accepted block (executes it).
-                                engine_for_p2p.force_finalize_block(header.height);
-                                tracing::info!(
-                                    height = header.height,
-                                    "state verified — resuming block production"
-                                );
+                                // Finalize the accepted block only if it carries a 2/3
+                                // attestation quorum. A single peer's block must NOT be
+                                // committed unilaterally on a syncing node — without quorum
+                                // the block stays pending and finalizes via the normal
+                                // quorum-gated timeout path (or we re-sync).
+                                if engine_for_p2p.force_finalize_block_if_quorum(header.height) {
+                                    tracing::info!(
+                                        height = header.height,
+                                        "state verified — resuming block production"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        height = header.height,
+                                        "tip accepted pending 2/3 quorum — not finalizing on a single peer"
+                                    );
+                                }
                             }
                             // Send our signed attestation back.
                             let bh = solen_consensus::engine::block_hash(&header);

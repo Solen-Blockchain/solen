@@ -510,6 +510,10 @@ struct RpcRateLimiter {
     submit_ops: std::sync::Mutex<(u64, std::time::Instant)>,
     submit_solutions: std::sync::Mutex<(u64, std::time::Instant)>,
     snapshots: std::sync::Mutex<(u64, std::time::Instant)>,
+    /// VM-executing read methods (simulate / callView / checkSponsorship).
+    /// Each takes the store read lock and runs the VM, so an unthrottled flood
+    /// contends with block execution.
+    view_calls: std::sync::Mutex<(u64, std::time::Instant)>,
 }
 
 impl RpcRateLimiter {
@@ -519,6 +523,7 @@ impl RpcRateLimiter {
             submit_ops: std::sync::Mutex::new((0, now)),
             submit_solutions: std::sync::Mutex::new((0, now)),
             snapshots: std::sync::Mutex::new((0, now)),
+            view_calls: std::sync::Mutex::new((0, now)),
         }
     }
 
@@ -1056,6 +1061,9 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn simulate_operation(&self, op: UserOperation) -> RpcResult<SimulationResult> {
+        if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
+            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many view/simulate calls", None::<()>));
+        }
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
         let receipt = self.engine.simulate(&op, store.as_ref());
@@ -1104,6 +1112,9 @@ impl SolenApiServer for SolenRpc {
         method: String,
         args: Option<String>,
     ) -> RpcResult<CallViewResult> {
+        if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
+            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many view/callView calls", None::<()>));
+        }
         let target = parse_account_id(&contract_id)?;
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
@@ -1486,6 +1497,9 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn check_sponsorship(&self, op: UserOperation) -> RpcResult<SponsorshipResult> {
+        if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
+            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many checkSponsorship calls", None::<()>));
+        }
         // Check if any registered paymaster contract is willing to sponsor this operation.
         // Paymasters are contracts that implement a `willSponsor` view method.
         let store = self.engine.store();

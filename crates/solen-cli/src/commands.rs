@@ -551,8 +551,11 @@ pub async fn cmd_add_vesting(
 
     let sender_hex = account_to_base58(&sender_id);
 
-    // Epochs per month (~13,140 at 100 blocks/epoch, 2s block time)
-    const EPOCHS_PER_MONTH: u64 = 157_680 / 12;
+    // Epochs per month, calibrated to mainnet timing (100 blocks/epoch × 6s
+    // = 600s/epoch → 52,596 epochs/year). Must match
+    // solen_system_contracts::vesting::EPOCHS_PER_MONTH so CLI-created custom
+    // schedules convert months → epochs the same way the contract interprets them.
+    const EPOCHS_PER_MONTH: u64 = 52_596 / 12;
 
     // Build args: recipient[32] + amount[16] + type[1] + (optional custom: cliff[8] + total[8])
     let mut args = Vec::with_capacity(65);

@@ -14,6 +14,11 @@ use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
 
 use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
 
+/// Pre-sorted richlist rows `(id, balance, staked)` with the time the snapshot
+/// was built. Lets `/api/richlist` serve a TTL-cached result instead of
+/// scanning + deserializing + sorting the whole account table per request.
+type RichlistCache = Arc<RwLock<Option<(std::time::Instant, Vec<([u8; 32], u128, u128)>)>>>;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<RwLock<IndexStore>>,
@@ -21,6 +26,8 @@ pub struct ApiState {
     /// Rolling buffer feeding `/api/stsolen/apy`. Empty until the sampler
     /// task fills it.
     pub stsolen_apy: Arc<crate::stsolen_apy::ApySamples>,
+    /// TTL cache for the richlist (see `RichlistCache`).
+    pub richlist_cache: RichlistCache,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +57,16 @@ pub struct EventsQuery {
 fn default_limit() -> usize {
     20
 }
+
+/// Hard upper bound on any page size, regardless of the client-supplied
+/// `limit`. Prevents a single request from forcing the indexer to clone and
+/// serialize its entire in-memory log under the store read lock.
+const MAX_PAGE_LIMIT: usize = 100;
+
+/// Cap on how many of an account's transactions the transfers endpoint scans
+/// per request. Bounds per-request work; transfers older than this window are
+/// reached via `offset` paging rather than a single unbounded scan.
+const MAX_TRANSFER_SCAN: usize = 2000;
 
 #[derive(Serialize)]
 pub struct StatusResponse {
@@ -121,8 +138,9 @@ async fn get_status(State(state): State<ApiState>) -> Json<StatusResponse> {
 
 async fn get_blocks(
     State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
+    Query(mut params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedBlock>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     let store = state.store.read().unwrap();
     let blocks: Vec<IndexedBlock> = store
         .get_recent_blocks_paged(params.limit, params.offset)
@@ -169,8 +187,9 @@ async fn get_tx_by_hash(
 
 async fn get_recent_txs(
     State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
+    Query(mut params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedTx>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     let store = state.store.read().unwrap();
     Json(store.get_recent_txs_paged(params.limit, params.offset).into_iter().cloned().collect())
 }
@@ -178,8 +197,9 @@ async fn get_recent_txs(
 async fn get_account_txs(
     State(state): State<ApiState>,
     Path(account): Path<String>,
-    Query(params): Query<PaginationParams>,
+    Query(mut params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedTx>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     // Accept both hex and base58 addresses — normalize to base58 for lookup.
     let lookup = if let Ok(id) = parse_address(&account) {
         account_to_base58(&id)
@@ -283,11 +303,13 @@ async fn get_account_transfers(
     let store = state.store.read().unwrap();
 
     // Walk this account's tx index newest-first, project transfer events,
-    // filter by direction, then paginate at the row level.
-    let txs = store.get_account_txs_paged(&lookup, usize::MAX, 0);
+    // filter by direction, then paginate at the row level. The tx scan is
+    // bounded (MAX_TRANSFER_SCAN) so a hot account cannot force an unbounded
+    // load; the page size is capped at MAX_PAGE_LIMIT.
+    let txs = store.get_account_txs_paged(&lookup, MAX_TRANSFER_SCAN, 0);
     let mut rows: Vec<TransferRow> = Vec::new();
     let mut skipped = 0usize;
-    let limit = params.limit.max(1);
+    let limit = params.limit.min(MAX_PAGE_LIMIT).max(1);
     let offset = params.offset;
 
     for tx in txs {
@@ -354,8 +376,9 @@ async fn get_account_transfers(
 
 async fn get_events(
     State(state): State<ApiState>,
-    Query(params): Query<EventsQuery>,
+    Query(mut params): Query<EventsQuery>,
 ) -> Json<Vec<IndexedEvent>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     // Normalize the contract filter: callers may pass hex (with or without
     // `0x`) or Base58. Events are stored with Base58 emitters.
     let emitter_b58 = params.contract.as_deref().and_then(|raw| {
@@ -517,6 +540,36 @@ struct PublishSourceRequest {
     compiler_version: Option<String>,
 }
 
+/// Largest source blob accepted by the publish endpoint.
+const MAX_SOURCE_BYTES: usize = 256 * 1024;
+
+/// Global single-flight guard for on-node contract compilation. Compiling
+/// attacker-supplied Rust is expensive; this ensures at most ONE compile runs
+/// at a time so the public node can't be flooded into parallel `cargo build`s.
+static SOURCE_COMPILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// On-node compilation is OFF unless explicitly enabled by the operator.
+/// Even when enabled it is gated (contract must exist on-chain, single-flight,
+/// size-capped). When disabled, source is still stored but left unverified —
+/// verification should happen out-of-band (reproducible CI build).
+fn source_compile_enabled() -> bool {
+    std::env::var("SOLEN_ENABLE_SOURCE_COMPILE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// True only if a contract with this code hash is actually deployed on-chain.
+/// Prevents spending compile cycles on arbitrary attacker-chosen hashes.
+fn contract_bytecode_exists(state: &ApiState, code_hash_hex: &str) -> bool {
+    let Some(engine) = &state.engine else { return false };
+    let Ok(hash_bytes) = parse_address(code_hash_hex) else { return false };
+    let mut key = b"code/".to_vec();
+    key.extend_from_slice(&hash_bytes);
+    let estore = engine.store();
+    let estore = estore.read().unwrap();
+    matches!(estore.get(&key), Ok(Some(_)))
+}
+
 async fn publish_contract_source(
     State(state): State<ApiState>,
     Path(code_hash): Path<String>,
@@ -527,6 +580,11 @@ async fn publish_contract_source(
         // Basic validation: code_hash must be valid hex and 64 chars.
         if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Json(serde_json::json!({"success": false, "error": "invalid code_hash format"}));
+        }
+
+        // Bound the stored/compiled source size.
+        if body.source_code.len() > MAX_SOURCE_BYTES {
+            return Json(serde_json::json!({"success": false, "error": "source too large"}));
         }
 
         // Rate limit: reject if source was published recently (within 1 hour).
@@ -547,9 +605,17 @@ async fn publish_contract_source(
     let compiler_version = body.compiler_version.unwrap_or_else(|| "unknown".to_string());
     let expected_hash = code_hash.clone();
 
-    // Try to verify by compiling the source.
-    let verified = if language == "rust" {
-        verify_rust_contract(&source_code, &expected_hash)
+    // Verify by compiling ONLY when on-node compilation is explicitly enabled,
+    // the contract actually exists on-chain, and no other compile is running.
+    // Otherwise the source is stored unverified (verify out-of-band).
+    let verified = if language == "rust"
+        && source_compile_enabled()
+        && contract_bytecode_exists(&state, &expected_hash)
+    {
+        match SOURCE_COMPILE_LOCK.try_lock() {
+            Ok(_guard) => verify_rust_contract(&source_code, &expected_hash),
+            Err(_) => false, // another compile in progress — don't queue work
+        }
     } else {
         false
     };
@@ -727,8 +793,9 @@ async fn get_contracts(
 
 async fn get_fulfilled_intents(
     State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
+    Query(mut params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedIntent>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     let store = state.store.read().unwrap();
     Json(store.get_recent_intents(params.limit).into_iter().cloned().collect())
 }
@@ -789,8 +856,9 @@ async fn get_rollup(
 async fn get_rollup_batches(
     State(state): State<ApiState>,
     Path(rollup_id): Path<u64>,
-    Query(params): Query<PaginationParams>,
+    Query(mut params): Query<PaginationParams>,
 ) -> Json<Vec<IndexedBatch>> {
+    params.limit = params.limit.min(MAX_PAGE_LIMIT);
     // First check the indexed store (from on-chain events).
     let store = state.store.read().unwrap();
     let indexed = store.get_rollup_batches(rollup_id, params.limit);
@@ -910,49 +978,14 @@ fn system_account_label(id: &[u8; 32]) -> Option<&'static str> {
     }
 }
 
-async fn get_richlist(
-    State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
-) -> Json<Vec<RichListEntry>> {
-    let engine = match &state.engine {
-        Some(e) => e,
-        None => return Json(vec![]),
-    };
-    let store = engine.store();
-    let store = store.read().unwrap();
-
-    // Scan all accounts
-    let entries = match store.scan_prefix(b"acc/") {
-        Ok(e) => e,
-        Err(_) => return Json(vec![]),
-    };
-
-    // Load staking info for validator lookup
-    let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
-
-    let mut accounts: Vec<([u8; 32], u128, u128)> = Vec::new();
-    for (key, value) in &entries {
-        if key.len() != 36 { continue; } // "acc/" + 32 bytes
-        if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(value) {
-            let mut id = [0u8; 32];
-            id.copy_from_slice(&key[4..]);
-            let staked = staking.validators.iter()
-                .find(|v| v.id == id)
-                .map(|v| v.self_stake)
-                .unwrap_or(0);
-            let total = account.balance + staked;
-            if total > 0 {
-                accounts.push((id, account.balance, staked));
-            }
-        }
-    }
-
-    // Sort by total (balance + staked) descending
-    accounts.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
-
-    let limit = params.limit.min(100);
-    let result: Vec<RichListEntry> = accounts.iter()
-        .skip(params.offset)
+/// Project a page of richlist rows from the pre-sorted snapshot.
+fn richlist_page(
+    accounts: &[([u8; 32], u128, u128)],
+    offset: usize,
+    limit: usize,
+) -> Vec<RichListEntry> {
+    accounts.iter()
+        .skip(offset)
         .take(limit)
         .enumerate()
         .map(|(i, (id, balance, staked))| {
@@ -960,7 +993,7 @@ async fn get_richlist(
                 if *staked > 0 { Some("Validator".to_string()) } else { None }
             });
             RichListEntry {
-                rank: params.offset + i + 1,
+                rank: offset + i + 1,
                 address: account_to_base58(id),
                 balance: balance.to_string(),
                 staked: staked.to_string(),
@@ -968,8 +1001,65 @@ async fn get_richlist(
                 label,
             }
         })
-        .collect();
+        .collect()
+}
 
+async fn get_richlist(
+    State(state): State<ApiState>,
+    Query(params): Query<PaginationParams>,
+) -> Json<Vec<RichListEntry>> {
+    const RICHLIST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+    let limit = params.limit.min(100);
+
+    // Fast path: serve from the cached snapshot if it's still fresh, without
+    // touching the engine store. The whole-table scan + sort happens at most
+    // once per TTL instead of once per request.
+    {
+        let guard = state.richlist_cache.read().unwrap();
+        if let Some((built, accounts)) = guard.as_ref() {
+            if built.elapsed() < RICHLIST_TTL {
+                return Json(richlist_page(accounts, params.offset, limit));
+            }
+        }
+    }
+
+    // Cache miss / stale: rebuild the sorted snapshot.
+    let engine = match &state.engine {
+        Some(e) => e,
+        None => return Json(vec![]),
+    };
+    let mut accounts: Vec<([u8; 32], u128, u128)> = {
+        let store = engine.store();
+        let store = store.read().unwrap();
+        let entries = match store.scan_prefix(b"acc/") {
+            Ok(e) => e,
+            Err(_) => return Json(vec![]),
+        };
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let mut accounts = Vec::new();
+        for (key, value) in &entries {
+            if key.len() != 36 { continue; } // "acc/" + 32 bytes
+            if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(value) {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&key[4..]);
+                let staked = staking.validators.iter()
+                    .find(|v| v.id == id)
+                    .map(|v| v.self_stake)
+                    .unwrap_or(0);
+                let total = account.balance + staked;
+                if total > 0 {
+                    accounts.push((id, account.balance, staked));
+                }
+            }
+        }
+        accounts
+    };
+
+    // Sort by total (balance + staked) descending.
+    accounts.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+
+    let result = richlist_page(&accounts, params.offset, limit);
+    *state.richlist_cache.write().unwrap() = Some((std::time::Instant::now(), accounts));
     Json(result)
 }
 
@@ -982,7 +1072,12 @@ pub async fn start_explorer_api(
     if let Some(e) = engine.as_ref() {
         crate::stsolen_apy::spawn_sampler(stsolen_apy.clone(), e.clone());
     }
-    let state = ApiState { store, engine, stsolen_apy };
+    let state = ApiState {
+        store,
+        engine,
+        stsolen_apy,
+        richlist_cache: Arc::new(RwLock::new(None)),
+    };
     let app = router(state);
 
     info!(%addr, "explorer API started");

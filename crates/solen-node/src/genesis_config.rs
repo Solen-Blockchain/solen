@@ -298,9 +298,17 @@ impl GenesisConfig {
             });
         }
 
-        // Vesting contract account — holds tokens for all vesting schedules.
-        // On mainnet, funded by add_vesting which deducts from Treasury.
-        // On testnet, genesis vesting schedules are pre-funded.
+        // Vesting contract account — holds the tokens backing all vesting
+        // schedules. Funded at 0 here on purpose: the genesis allocation is
+        // immutable chain identity (a fresh node re-derives the genesis state
+        // root and pins it via --genesis_hash), so it must NOT be changed for an
+        // already-launched chain. On mainnet the team allocation lives in
+        // TEAM_POOL_ADDRESS at genesis and is relocated into this vault at
+        // runtime via the MigrateTeamPoolToVesting governance proposal BEFORE
+        // the team cliff — that is what backs claims (the claim handler never
+        // mints). Post-genesis schedules added via add_vesting are funded from
+        // Treasury at add time. Do not "fix" this to a non-zero balance: it
+        // would fork chain_id=1's genesis.
         genesis_accounts.push(GenesisAccount {
             id: VESTING_ADDRESS,
             balance: 0,

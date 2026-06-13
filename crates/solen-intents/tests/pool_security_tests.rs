@@ -26,15 +26,28 @@ fn test_intent() -> Intent {
     }
 }
 
-fn test_solution(intent_id: u64, score: u64) -> Solution {
+/// Build a solver solution carrying a valid signature over
+/// intent_id[8] + solver[32] + claimed_tip[16] (now required by the pool).
+fn signed_solution(intent_id: u64, score: u64, claimed_tip: u128) -> Solution {
+    let kp = solen_crypto::Keypair::from_seed(&[10u8; 32]);
+    let solver = kp.public_key();
+    let mut msg = Vec::with_capacity(56);
+    msg.extend_from_slice(&intent_id.to_le_bytes());
+    msg.extend_from_slice(&solver);
+    msg.extend_from_slice(&claimed_tip.to_le_bytes());
+    let signature = kp.sign(&msg).to_vec();
     Solution {
         intent_id,
-        solver: aid(10),
+        solver,
         operations: vec![],
-        claimed_tip: 25,
+        claimed_tip,
         score,
-        signature: vec![],
+        signature,
     }
+}
+
+fn test_solution(intent_id: u64, score: u64) -> Solution {
+    signed_solution(intent_id, score, 25)
 }
 
 // ── Solutions per intent capped ───────────────────────────────
@@ -44,10 +57,9 @@ fn solution_cap_enforced() {
     let pool = IntentPool::new(100);
     let id = pool.submit(test_intent()).unwrap();
 
-    // Submit 50 solutions (the cap).
+    // Submit 50 solutions (the cap). Sign each with its actual claimed_tip.
     for i in 0..50 {
-        let mut sol = test_solution(id, i);
-        sol.claimed_tip = i as u128;
+        let sol = signed_solution(id, i, i as u128);
         assert!(pool.submit_solution(sol).is_ok(), "solution {} should succeed", i);
     }
 

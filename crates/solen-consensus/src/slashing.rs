@@ -52,30 +52,37 @@ pub const DOWNTIME_THRESHOLD: u64 = 100;
 /// at the same height. Verifies proposer signatures when present to prevent
 /// false slashing from fabricated headers.
 pub fn check_double_sign(a: &BlockHeader, b: &BlockHeader) -> Option<SlashingEvidence> {
-    if a.height != b.height || a.proposer != b.proposer || a.state_root == b.state_root {
+    if a.height != b.height || a.proposer != b.proposer {
         return None;
     }
 
-    // If both headers have proposer signatures, verify them.
-    // This prevents false slashing from fabricated evidence.
-    if !a.proposer_signature.is_empty() && !b.proposer_signature.is_empty() {
-        let hash_a = crate::engine::block_hash(a);
-        let hash_b = crate::engine::block_hash(b);
+    let hash_a = crate::engine::block_hash(a);
+    let hash_b = crate::engine::block_hash(b);
 
-        if a.proposer_signature.len() == 64 {
-            let mut sig = [0u8; 64];
-            sig.copy_from_slice(&a.proposer_signature);
-            if solen_crypto::verify(&a.proposer, &hash_a, &sig).is_err() {
-                return None; // signature A invalid — not real evidence
-            }
-        }
-        if b.proposer_signature.len() == 64 {
-            let mut sig = [0u8; 64];
-            sig.copy_from_slice(&b.proposer_signature);
-            if solen_crypto::verify(&b.proposer, &hash_b, &sig).is_err() {
-                return None; // signature B invalid — not real evidence
-            }
-        }
+    // block_hash() excludes the signature, so two headers with the same hash
+    // are the same block (or a re-sign), not equivocation. Comparing hashes —
+    // rather than state_root — also catches equivocation between two distinct
+    // headers that happen to share a state root.
+    if hash_a == hash_b {
+        return None;
+    }
+
+    // Real evidence requires BOTH headers to carry a valid 64-byte signature
+    // from the proposer. Without this check, anyone could fabricate two
+    // unsigned conflicting headers to slash an honest validator — block_hash
+    // excludes the signature, so the framing would otherwise look authentic.
+    if a.proposer_signature.len() != 64 || b.proposer_signature.len() != 64 {
+        return None;
+    }
+    let mut sig_a = [0u8; 64];
+    sig_a.copy_from_slice(&a.proposer_signature);
+    if solen_crypto::verify(&a.proposer, &hash_a, &sig_a).is_err() {
+        return None; // signature A invalid — not real evidence
+    }
+    let mut sig_b = [0u8; 64];
+    sig_b.copy_from_slice(&b.proposer_signature);
+    if solen_crypto::verify(&b.proposer, &hash_b, &sig_b).is_err() {
+        return None; // signature B invalid — not real evidence
     }
 
     Some(SlashingEvidence {
@@ -181,32 +188,43 @@ mod tests {
 
     #[test]
     fn double_sign_detected() {
-        let header_a = BlockHeader {
+        // Two conflicting headers at the same height, each VALIDLY signed by the
+        // same proposer, constitute slashable equivocation.
+        let kp = solen_crypto::Keypair::from_seed(&[0x07; 32]);
+        let proposer = kp.public_key();
+
+        let mut header_a = BlockHeader {
             height: 10,
             epoch: 0,
             parent_hash: [0; 32],
             state_root: [1; 32],
             transactions_root: [0; 32],
             receipts_root: [0; 32],
-            proposer: vid(1),
+            proposer,
             timestamp_ms: 0,
             proposer_signature: vec![],
         };
-        let header_b = BlockHeader {
-            height: 10,
-            epoch: 0,
-            parent_hash: [0; 32],
-            state_root: [2; 32], // different state root
-            transactions_root: [0; 32],
-            receipts_root: [0; 32],
-            proposer: vid(1),
-            timestamp_ms: 0,
-            proposer_signature: vec![],
+        let mut header_b = BlockHeader {
+            state_root: [2; 32], // different state root → different block
+            ..header_a.clone()
         };
+        header_a.proposer_signature =
+            kp.sign(&crate::engine::block_hash(&header_a)).to_vec();
+        header_b.proposer_signature =
+            kp.sign(&crate::engine::block_hash(&header_b)).to_vec();
 
         let evidence = check_double_sign(&header_a, &header_b);
         assert!(evidence.is_some());
-        assert_eq!(evidence.unwrap().offender, vid(1));
+        assert_eq!(evidence.unwrap().offender, proposer);
+
+        // Unsigned headers must NOT yield evidence: block_hash() excludes the
+        // signature, so accepting unsigned "equivocation" would let anyone
+        // fabricate two headers to slash an honest validator.
+        let mut unsigned_a = header_a.clone();
+        unsigned_a.proposer_signature = vec![];
+        let mut unsigned_b = header_b.clone();
+        unsigned_b.proposer_signature = vec![];
+        assert!(check_double_sign(&unsigned_a, &unsigned_b).is_none());
     }
 
     #[test]

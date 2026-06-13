@@ -324,44 +324,69 @@ fn execute_staking_call(
                 }
             }
 
-            if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
+            // Validate the offender exists and is still active. (Separate read
+            // borrow so we can take multiple mutable borrows of `staking` below.)
+            match staking.validators.iter().find(|v| v.id == offender) {
+                None => return err("validator not found"),
                 // Skip if already slashed (prevents duplicate slash txs from
                 // multiple proposers all applying penalties).
-                if !val.is_active {
-                    return err("validator already inactive");
-                }
-                let penalty = val.self_stake.saturating_mul(penalty_bps as u128) / 10_000;
-                val.self_stake = val.self_stake.saturating_sub(penalty);
+                Some(v) if !v.is_active => return err("validator already inactive"),
+                Some(_) => {}
+            }
+            let current_epoch = read_current_epoch(store);
+
+            // Slash the validator's own self-stake and jail it.
+            let mut total_penalty: u128 = 0;
+            if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
+                let self_penalty = val.self_stake.saturating_mul(penalty_bps as u128) / 10_000;
+                val.self_stake = val.self_stake.saturating_sub(self_penalty);
                 val.is_active = false;
                 // Set cooldown: validator can't unjail until next epoch.
-                let current_epoch = read_current_epoch(store);
                 val.eligible_from_epoch = current_epoch + 1;
-
-                // Send slashed funds to treasury (can be restored via governance).
-                if penalty > 0 {
-                    staking.save(store);
-                    let mut state = StateManager::new(store);
-                    if let Ok(mut treasury) = state.require_account(&TREASURY_ADDRESS) {
-                        treasury.balance = treasury.balance.saturating_add(penalty);
-                        let _ = state.save_account(&treasury);
-                    }
-                    // Reload staking after state mutation.
-                    staking = StakingContract::load(store);
-                }
-
-                let mut data = Vec::with_capacity(48);
-                data.extend_from_slice(&offender);
-                data.extend_from_slice(&penalty.to_le_bytes());
-                events.push(Event {
-                    emitter: STAKING_ADDRESS,
-                    topic: b"slashed".to_vec(),
-                    data,
-                });
-
-                Ok(())
-            } else {
-                Err("validator not found".to_string())
+                total_penalty = total_penalty.saturating_add(self_penalty);
             }
+
+            // Slash delegations proportionally — delegators share slashing risk
+            // (per TOKENOMICS). Without this, a validator could attract large
+            // delegations and risk only its small self-stake, making slashing
+            // economically toothless. Each active delegation to this validator
+            // and the validator's total_delegated are reduced by the same bps.
+            let mut delegated_penalty: u128 = 0;
+            for d in staking.delegations.iter_mut().filter(|d| d.validator == offender) {
+                let p = d.amount.saturating_mul(penalty_bps as u128) / 10_000;
+                d.amount = d.amount.saturating_sub(p);
+                delegated_penalty = delegated_penalty.saturating_add(p);
+            }
+            if delegated_penalty > 0 {
+                if let Some(val) = staking.validators.iter_mut().find(|v| v.id == offender) {
+                    val.total_delegated = val.total_delegated.saturating_sub(delegated_penalty);
+                }
+                total_penalty = total_penalty.saturating_add(delegated_penalty);
+            }
+
+            // Send all slashed funds (self + delegated) to treasury
+            // (can be restored via governance).
+            if total_penalty > 0 {
+                staking.save(store);
+                let mut state = StateManager::new(store);
+                if let Ok(mut treasury) = state.require_account(&TREASURY_ADDRESS) {
+                    treasury.balance = treasury.balance.saturating_add(total_penalty);
+                    let _ = state.save_account(&treasury);
+                }
+                // Reload staking after state mutation.
+                staking = StakingContract::load(store);
+            }
+
+            let mut data = Vec::with_capacity(48);
+            data.extend_from_slice(&offender);
+            data.extend_from_slice(&total_penalty.to_le_bytes());
+            events.push(Event {
+                emitter: STAKING_ADDRESS,
+                topic: b"slashed".to_vec(),
+                data,
+            });
+
+            Ok(())
         }
         "unjail" => {
             // Unjail cooldown: validators must wait at least 1 epoch after being
@@ -593,6 +618,67 @@ fn execute_governance_call(
             });
             Ok(())
         }
+        "propose_set_bridge_relayer" => {
+            // args: relayer[32] + desc[...]
+            if args.len() < 32 {
+                return err("invalid args: need relayer[32]");
+            }
+            let mut relayer = [0u8; 32];
+            relayer.copy_from_slice(&args[0..32]);
+            let desc = String::from_utf8_lossy(&args[32..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetBridgeRelayer { relayer },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
+        "propose_set_vesting_admin" => {
+            // args: admin[32] + desc[...]
+            if args.len() < 32 {
+                return err("invalid args: need admin[32]");
+            }
+            let mut admin = [0u8; 32];
+            admin.copy_from_slice(&args[0..32]);
+            let desc = String::from_utf8_lossy(&args[32..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetVestingAdmin { admin },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
+        "propose_migrate_team_pool_to_vesting" => {
+            // args: desc[...]
+            let desc = String::from_utf8_lossy(args).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::MigrateTeamPoolToVesting,
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
         "vote" => {
             // args: proposal_id[8] + support[1] + stake_weight[16]
             let proposal_id = match read_u64(args, 0) {
@@ -609,10 +695,17 @@ fn execute_governance_call(
             let actual_stake = {
                 use solen_system_contracts::staking::StakingContract;
                 let staking = StakingContract::load(store);
+                // Count each token exactly once. A validator votes its OWN
+                // self_stake only — NOT total_stake(), which includes other
+                // accounts' delegations that those delegators vote separately
+                // below. Using total_stake() here double-counted delegated
+                // stake, letting a validator + its delegators exceed the true
+                // network stake (the finalize denominator sums total_stake()
+                // once), so a minority could clear quorum/supermajority.
                 let validator_stake: u128 = staking.validators.iter()
                     .filter(|v| v.id == *sender && v.is_active)
                     .filter(|v| v.eligible_from_epoch <= epoch)
-                    .map(|v| v.total_stake())
+                    .map(|v| v.self_stake)
                     .sum();
                 let delegated_stake: u128 = staking.delegations.iter()
                     .filter(|d| d.delegator == *sender)
@@ -740,6 +833,50 @@ fn execute_governance_call(
                         }
                         ProposalAction::EmergencyPause => "paused".to_string(),
                         ProposalAction::EmergencyResume => "resumed".to_string(),
+                        ProposalAction::SetBridgeRelayer { relayer } => {
+                            let _ = store.put(b"__bridge_relayer__", relayer);
+                            format!("bridge_relayer={}", hex_encode(relayer))
+                        }
+                        ProposalAction::SetVestingAdmin { admin } => {
+                            let mut vesting =
+                                solen_system_contracts::vesting::VestingContract::load(store);
+                            vesting.governance_set_admin(*admin);
+                            vesting.save(store);
+                            format!("vesting_admin={}", hex_encode(admin))
+                        }
+                        ProposalAction::MigrateTeamPoolToVesting => {
+                            // Move the entire team-pool balance into the vesting
+                            // vault so vesting claims are backed by real funds
+                            // instead of minting. Supply-neutral (funds are only
+                            // relocated between two system accounts) and
+                            // idempotent (after the first run the team pool is 0,
+                            // so a re-run moves nothing).
+                            use solen_types::system::{TEAM_POOL_ADDRESS, VESTING_ADDRESS};
+                            let mut state = StateManager::new(store);
+                            let moved = match state.get_account(&TEAM_POOL_ADDRESS) {
+                                Ok(Some(mut team_pool)) => {
+                                    let amount = team_pool.balance;
+                                    if amount > 0 {
+                                        team_pool.balance = 0;
+                                        let _ = state.save_account(&team_pool);
+                                        let mut vault = state.get_account(&VESTING_ADDRESS)
+                                            .ok().flatten()
+                                            .unwrap_or_else(|| solen_types::account::Account {
+                                                id: VESTING_ADDRESS,
+                                                code_hash: [0u8; 32],
+                                                auth_methods: vec![],
+                                                nonce: 0,
+                                                balance: 0,
+                                            });
+                                        vault.balance = vault.balance.saturating_add(amount);
+                                        let _ = state.save_account(&vault);
+                                    }
+                                    amount
+                                }
+                                _ => 0,
+                            };
+                            format!("migrated_team_pool_to_vesting={moved}")
+                        }
                         _ => format!("{:?}", action),
                     };
                     events.push(Event {
@@ -895,7 +1032,20 @@ fn execute_bridge_call(
             // Release SOLEN from the bridge vault to a Solen recipient.
             // Called by the relayer when wSOLEN is burned on Base.
             // args: recipient[32] + amount[16] + base_tx_hash[32]
-            // Only the bridge relayer (sequencer) should call this.
+            //
+            // Authorization: only the configured bridge relayer may release
+            // vault funds. The relayer is set by governance
+            // (ProposalAction::SetBridgeRelayer -> `__bridge_relayer__`).
+            // Fail closed: if no relayer is configured, releases are disabled
+            // so an arbitrary caller cannot drain the vault.
+            match store.get(b"__bridge_relayer__").ok().flatten() {
+                Some(relayer) if relayer.len() == 32 => {
+                    if relayer.as_slice() != sender.as_slice() {
+                        return err("bridge_from_base: caller is not the authorized relayer");
+                    }
+                }
+                _ => return err("bridge_from_base: no bridge relayer configured — releases disabled"),
+            }
             if args.len() < 80 {
                 return err("invalid args: need recipient[32] + amount[16] + base_tx_hash[32]");
             }
@@ -1040,7 +1190,7 @@ fn execute_bridge_call(
 
                 // Credit deposit to bridge address.
                 if let Ok(mut bridge_acct) = state.require_account(&BRIDGE_ADDRESS) {
-                    bridge_acct.balance += deposit;
+                    bridge_acct.balance = bridge_acct.balance.saturating_add(deposit);
                     let _ = state.save_account(&bridge_acct);
                 }
             } else {
@@ -1138,19 +1288,48 @@ fn execute_bridge_call(
                 None => return err("rollup not registered"),
             };
 
-            // Verify the proof if one was provided and the rollup has a proof type.
-            // Empty proofs are rejected unless the rollup uses "mock" proof type.
+            // Enforce sequential, append-only batch indices. A batch must extend
+            // the rollup's history by exactly one: the first batch is 0, each
+            // subsequent batch is latest_batch + 1. Without this a sequencer
+            // could skip or reorder batches, or re-submit an old index to
+            // overwrite latest_state_root with a disconnected root.
+            {
+                let reg_key = format!("__rollup_{}__", rollup_id);
+                let expected_index = match store.get(reg_key.as_bytes()).ok().flatten() {
+                    Some(existing) => serde_json::from_slice::<serde_json::Value>(&existing)
+                        .ok()
+                        .and_then(|reg| reg.get("latest_batch").and_then(|v| v.as_u64()))
+                        .map(|last| last + 1)
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                if batch_index != expected_index {
+                    return err(&format!(
+                        "batch index out of sequence: expected {expected_index} got {batch_index}"
+                    ));
+                }
+            }
+
+            // Proof handling. NOTE: there is NO real validity/fraud-proof
+            // verification yet — only a structural length check. The posted
+            // state_root is therefore an UNVERIFIED operator assertion, trusted
+            // only because the sender is the registered sequencer. No
+            // value-bearing L1 logic must treat this root as proven until a real
+            // ProverBackend::verify_proof (binding pre→post state over data_hash)
+            // is wired in here. Empty proofs are rejected unless the rollup uses
+            // the "mock" proof type (blocked on mainnet at registration).
             if proof.is_empty() && rollup.proof_type != "mock" {
                 return err("batch submission requires a valid proof");
             }
-            if !proof.is_empty() && rollup.proof_type != "mock" {
-                // Basic proof validation: non-empty and properly structured.
-                // Full ZK/fraud proof verification would go here when proof
-                // verifier implementations are available beyond mock.
+            let proof_verified = if !proof.is_empty() && rollup.proof_type != "mock" {
                 if proof.len() < 32 {
                     return err("proof too short — invalid proof data");
                 }
-            }
+                // Structural check only — not cryptographic verification.
+                false
+            } else {
+                false
+            };
 
             // Store the batch commitment.
             let batch_key = format!("__rollup_{}_batch_{}__", rollup_id, batch_index);
@@ -1161,6 +1340,7 @@ fn execute_bridge_call(
                 "data_hash": hex_encode(&data_hash),
                 "submitter": hex_encode(sender),
                 "proof_len": proof.len(),
+                "verified": proof_verified,
             });
             if let Ok(data) = serde_json::to_vec(&batch_data) {
                 let _ = store.put(batch_key.as_bytes(), &data);
@@ -1268,21 +1448,31 @@ fn execute_intent_call(
             let claimed_tip = read_u128(args, 40).unwrap_or(0);
             let num_transfers = u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
 
-            // Validate that the intent exists and the sender matches.
-            // Prevents malicious proposers from fabricating system ops
-            // that debit arbitrary accounts.
+            // SECURITY: fulfill debits `sender` (the intent owner), so the
+            // owner's authorization MUST be verifiable on-chain. Otherwise a
+            // malicious block proposer can fabricate a [0xFF]-authorized fulfill
+            // op (which bypasses signature and nonce checks in the executor) and
+            // drain ANY account. Authorization is an on-chain intent record at
+            // `intent/{id}` whose first 32 bytes are the owner — and that record
+            // must only be written after the owner's signature over the intent
+            // terms (and a spend cap) has been verified.
+            //
+            // FAIL CLOSED: signed-intent storage is not yet implemented, so no
+            // such record exists and every fulfill is rejected — no funds can
+            // move. This disables automatic intent settlement (which was never
+            // safe to run unauthenticated) instead of permitting arbitrary
+            // debits. Re-enable only once intents are committed on-chain with a
+            // verified owner signature binding the authorized transfers/tip.
             let intent_key = format!("intent/{}", intent_id);
-            match store.get(intent_key.as_bytes()) {
-                Ok(Some(data)) => {
-                    // Verify the intent sender matches the op sender.
-                    if data.len() >= 32 && &data[..32] != sender {
-                        return err("fulfill: sender does not match intent owner");
-                    }
-                }
-                _ => {
-                    // No stored intent — check if intent pool has it (legacy path).
-                    // If neither exists, reject.
-                }
+            let authorized = matches!(
+                store.get(intent_key.as_bytes()),
+                Ok(Some(ref data)) if data.len() >= 32 && &data[..32] == sender
+            );
+            if !authorized {
+                return err(
+                    "fulfill: no owner-authorized on-chain intent for this id — \
+                     intent settlement is disabled pending signed-intent support",
+                );
             }
 
             let offset = 60;
@@ -1359,7 +1549,7 @@ fn execute_intent_call(
                         nonce: 0,
                         balance: 0,
                     });
-                recipient.balance += *amount;
+                recipient.balance = recipient.balance.saturating_add(*amount);
                 let _ = state.save_account(&recipient);
 
                 // Emit transfer event.
@@ -1399,7 +1589,7 @@ fn execute_intent_call(
                                 nonce: 0,
                                 balance: 0,
                             });
-                        solver_acct.balance += claimed_tip;
+                        solver_acct.balance = solver_acct.balance.saturating_add(claimed_tip);
                         let _ = state.save_account(&solver_acct);
 
                         let mut tip_data = Vec::with_capacity(48);
@@ -1851,20 +2041,24 @@ fn execute_vesting_call(
                     let mut state = StateManager::new(store);
                     let vesting_id = solen_types::system::VESTING_ADDRESS;
 
-                    // Deduct from vesting contract account.
+                    // Deduct from the vesting vault. The vault MUST actually
+                    // hold the claimed amount — NEVER mint. The team allocation
+                    // is relocated into VESTING_ADDRESS via the
+                    // MigrateTeamPoolToVesting governance action before the
+                    // cliff; until the vault is funded, claims are rejected
+                    // rather than credited from thin air. The early return skips
+                    // `vesting.save(store)` below, so the schedule's `claimed`
+                    // counter is NOT advanced and the claim can be retried once
+                    // the vault is funded.
                     match state.get_account(&vesting_id) {
-                        Ok(Some(mut vesting_acct)) => {
-                            if vesting_acct.balance >= amount {
-                                vesting_acct.balance -= amount;
-                            } else {
-                                // Fallback: vesting contract underfunded (legacy genesis schedules).
-                                // Allow claim but log the shortfall.
-                                vesting_acct.balance = 0;
-                            }
+                        Ok(Some(mut vesting_acct)) if vesting_acct.balance >= amount => {
+                            vesting_acct.balance -= amount;
                             let _ = state.save_account(&vesting_acct);
                         }
                         _ => {
-                            // Vesting account doesn't exist — legacy path, skip deduction.
+                            return err(
+                                "vesting vault underfunded — claim unavailable until the vault is funded",
+                            );
                         }
                     }
 

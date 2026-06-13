@@ -68,6 +68,18 @@ pub enum ProposalAction {
     EmergencyPause,
     /// Resume from emergency pause.
     EmergencyResume,
+    /// Set the authorized bridge relayer account that may release vault funds
+    /// via `bridge_from_base`. Until set, bridge releases are disabled.
+    SetBridgeRelayer { relayer: [u8; 32] },
+    /// Establish or rotate the vesting-contract admin (the account allowed to
+    /// add post-genesis vesting schedules). Until set, no admin exists and the
+    /// admin-only vesting methods are disabled.
+    SetVestingAdmin { admin: [u8; 32] },
+    /// One-time treasury operation: move the entire balance of the team pool
+    /// account into the vesting vault, so vesting claims are backed by real
+    /// funds instead of minting. Idempotent (a second run moves 0). See the
+    /// MigrateTeamPoolToVesting execution arm.
+    MigrateTeamPoolToVesting,
 }
 
 /// Status of a governance proposal.

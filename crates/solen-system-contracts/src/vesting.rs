@@ -11,8 +11,16 @@ use serde::{Deserialize, Serialize};
 use solen_types::AccountId;
 use thiserror::Error;
 
-/// Epochs per year (~157,680 at 100 blocks/epoch, 2s block time).
-pub const EPOCHS_PER_YEAR: u64 = 157_680;
+/// Epochs per year, calibrated to MAINNET timing: 100 blocks/epoch × 6s blocks
+/// = 600s/epoch, so 31,557,600s ÷ 600s = 52,596 epochs/year. This makes the
+/// schedule durations below match real wall-clock time on mainnet (e.g. the
+/// Team 1-year cliff actually lands ~1 year after genesis). The previous value
+/// (157,680) was calibrated for 2s blocks (devnet/testnet) and on mainnet's 6s
+/// blocks stretched every duration ~3×. Test networks (2s blocks) now vest
+/// proportionally faster in wall-clock, which is acceptable for testing.
+/// These constants are only consulted at claim time, never at genesis, so
+/// changing them does not affect any chain's genesis state root.
+pub const EPOCHS_PER_YEAR: u64 = 52_596;
 pub const EPOCHS_PER_MONTH: u64 = EPOCHS_PER_YEAR / 12;
 
 #[derive(Debug, Error)]
@@ -167,15 +175,29 @@ impl VestingContract {
         self.schedules.iter().find(|s| s.recipient == *recipient)
     }
 
-    /// Set the admin account (can only be done once, or by current admin).
+    /// Transfer the admin role. Only the current admin may call this.
+    ///
+    /// There is deliberately NO anonymous-bootstrap path: when `admin` is
+    /// `None`, this rejects rather than letting the first caller seize the
+    /// role. The initial admin must be established at genesis or via
+    /// governance (`governance_set_admin`). Without this guard, anyone could
+    /// claim admin on an unconfigured contract and then add self-paying
+    /// schedules.
     pub fn set_admin(&mut self, caller: &AccountId, new_admin: AccountId) -> Result<(), VestingError> {
-        if let Some(ref current) = self.admin {
-            if current != caller {
-                return Err(VestingError::NotAdmin);
+        match &self.admin {
+            Some(current) if current == caller => {
+                self.admin = Some(new_admin);
+                Ok(())
             }
+            _ => Err(VestingError::NotAdmin),
         }
+    }
+
+    /// Establish or rotate the admin from an already-authorized context
+    /// (governance proposal execution). Authorization is enforced by the
+    /// governance voting/timelock upstream, so no caller check is applied here.
+    pub fn governance_set_admin(&mut self, new_admin: AccountId) {
         self.admin = Some(new_admin);
-        Ok(())
     }
 
     /// Add a vesting schedule (admin only, for post-genesis allocations).

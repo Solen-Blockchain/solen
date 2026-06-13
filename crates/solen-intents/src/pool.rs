@@ -64,25 +64,27 @@ impl IntentPool {
     /// controls the claimed solver account, preventing MEV manipulation
     /// by fake solvers.
     pub fn submit_solution(&self, solution: Solution) -> Result<(), PoolError> {
-        // Verify solver signature: signs intent_id[8] + solver[32] + claimed_tip[16].
-        if !solution.signature.is_empty() {
+        // Require a valid solver signature over intent_id[8] + solver[32] +
+        // claimed_tip[16]. This authenticates the `solver` field so a submitter
+        // cannot attribute solutions to a competitor or inflate `score` under
+        // another identity to win select_best_solution. The in-process built-in
+        // solver does NOT go through this method (produce_block calls it
+        // directly), so requiring a signature here only constrains external
+        // RPC submissions — which must always be signed.
+        if solution.signature.len() != 64 {
+            return Err(PoolError::InvalidSignature);
+        }
+        {
             let mut msg = Vec::with_capacity(56);
             msg.extend_from_slice(&solution.intent_id.to_le_bytes());
             msg.extend_from_slice(&solution.solver);
             msg.extend_from_slice(&solution.claimed_tip.to_le_bytes());
-            if solution.signature.len() == 64 {
-                let mut sig = [0u8; 64];
-                sig.copy_from_slice(&solution.signature);
-                if solen_crypto::verify(&solution.solver, &msg, &sig).is_err() {
-                    return Err(PoolError::InvalidSignature);
-                }
-            } else {
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(&solution.signature);
+            if solen_crypto::verify(&solution.solver, &msg, &sig).is_err() {
                 return Err(PoolError::InvalidSignature);
             }
         }
-        // Note: empty signature is accepted for backward compatibility with
-        // the built-in solver (DirectTransferSolver) which runs in-process.
-        // External solutions submitted via RPC should always include a signature.
 
         let intents = self.intents.lock().unwrap();
         let (_, status) = intents
@@ -220,13 +222,24 @@ mod tests {
     }
 
     fn test_solution(intent_id: u64, score: u64) -> Solution {
+        // Solver solutions must now carry a valid signature over
+        // intent_id[8] + solver[32] + claimed_tip[16], so derive the solver
+        // from a real keypair and sign.
+        let kp = solen_crypto::Keypair::from_seed(&[10u8; 32]);
+        let solver = kp.public_key();
+        let claimed_tip: u128 = 25;
+        let mut msg = Vec::with_capacity(56);
+        msg.extend_from_slice(&intent_id.to_le_bytes());
+        msg.extend_from_slice(&solver);
+        msg.extend_from_slice(&claimed_tip.to_le_bytes());
+        let signature = kp.sign(&msg).to_vec();
         Solution {
             intent_id,
-            solver: aid(10),
+            solver,
             operations: vec![],
-            claimed_tip: 25,
+            claimed_tip,
             score,
-            signature: vec![],
+            signature,
         }
     }
 

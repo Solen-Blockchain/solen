@@ -57,6 +57,14 @@ fn setup_engine() -> (ConsensusEngine, Keypair, [u8; 32], [u8; 32]) {
     (engine, alice_kp, alice, validator_id)
 }
 
+/// Sign a block header with `kp` so it passes proposer-signature verification.
+/// The signature covers `block_hash`, which excludes the signature field.
+fn sign_header(kp: &Keypair, header: &mut solen_types::block::BlockHeader) {
+    header.proposer_signature = vec![];
+    let bh = solen_consensus::engine::block_hash(header);
+    header.proposer_signature = kp.sign(&bh).to_vec();
+}
+
 // ── Test #19: Validator set syncs from staking at epoch ───────
 
 #[test]
@@ -125,9 +133,10 @@ fn double_sign_detected() {
     use solen_consensus::slashing::check_double_sign;
     use solen_types::block::BlockHeader;
 
-    let proposer = [0x01; 32];
+    let kp = Keypair::from_seed(&[0x01; 32]);
+    let proposer = kp.public_key();
 
-    let header_a = BlockHeader {
+    let mut header_a = BlockHeader {
         height: 100,
         epoch: 1,
         parent_hash: [0; 32],
@@ -136,10 +145,11 @@ fn double_sign_detected() {
         receipts_root: [0; 32],
         proposer,
         timestamp_ms: 1000,
-            proposer_signature: vec![],
+        proposer_signature: vec![],
     };
+    sign_header(&kp, &mut header_a);
 
-    let header_b = BlockHeader {
+    let mut header_b = BlockHeader {
         height: 100,
         epoch: 1,
         parent_hash: [0; 32],
@@ -148,8 +158,9 @@ fn double_sign_detected() {
         receipts_root: [0; 32],
         proposer,
         timestamp_ms: 1001,
-            proposer_signature: vec![],
+        proposer_signature: vec![],
     };
+    sign_header(&kp, &mut header_b);
 
     let evidence = check_double_sign(&header_a, &header_b);
     assert!(
@@ -161,11 +172,22 @@ fn double_sign_detected() {
     assert_eq!(ev.offender, proposer);
     assert!(matches!(ev.reason, SlashingReason::DoubleSign { .. }));
 
-    // Same block (same state root) should NOT be detected as double-sign.
+    // Same block should NOT be detected as double-sign.
     let evidence2 = check_double_sign(&header_a, &header_a);
     assert!(
         evidence2.is_none(),
         "same block should not trigger double-sign"
+    );
+
+    // Unsigned headers must NOT yield evidence — otherwise anyone could
+    // fabricate equivocation to slash an honest validator.
+    let mut unsigned_a = header_a.clone();
+    unsigned_a.proposer_signature = vec![];
+    let mut unsigned_b = header_b.clone();
+    unsigned_b.proposer_signature = vec![];
+    assert!(
+        check_double_sign(&unsigned_a, &unsigned_b).is_none(),
+        "unsigned headers must not be slashable"
     );
 }
 
@@ -430,7 +452,8 @@ fn duplicate_block_at_same_height_rejected() {
     let blocks = engine.get_blocks_for_sync(1, 1);
     let parent_hash = solen_consensus::engine::block_hash(&blocks[0].header);
 
-    let header = solen_types::block::BlockHeader {
+    let v_kp = Keypair::from_seed(&[0x01; 32]); // matches setup_engine's validator
+    let mut header = solen_types::block::BlockHeader {
         height: 2,
         epoch: 0,
         parent_hash,
@@ -439,8 +462,9 @@ fn duplicate_block_at_same_height_rejected() {
         receipts_root: [0; 32],
         proposer: engine.validator_id(),
         timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        proposer_signature: vec![],
     };
+    sign_header(&v_kp, &mut header);
 
     // First accept should work.
     let accepted1 = engine.accept_block(&header, &[]);
@@ -464,17 +488,12 @@ fn fork_scoring_prefers_higher_priority_proposer() {
     let blocks = engine.get_blocks_for_sync(1, 1);
     let parent_hash = solen_consensus::engine::block_hash(&blocks[0].header);
 
-    // Two different "external" proposers.
-    let v_a = {
-        let mut id = [0u8; 32];
-        id[0] = 0xAA;
-        id
-    };
-    let v_b = {
-        let mut id = [0u8; 32];
-        id[0] = 0xBB;
-        id
-    };
+    // Two different "external" proposers, each a real keypair so their blocks
+    // carry valid proposer signatures.
+    let kp_a = Keypair::from_seed(&[0xAA; 32]);
+    let kp_b = Keypair::from_seed(&[0xBB; 32]);
+    let v_a = kp_a.public_key();
+    let v_b = kp_b.public_key();
 
     // Add them to the validator set so accept_block doesn't reject as unknown.
     {
@@ -486,7 +505,7 @@ fn fork_scoring_prefers_higher_priority_proposer() {
     }
 
     // Two competing blocks at height 2 from different proposers.
-    let header_a = solen_types::block::BlockHeader {
+    let mut header_a = solen_types::block::BlockHeader {
         height: 2,
         epoch: 0,
         parent_hash,
@@ -497,8 +516,9 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
         proposer_signature: vec![],
     };
+    sign_header(&kp_a, &mut header_a);
 
-    let header_b = solen_types::block::BlockHeader {
+    let mut header_b = solen_types::block::BlockHeader {
         height: 2,
         epoch: 0,
         parent_hash,
@@ -509,6 +529,7 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 1,
         proposer_signature: vec![],
     };
+    sign_header(&kp_b, &mut header_b);
 
     // Accept first block.
     let first_accepted = engine.accept_block(&header_a, &[]);
@@ -563,11 +584,16 @@ fn missed_block_counter_resets_on_successful_proposal() {
 }
 
 #[test]
-fn double_sign_detection_requires_different_state_roots() {
+fn double_sign_detection_uses_block_hash() {
     use solen_consensus::slashing::check_double_sign;
 
-    let proposer = [0x01; 32];
-    let header_a = solen_types::block::BlockHeader {
+    // Equivocation is keyed on the block hash (every header field except the
+    // signature), not just the state root. Two distinct signed headers at the
+    // same height from the same proposer are slashable even if they share a
+    // state root.
+    let kp = Keypair::from_seed(&[0x01; 32]);
+    let proposer = kp.public_key();
+    let mut header_a = solen_types::block::BlockHeader {
         height: 10,
         epoch: 0,
         parent_hash: [0; 32],
@@ -575,29 +601,52 @@ fn double_sign_detection_requires_different_state_roots() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        timestamp_ms: 100,
+        proposer_signature: vec![],
     };
+    sign_header(&kp, &mut header_a);
 
-    // Same proposer, same height, SAME state root — not a double sign.
-    let mut header_b = header_a.clone();
-    header_b.timestamp_ms = 200; // different timestamp but same state root
+    // Identical block — not equivocation.
     assert!(
-        check_double_sign(&header_a, &header_b).is_none(),
-        "same state root must NOT trigger double-sign"
+        check_double_sign(&header_a, &header_a).is_none(),
+        "identical block must NOT trigger double-sign"
     );
 
-    // Same proposer, same height, different state root — IS a double sign.
-    header_b.state_root = [0xBB; 32];
+    // Same height/proposer, SAME state root but a different timestamp — these
+    // are two distinct signed headers, which IS equivocation.
+    let mut header_b = solen_types::block::BlockHeader {
+        timestamp_ms: 200,
+        proposer_signature: vec![],
+        ..header_a.clone()
+    };
+    sign_header(&kp, &mut header_b);
     assert!(
         check_double_sign(&header_a, &header_b).is_some(),
+        "two distinct signed headers at the same height must trigger double-sign"
+    );
+
+    // Different state root — also a double sign.
+    let mut header_c = solen_types::block::BlockHeader {
+        state_root: [0xBB; 32],
+        proposer_signature: vec![],
+        ..header_a.clone()
+    };
+    sign_header(&kp, &mut header_c);
+    assert!(
+        check_double_sign(&header_a, &header_c).is_some(),
         "different state root must trigger double-sign"
     );
 
     // Different proposer — NOT a double sign.
-    header_b.proposer = [0x02; 32];
+    let other_kp = Keypair::from_seed(&[0x02; 32]);
+    let mut header_d = solen_types::block::BlockHeader {
+        proposer: other_kp.public_key(),
+        proposer_signature: vec![],
+        ..header_a.clone()
+    };
+    sign_header(&other_kp, &mut header_d);
     assert!(
-        check_double_sign(&header_a, &header_b).is_none(),
+        check_double_sign(&header_a, &header_d).is_none(),
         "different proposer must NOT trigger double-sign"
     );
 }

@@ -526,6 +526,13 @@ impl BlockExecutor {
             }
         }
 
+        // Snapshot the full store before any state mutation so a failed
+        // operation can be rolled back completely — including the fee reserve
+        // below, single-action contract writes, and system-contract keys.
+        // Taken unconditionally (single-action ops can also fail mid-write);
+        // RocksDB snapshots are cheap hard-linked checkpoints.
+        let store_snapshot = store.snapshot();
+
         // Reserve max_fee upfront to prevent spend-then-underpay attacks.
         // The reserved amount is refunded after execution, then actual fee is deducted.
         let max_possible_fee = {
@@ -539,15 +546,6 @@ impl BlockExecutor {
                 }
                 _ => 0,
             }
-        };
-
-        // Execute each action. For multi-action operations, take a full store
-        // snapshot so ALL state changes (including system contracts) can be rolled
-        // back if any action fails.
-        let store_snapshot = if op.actions.len() > 1 {
-            Some(store.snapshot())
-        } else {
-            None
         };
 
         // Track native SOLEN transferred to each target within this op, for
@@ -598,44 +596,39 @@ impl BlockExecutor {
 
         // If any action failed, roll back ALL state changes from this operation.
         if let Some(err) = action_failed {
-            if let Some(snapshot) = store_snapshot {
-                // Restore entire store to pre-execution state.
-                // Delete any new keys created during failed execution (e.g. deployed
-                // contracts, new accounts) by scanning for account keys that didn't
-                // exist in the snapshot.
-                let snapshot_entries = snapshot.scan_all().unwrap_or_default();
-                let snapshot_keys: std::collections::HashSet<&[u8]> =
-                    snapshot_entries.iter().map(|(k, _)| k.as_slice()).collect();
-
-                // Delete any keys created during failed execution.
-                // Scan all prefixes that actions can write to.
-                for prefix in &[b"acc/" as &[u8], b"code/", b"cs/", b"intent/"] {
-                    if let Ok(current) = store.scan_prefix(prefix) {
-                        for (k, _) in &current {
-                            if !snapshot_keys.contains(k.as_slice()) {
-                                let _ = store.delete(k);
-                            }
-                        }
+            // Restore entire store to pre-execution state. Delete any key
+            // created during the failed op — scanning every prefix, not a
+            // fixed allowlist, so system-contract keys (rollup batches,
+            // bridge-processed markers, intents, config) are also reverted —
+            // then restore all prior values.
+            let snapshot_entries = store_snapshot.scan_all().unwrap_or_default();
+            let snapshot_keys: std::collections::HashSet<&[u8]> =
+                snapshot_entries.iter().map(|(k, _)| k.as_slice()).collect();
+            if let Ok(current) = store.scan_all() {
+                for (k, _) in &current {
+                    if !snapshot_keys.contains(k.as_slice()) {
+                        let _ = store.delete(k);
                     }
                 }
-
-                // Restore all snapshot entries to their pre-execution values.
-                for (k, v) in &snapshot_entries {
-                    let _ = store.put(k, v);
-                }
-                // Re-apply nonce increment (was consumed before execution, then rolled back).
-                {
-                    let mut state = StateManager::new(store);
-                    let _ = state.consume_nonce(&op.sender, op.nonce);
-                }
-                // Deduct gas fee from the restored state.
-                let actual_fee = self.fee_config.calculate_fee(gas_used);
-                if actual_fee > 0 {
-                    let mut state = StateManager::new(store);
-                    if let Ok(mut acct) = state.require_account(&op.sender) {
-                        acct.balance = acct.balance.saturating_sub(actual_fee);
-                        let _ = state.save_account(&acct);
-                    }
+            }
+            for (k, v) in &snapshot_entries {
+                let _ = store.put(k, v);
+            }
+            // The snapshot was taken after the nonce was consumed but before the
+            // fee reserve, so the restore returns the full pre-fee balance and
+            // leaves the nonce consumed (replay protection holds on failed ops).
+            // Re-consume defensively (no-op if already consumed) and charge only
+            // the actual gas used — never the reserved max_fee.
+            {
+                let mut state = StateManager::new(store);
+                let _ = state.consume_nonce(&op.sender, op.nonce);
+            }
+            let actual_fee = self.fee_config.calculate_fee(gas_used);
+            if actual_fee > 0 {
+                let mut state = StateManager::new(store);
+                if let Ok(mut acct) = state.require_account(&op.sender) {
+                    acct.balance = acct.balance.saturating_sub(actual_fee);
+                    let _ = state.save_account(&acct);
                 }
             }
             events.clear(); // Clear events from failed actions.
@@ -920,6 +913,11 @@ impl BlockExecutor {
                 method,
                 args,
             } => {
+                // Total VM fuel this call and its entire queued sub-call tree
+                // may consume. Bounds the 16-per-frame × depth-8 fan-out to a
+                // finite amount of work regardless of how calls are nested.
+                const MAX_CALL_TREE_FUEL: u64 = 64_000_000; // ~64 full-budget calls
+                let mut fuel_budget = MAX_CALL_TREE_FUEL;
                 self.dispatch_contract_call(
                     state,
                     sender,
@@ -930,6 +928,7 @@ impl BlockExecutor {
                     height,
                     events,
                     0,
+                    &mut fuel_budget,
                 )
             }
             Action::SetAuth { auth_methods } => {
@@ -1041,6 +1040,7 @@ impl BlockExecutor {
         height: u64,
         events: &mut Vec<Event>,
         depth: u32,
+        fuel_budget: &mut u64,
     ) -> Result<u64, ExecutionError> {
         // Cap recursion from pending-call fan-out. Matches actor-style depth
         // budgets in other chains. Each queued call can itself queue more,
@@ -1117,12 +1117,23 @@ impl BlockExecutor {
             .with_msg_value(msg_value)
             .with_self_balance(target_account.balance);
 
+        // Draw from the operation's shared fuel budget so the entire queued
+        // sub-call tree (up to 16 calls per frame × depth 8) cannot each get a
+        // fresh 1M-fuel budget. The per-call cap stays at the VM default; the
+        // shared budget bounds the whole tree.
+        const MAX_FUEL_PER_CALL: u64 = 1_000_000;
+        if *fuel_budget == 0 {
+            return Err(ExecutionError::State(StateError::AccountNotFound(
+                "operation fuel budget exhausted".into(),
+            )));
+        }
+        let call_fuel = (*fuel_budget).min(MAX_FUEL_PER_CALL);
         let result = match self.vm_runtime.execute(
             &target_account.code_hash,
             &bytecode,
             &input,
             ctx,
-            None,
+            Some(call_fuel),
         ) {
             Ok(r) => r,
             Err(solen_vm::VmError::OutOfGas) => {
@@ -1132,6 +1143,7 @@ impl BlockExecutor {
             }
             Err(e) => return Err(ExecutionError::VmError(e)),
         };
+        *fuel_budget = fuel_budget.saturating_sub(result.gas_used);
 
         state.save_contract_storage(target, &result.storage)?;
 
@@ -1201,6 +1213,7 @@ impl BlockExecutor {
                 height,
                 events,
                 depth + 1,
+                fuel_budget, // same shared budget across the whole tree
             )?;
             total_gas = total_gas.saturating_add(sub_gas);
         }

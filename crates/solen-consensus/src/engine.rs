@@ -984,8 +984,12 @@ impl ConsensusEngine {
 
             let fork = if header.height == expected_height {
                 if let Some(last_block) = chain.last() {
+                    // A real parent exists, so the block MUST chain to it. There
+                    // is no zero-parent_hash exception here — accepting [0;32]
+                    // would let a forged block skip parent-linkage entirely and
+                    // attach off our actual head.
                     let expected_parent = block_hash(&last_block.header);
-                    header.parent_hash != expected_parent && header.parent_hash != [0u8; 32]
+                    header.parent_hash != expected_parent
                 } else {
                     false
                 }
@@ -1113,7 +1117,21 @@ impl ConsensusEngine {
         }
 
         // Verify proposer signature to prevent forged block headers.
-        if header.proposer_signature.len() == 64 {
+        // Every non-genesis block MUST carry a valid 64-byte signature from its
+        // proposer. block_hash() excludes the signature field, so an unsigned
+        // forgery would otherwise hash identically to a legitimate block and
+        // collect honest attestations. There is no empty-signature exception:
+        // all validators sign the blocks they produce.
+        if header.height > 0 {
+            if header.proposer_signature.len() != 64 {
+                warn!(
+                    height = header.height,
+                    sig_len = header.proposer_signature.len(),
+                    proposer = ?&header.proposer[..4],
+                    "missing or malformed proposer signature — rejecting block"
+                );
+                return false;
+            }
             let bh = block_hash(header);
             let mut sig = [0u8; 64];
             sig.copy_from_slice(&header.proposer_signature);
@@ -1125,21 +1143,35 @@ impl ConsensusEngine {
                 );
                 return false;
             }
-        } else if !header.proposer_signature.is_empty() {
-            // Non-empty but wrong length — invalid.
-            warn!(
-                height = header.height,
-                sig_len = header.proposer_signature.len(),
-                "malformed proposer signature — rejecting block"
-            );
-            return false;
         }
 
         // Check for duplicate pending/finalized blocks.
         {
             let chain = self.chain.read().unwrap();
-            if chain.iter().any(|b| b.header.height == header.height) {
-                return false; // Already finalized.
+            if let Some(finalized) = chain.iter().find(|b| b.header.height == header.height) {
+                // A different block at the same height from the same proposer is
+                // equivocation even after one side finalized. Evaluate it for
+                // slashing before dropping it — otherwise a proposer that
+                // equivocates across a partition escapes punishment once either
+                // side commits. check_double_sign requires both headers to be
+                // validly signed, so this cannot be abused to frame a validator.
+                let finalized_header = finalized.header.clone();
+                drop(chain);
+                if finalized_header.proposer == header.proposer
+                    && block_hash(&finalized_header) != block_hash(header)
+                {
+                    if let Some(evidence) =
+                        crate::slashing::check_double_sign(&finalized_header, header)
+                    {
+                        warn!(
+                            height = header.height,
+                            proposer = ?&header.proposer[..4],
+                            "DOUBLE SIGN DETECTED against finalized block — queuing slashing evidence"
+                        );
+                        self.process_slashing(&evidence);
+                    }
+                }
+                return false; // Already finalized — do not re-accept.
             }
             drop(chain);
 
@@ -1505,6 +1537,32 @@ impl ConsensusEngine {
     /// no need to wait for attestations.
     pub fn force_finalize_block(&self, height: u64) {
         self.finalize_pending_block(height);
+    }
+
+    /// Finalize a pending block ONLY when a 2/3 attestation quorum exists for
+    /// it (or in single-validator / early-bootstrap modes). Returns true if it
+    /// finalized. The sync path uses this so a single peer's block cannot be
+    /// committed on a syncing node without real network agreement — without the
+    /// quorum gate, one Byzantine peer could plant arbitrary state. When quorum
+    /// is not yet present the block stays pending and is finalized later through
+    /// the normal quorum-gated timeout path (or the node re-syncs).
+    pub fn force_finalize_block_if_quorum(&self, height: u64) -> bool {
+        let has_quorum = {
+            let atts = self.pending_attestations.read().unwrap();
+            let att_ids: Vec<ValidatorId> = atts
+                .get(&height)
+                .map(|a| a.iter().map(|att| att.validator_id).collect())
+                .unwrap_or_default();
+            let vs = self.validator_set.read().unwrap();
+            // Single-validator chains and the first few bootstrap blocks finalize
+            // without quorum (peers need time to connect), matching the
+            // finalize_timed_out_blocks bootstrap carve-out.
+            vs.active_count() <= 1 || height <= 3 || vs.has_quorum(&att_ids)
+        };
+        if has_quorum {
+            self.finalize_pending_block(height);
+        }
+        has_quorum
     }
 
     /// Legacy rewards distribution — now handled by the executor via

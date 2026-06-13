@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-rocksdb = ["dep:rocksdb"]
+rocksdb = ["dep:rocksdb", "dep:tempfile"]
 
 [dependencies]
 solen-types = { workspace = true }
@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 rocksdb = { workspace = true, optional = true }
 tracing = { workspace = true }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

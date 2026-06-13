@@ -1,6 +1,6 @@
 //! Ed25519 signature creation and verification.
 
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -46,13 +46,20 @@ impl Keypair {
 }
 
 /// Verify an Ed25519 signature against a public key and message.
+///
+/// Uses `verify_strict` (not `verify`) so non-canonical signatures and
+/// small-order public keys are rejected — signatures are non-malleable and
+/// agree across implementations. Every standard Ed25519 signer (including this
+/// module's `sign`) already produces canonical signatures, so this only
+/// rejects deliberately-crafted malleable ones. NOTE: consensus-affecting —
+/// ship via a coordinated upgrade so all nodes verify identically.
 pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> Result<(), SigningError> {
     let verifying_key =
         VerifyingKey::from_bytes(public_key).map_err(|_| SigningError::InvalidPublicKey)?;
     let sig =
         ed25519_dalek::Signature::from_bytes(signature);
     verifying_key
-        .verify(message, &sig)
+        .verify_strict(message, &sig)
         .map_err(|_| SigningError::InvalidSignature)
 }
 

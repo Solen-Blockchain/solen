@@ -107,6 +107,21 @@ impl RpcClient {
     pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>> {
         self.call("solen_getValidators", serde_json::json!([])).await
     }
+
+    pub async fn get_governance_proposals(&self) -> Result<Vec<ProposalInfo>> {
+        self.call("solen_getGovernanceProposals", serde_json::json!([]))
+            .await
+    }
+}
+
+/// Subset of a governance proposal needed to report a just-submitted one.
+/// Extra fields in the RPC response are ignored.
+#[derive(Debug, Deserialize)]
+pub struct ProposalInfo {
+    pub id: u64,
+    pub proposer: String,
+    pub voting_end_epoch: u64,
+    pub execute_after_epoch: u64,
 }
 
 #[derive(Debug, Deserialize)]

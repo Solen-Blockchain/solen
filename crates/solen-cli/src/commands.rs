@@ -9,6 +9,50 @@ use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
 use crate::rpc::RpcClient;
 use crate::wallet::{self, hex_decode};
 
+/// Highest existing proposal id (-1 if none), captured before submitting so the
+/// newly-created proposal can be identified afterward.
+async fn current_max_proposal_id(rpc: &RpcClient) -> i64 {
+    rpc.get_governance_proposals()
+        .await
+        .ok()
+        .and_then(|l| l.iter().map(|p| p.id as i64).max())
+        .unwrap_or(-1)
+}
+
+/// After a governance proposal is submitted, poll for it and print its on-chain
+/// id and voting window. The id is assigned when the op executes (a block or two
+/// after submit), so it isn't known synchronously. `prev_max_id` comes from
+/// `current_max_proposal_id` called before submitting.
+async fn announce_proposal(rpc: &RpcClient, proposer_b58: &str, prev_max_id: i64) {
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let Ok(list) = rpc.get_governance_proposals().await else { continue };
+        if let Some(p) = list
+            .iter()
+            .filter(|p| p.id as i64 > prev_max_id && p.proposer == proposer_b58)
+            .max_by_key(|p| p.id)
+        {
+            println!("\nProposal #{} is now Active.", p.id);
+            println!(
+                "  Voting ends at epoch {}; executable after epoch {} (post-timelock).",
+                p.voting_end_epoch, p.execute_after_epoch
+            );
+            println!("  Vote:     solen vote <key> {} --yes --weight <stake>", p.id);
+            println!(
+                "  Finalize: solen finalize-proposal <key> {}   (after epoch {})",
+                p.id, p.voting_end_epoch
+            );
+            println!(
+                "  Execute:  solen execute-proposal <key> {}    (after epoch {})",
+                p.id, p.execute_after_epoch
+            );
+            return;
+        }
+    }
+    println!("\nProposal submitted; it will appear within a block or two.");
+    println!("  Use `solen_getGovernanceProposals` to get its id and voting window.");
+}
+
 // ── Status ──────────────────────────────────────────────────────
 
 pub async fn cmd_status(rpc: &RpcClient) -> Result<()> {
@@ -149,11 +193,12 @@ pub async fn cmd_propose_set_bridge_relayer(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: set bridge relayer to {}", account_to_base58(&relayer_id));
         println!("  Description: {}", description);
-        println!("\nVoting period: 14 epochs. Use `solen vote`, then finalize-proposal and execute-proposal.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -194,11 +239,12 @@ pub async fn cmd_propose_set_vesting_admin(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: set vesting admin to {}", account_to_base58(&admin_id));
         println!("  Description: {}", description);
-        println!("\nVoting period: 14 epochs. Use `solen vote`, then finalize-proposal and execute-proposal.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -238,11 +284,12 @@ pub async fn cmd_propose_set_voting_period(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: set governance voting period to {} epochs", epochs);
         println!("  Description: {}", description);
-        println!("\nUse `solen vote`, then finalize-proposal and execute-proposal after the timelock.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -279,12 +326,12 @@ pub async fn cmd_propose_migrate_team_pool_to_vesting(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: migrate team pool -> vesting vault");
         println!("  Description: {}", description);
-        println!("\nVoting period: 14 epochs. Use `solen vote` to vote, then");
-        println!("`solen finalize-proposal` and `solen execute-proposal` after the timelock.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -323,11 +370,12 @@ pub async fn cmd_propose_block_time(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: change block time to {}ms", new_block_time_ms);
         println!("  Description: {}", description);
-        println!("\nVoting period: 14 epochs. Use `solen vote` to vote.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -366,11 +414,12 @@ pub async fn cmd_propose_min_stake(
     sign_op(&mut op, &kp, chain_id);
 
     let op_json = serde_json::to_value(&op)?;
+    let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Proposal submitted: change minimum validator stake to {} base units", new_min_stake);
         println!("  Description: {}", description);
-        println!("\nVoting period: 14 epochs. Use `solen vote` to vote.");
+        announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }

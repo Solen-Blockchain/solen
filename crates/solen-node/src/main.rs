@@ -244,6 +244,13 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Restore from snapshot (explicit or auto from seeds) ---
     let mut snapshot_height: Option<u64> = None;
+    // Snapshot sync uses reqwest::blocking, whose internal runtime cannot be
+    // dropped inside the #[tokio::main] async context without panicking
+    // ("Cannot drop a runtime in a context where blocking is not allowed").
+    // Run the whole blocking section under block_in_place, which marks this
+    // worker thread as allowed to block (and to drop that runtime) — so an
+    // unreachable seed now yields a normal error instead of crashing the node.
+    tokio::task::block_in_place(|| -> anyhow::Result<()> {
     let snapshot_source: Option<String> = if cli.snapshot.is_some() {
         cli.snapshot.clone()
     } else if store.is_empty() && !cli.bootstrap.is_empty() {
@@ -661,6 +668,9 @@ async fn main() -> anyhow::Result<()> {
             info!("store already has data — skipping snapshot restore");
         }
     }
+
+    Ok(())
+    })?;
 
     // --- Apply genesis if store is empty ---
     if store.is_empty() {
@@ -1531,10 +1541,24 @@ async fn main() -> anyhow::Result<()> {
                         "https://testnet-rpc2.solenchain.io".into(),
                         "https://testnet-rpc3.solenchain.io".into(),
                     ],
+                    // Canonical mainnet RPC (load-balanced over the public RPC
+                    // fleet). Without this a forked mainnet validator can't
+                    // self-heal and loops forever requesting sync from peers it
+                    // then rejects as a different fork — it must be wiped and
+                    // resynced by hand. Listed so auto-resync works on mainnet.
+                    Network::Mainnet => vec![
+                        "https://rpc.solenchain.io".into(),
+                    ],
+                    // Devnet is local-only; no public resync source.
                     _ => vec![],
                 };
 
                 let mut resync_ok = false;
+                // Same reqwest::blocking-in-async hazard as startup snapshot sync,
+                // but here inside the spawned consensus task. block_in_place lets
+                // the blocking client (and its runtime drop) run without panicking
+                // — required now that mainnet has resync URLs.
+                tokio::task::block_in_place(|| {
                 for url in &resync_urls {
                     // Skip if this URL points to ourselves — check by comparing height.
                     let client = match reqwest::blocking::Client::builder()
@@ -1643,6 +1667,7 @@ async fn main() -> anyhow::Result<()> {
 
                     if resync_ok { break; }
                 }
+                });
 
                 engine_clone.set_resyncing(false);
                 if resync_ok {

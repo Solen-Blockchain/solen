@@ -11,6 +11,20 @@ pub enum StorageError {
     Backend(String),
 }
 
+/// A rollback point for a single operation within a block.
+///
+/// When a block executes against a buffered store (`OverlayStore`), the
+/// underlying DB is never mutated mid-block, so a savepoint is just a cheap
+/// clone of the staged delta. For non-buffered stores it falls back to a full
+/// snapshot.
+pub enum Savepoint {
+    /// Cheap delta clone: staged changes at savepoint time
+    /// (`Some(v)` = staged write, `None` = staged delete).
+    Delta(std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>),
+    /// Full snapshot fallback for non-buffered stores.
+    Full(Box<dyn StateStore>),
+}
+
 /// Trait for key-value state storage with Merkle commitments.
 pub trait StateStore: Send + Sync {
     /// Get a value by key. Returns `None` if the key does not exist.
@@ -38,6 +52,61 @@ pub trait StateStore: Send + Sync {
 
     /// Create a snapshot that can be restored later.
     fn snapshot(&self) -> Box<dyn StateStore>;
+
+    /// Apply a set of staged changes (`Some(v)` = put, `None` = delete) to the
+    /// store atomically, so a crash mid-apply leaves the store either fully
+    /// before or fully after this batch — never a partial block. `sync` fsyncs
+    /// the write-ahead log for durability across power loss.
+    ///
+    /// Default implementation applies the changes one by one (NOT atomic);
+    /// crash-relevant backends (RocksDB) override this with a real write batch.
+    fn apply_batch_atomic(
+        &mut self,
+        changes: &std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
+        _sync: bool,
+    ) -> Result<(), StorageError> {
+        for (k, v) in changes {
+            match v {
+                Some(val) => self.put(k, val)?,
+                None => self.delete(k)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Take a savepoint for cheap rollback of a single operation. Buffered
+    /// stores override this to return a `Savepoint::Delta` (a clone of the
+    /// staged changes); the default takes a `Savepoint::Full` snapshot.
+    fn savepoint(&self) -> Savepoint {
+        Savepoint::Full(self.snapshot())
+    }
+
+    /// Restore the store to a previously taken savepoint (rolling back a failed
+    /// operation). Buffered stores override the `Delta` arm; the default handles
+    /// `Full` by reverting every key to the snapshot (delete keys created since,
+    /// re-put snapshot values).
+    fn restore_savepoint(&mut self, sp: Savepoint) {
+        match sp {
+            Savepoint::Full(snap) => {
+                let snap_entries = snap.scan_all().unwrap_or_default();
+                let snap_keys: std::collections::HashSet<&[u8]> =
+                    snap_entries.iter().map(|(k, _)| k.as_slice()).collect();
+                if let Ok(current) = self.scan_all() {
+                    for (k, _) in &current {
+                        if !snap_keys.contains(k.as_slice()) {
+                            let _ = self.delete(k);
+                        }
+                    }
+                }
+                for (k, v) in &snap_entries {
+                    let _ = self.put(k, v);
+                }
+            }
+            // Buffered stores override this; a non-buffered store should never
+            // be handed a Delta savepoint.
+            Savepoint::Delta(_) => {}
+        }
+    }
 
     /// Number of entries in the store.
     fn len(&self) -> usize;

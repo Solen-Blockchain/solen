@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use rocksdb::{checkpoint::Checkpoint, IteratorMode, Options, DB};
+use rocksdb::{checkpoint::Checkpoint, IteratorMode, Options, WriteBatch, WriteOptions, DB};
 use solen_types::Hash;
 use tracing::info;
 
@@ -246,6 +246,33 @@ impl StateStore for RocksStore {
         }
     }
 
+    fn apply_batch_atomic(
+        &mut self,
+        changes: &std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
+        sync: bool,
+    ) -> Result<(), StorageError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.invalidate_root_cache();
+        // One WriteBatch = one atomic unit in the WAL: on crash, RocksDB
+        // recovers either all of these writes or none, never a partial block.
+        let mut batch = WriteBatch::default();
+        for (k, v) in changes {
+            match v {
+                Some(val) => batch.put(k, val),
+                None => batch.delete(k),
+            }
+        }
+        // sync=true fsyncs the WAL before returning, so an acknowledged block
+        // survives power loss.
+        let mut opts = WriteOptions::default();
+        opts.set_sync(sync);
+        self.db
+            .write_opt(batch, &opts)
+            .map_err(|e| StorageError::Backend(e.to_string()))
+    }
+
     fn snapshot(&self) -> Box<dyn StateStore> {
         // Use native RocksDB checkpoint (instant, hard-linked, read-only).
         if let Ok(cp) = self.checkpoint() {
@@ -401,5 +428,49 @@ mod tests {
 
         assert_eq!(snap.get(b"k").unwrap(), Some(b"v".to_vec()));
         assert_eq!(store.get(b"k").unwrap(), Some(b"changed".to_vec()));
+    }
+
+    #[test]
+    fn apply_batch_atomic_matches_individual_writes() {
+        // One atomic batch (puts + deletes) must yield the same final state and
+        // the same state root as applying the changes one at a time.
+        let (mut batched, _d1) = temp_store();
+        let (mut direct, _d2) = temp_store();
+        for (k, v) in [(b"a".as_ref(), b"1".as_ref()), (b"b", b"2"), (b"c", b"3")] {
+            batched.put(k, v).unwrap();
+            direct.put(k, v).unwrap();
+        }
+
+        direct.put(b"b", b"22").unwrap();
+        direct.delete(b"c").unwrap();
+        direct.put(b"d", b"4").unwrap();
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(b"b".to_vec(), Some(b"22".to_vec()));
+        changes.insert(b"c".to_vec(), None);
+        changes.insert(b"d".to_vec(), Some(b"4".to_vec()));
+        batched.apply_batch_atomic(&changes, false).unwrap();
+
+        assert_eq!(batched.get(b"b").unwrap(), Some(b"22".to_vec()));
+        assert_eq!(batched.get(b"c").unwrap(), None);
+        assert_eq!(batched.get(b"d").unwrap(), Some(b"4".to_vec()));
+        assert_eq!(batched.state_root(), direct.state_root());
+    }
+
+    #[test]
+    fn apply_batch_atomic_persists_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        {
+            let mut store = RocksStore::open(dir.path()).unwrap();
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(b"x".to_vec(), Some(b"1".to_vec()));
+            changes.insert(b"y".to_vec(), Some(b"2".to_vec()));
+            store.apply_batch_atomic(&changes, true).unwrap();
+        }
+        {
+            let store = RocksStore::open(dir.path()).unwrap();
+            assert_eq!(store.get(b"x").unwrap(), Some(b"1".to_vec()));
+            assert_eq!(store.get(b"y").unwrap(), Some(b"2".to_vec()));
+        }
     }
 }

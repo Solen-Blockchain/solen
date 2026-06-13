@@ -321,21 +321,36 @@ impl BlockExecutor {
         operations: &[UserOperation],
         height: u64,
     ) -> BlockResult {
+        // Execute the whole block against an in-memory overlay, then flush all
+        // of its writes to the real store as ONE atomic, fsync'd batch. A crash
+        // mid-block then leaves the store either fully before or fully after
+        // this block — never a partial block (which would diverge the state
+        // root and force a resync). The state root is still computed over the
+        // committed store afterward, so the root computation is unchanged and
+        // cannot diverge from other nodes.
+        let mut overlay = solen_storage::OverlayStore::new(&*store);
+
         let mut result = if operations.len() >= 200 {
-            self.execute_block_parallel(store, operations, height)
+            self.execute_block_parallel(&mut overlay, operations, height)
         } else {
-            self.execute_block_sequential(store, operations, height)
+            self.execute_block_sequential(&mut overlay, operations, height)
         };
 
-        // Distribute epoch rewards deterministically as part of block execution.
+        // Epoch rewards are part of this block's atomic unit too.
         if height > 0 && height % 100 == 0 {
-            let reward_receipts = distribute_epoch_rewards_in_executor(store, height);
+            let reward_receipts = distribute_epoch_rewards_in_executor(&mut overlay, height);
             result.receipts.extend(reward_receipts);
-            // Recompute state root after rewards.
-            result.state_root = store.state_root();
-            store.commit_root();
         }
 
+        // Atomically commit the block, then compute the root over the committed
+        // store (the intermediate root computed inside the sequential/parallel
+        // helpers ran against the overlay and is overwritten here).
+        let changes = overlay.into_changes();
+        if let Err(e) = store.apply_batch_atomic(&changes, true) {
+            tracing::error!(error = %e, height, "atomic block commit failed");
+        }
+        result.state_root = store.state_root();
+        store.commit_root();
         result
     }
 
@@ -526,12 +541,13 @@ impl BlockExecutor {
             }
         }
 
-        // Snapshot the full store before any state mutation so a failed
-        // operation can be rolled back completely — including the fee reserve
-        // below, single-action contract writes, and system-contract keys.
-        // Taken unconditionally (single-action ops can also fail mid-write);
-        // RocksDB snapshots are cheap hard-linked checkpoints.
-        let store_snapshot = store.snapshot();
+        // Take a savepoint before any state mutation so a failed operation can
+        // be rolled back completely — including the fee reserve below,
+        // single-action contract writes, and system-contract keys. When the
+        // block executes against the per-block overlay this is cheap (it clones
+        // only the staged delta, since the base store is never mutated
+        // mid-block); otherwise it falls back to a full snapshot.
+        let savepoint = store.savepoint();
 
         // Reserve max_fee upfront to prevent spend-then-underpay attacks.
         // The reserved amount is refunded after execution, then actual fee is deducted.
@@ -596,25 +612,12 @@ impl BlockExecutor {
 
         // If any action failed, roll back ALL state changes from this operation.
         if let Some(err) = action_failed {
-            // Restore entire store to pre-execution state. Delete any key
-            // created during the failed op — scanning every prefix, not a
-            // fixed allowlist, so system-contract keys (rollup batches,
-            // bridge-processed markers, intents, config) are also reverted —
-            // then restore all prior values.
-            let snapshot_entries = store_snapshot.scan_all().unwrap_or_default();
-            let snapshot_keys: std::collections::HashSet<&[u8]> =
-                snapshot_entries.iter().map(|(k, _)| k.as_slice()).collect();
-            if let Ok(current) = store.scan_all() {
-                for (k, _) in &current {
-                    if !snapshot_keys.contains(k.as_slice()) {
-                        let _ = store.delete(k);
-                    }
-                }
-            }
-            for (k, v) in &snapshot_entries {
-                let _ = store.put(k, v);
-            }
-            // The snapshot was taken after the nonce was consumed but before the
+            // Restore the store to the pre-operation state. This reverts every
+            // key the op wrote, across all prefixes (accounts, contract storage,
+            // and system-contract keys: rollup batches, bridge markers, intents,
+            // config), and removes any keys it created.
+            store.restore_savepoint(savepoint);
+            // The savepoint was taken after the nonce was consumed but before the
             // fee reserve, so the restore returns the full pre-fee balance and
             // leaves the nonce consumed (replay protection holds on failed ops).
             // Re-consume defensively (no-op if already consumed) and charge only

@@ -24,6 +24,21 @@ impl<'a> OverlayStore<'a> {
             deletes: HashSet::new(),
         }
     }
+
+    /// Consume the overlay and return its staged changes as a single change set
+    /// (`Some(v)` = write, `None` = delete), suitable for
+    /// `StateStore::apply_batch_atomic` against the base store.
+    pub fn into_changes(self) -> std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> {
+        let mut changes: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::HashMap::with_capacity(self.writes.len() + self.deletes.len());
+        for (k, v) in self.writes {
+            changes.insert(k, Some(v));
+        }
+        for k in self.deletes {
+            changes.insert(k, None);
+        }
+        changes
+    }
 }
 
 impl<'a> StateStore for OverlayStore<'a> {
@@ -65,6 +80,39 @@ impl<'a> StateStore for OverlayStore<'a> {
             let _ = mem.put(k, v);
         }
         Box::new(mem)
+    }
+
+    /// Cheap savepoint: clone only the staged delta. The base store is never
+    /// mutated while executing against the overlay, so this fully captures the
+    /// rollback state for one operation.
+    fn savepoint(&self) -> crate::traits::Savepoint {
+        let mut delta: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::HashMap::with_capacity(self.writes.len() + self.deletes.len());
+        for (k, v) in &self.writes {
+            delta.insert(k.clone(), Some(v.clone()));
+        }
+        for k in &self.deletes {
+            delta.insert(k.clone(), None);
+        }
+        crate::traits::Savepoint::Delta(delta)
+    }
+
+    fn restore_savepoint(&mut self, sp: crate::traits::Savepoint) {
+        if let crate::traits::Savepoint::Delta(delta) = sp {
+            self.writes.clear();
+            self.deletes.clear();
+            for (k, v) in delta {
+                match v {
+                    Some(val) => {
+                        self.writes.insert(k, val);
+                    }
+                    None => {
+                        self.deletes.insert(k);
+                    }
+                }
+            }
+        }
+        // A Full savepoint on an overlay is unexpected; ignore.
     }
 
     fn len(&self) -> usize {
@@ -114,5 +162,42 @@ impl<'a> StateStore for OverlayStore<'a> {
             self.deletes.insert(k);
         }
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MemoryStore;
+
+    #[test]
+    fn savepoint_rolls_back_only_the_op_delta() {
+        let mut base = MemoryStore::new();
+        base.put(b"x", b"base").unwrap();
+        let mut ov = OverlayStore::new(&base);
+
+        ov.put(b"a", b"1").unwrap(); // op 1 (kept)
+        let sp = ov.savepoint();
+        ov.put(b"b", b"2").unwrap(); // op 2 (rolled back)
+        ov.delete(b"x").unwrap();
+        ov.put(b"a", b"changed").unwrap();
+
+        ov.restore_savepoint(sp);
+
+        assert_eq!(ov.get(b"a").unwrap(), Some(b"1".to_vec()), "op1 write survives");
+        assert_eq!(ov.get(b"b").unwrap(), None, "op2 write reverted");
+        assert_eq!(ov.get(b"x").unwrap(), Some(b"base".to_vec()), "op2 delete reverted");
+    }
+
+    #[test]
+    fn into_changes_captures_writes_and_deletes() {
+        let mut base = MemoryStore::new();
+        base.put(b"keep", b"v").unwrap();
+        let mut ov = OverlayStore::new(&base);
+        ov.put(b"w", b"1").unwrap();
+        ov.delete(b"keep").unwrap();
+        let changes = ov.into_changes();
+        assert_eq!(changes.get(b"w".as_ref()), Some(&Some(b"1".to_vec())));
+        assert_eq!(changes.get(b"keep".as_ref()), Some(&None));
     }
 }

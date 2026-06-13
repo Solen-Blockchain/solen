@@ -205,6 +205,50 @@ pub async fn cmd_propose_set_vesting_admin(
     Ok(())
 }
 
+pub async fn cmd_propose_set_voting_period(
+    rpc: &RpcClient,
+    from: &str,
+    epochs: u64,
+    description: &str,
+    chain_id: u64,
+) -> Result<()> {
+    let ks = wallet::load_keystore()?;
+    let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
+    let sender_hex = account_to_base58(&sender_id);
+    let info = rpc.get_account(&sender_hex).await?;
+
+    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+
+    // args: epochs[8] + desc[...]
+    let mut args = Vec::new();
+    args.extend_from_slice(&epochs.to_le_bytes());
+    args.extend_from_slice(description.as_bytes());
+
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
+        actions: vec![Action::Call {
+            target: gov_addr,
+            method: "propose_set_voting_period".to_string(),
+            args,
+        }],
+        max_fee: 100_000,
+        signature: vec![],
+    };
+    sign_op(&mut op, &kp, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let result = rpc.submit_operation(op_json).await?;
+    if result.accepted {
+        println!("Proposal submitted: set governance voting period to {} epochs", epochs);
+        println!("  Description: {}", description);
+        println!("\nUse `solen vote`, then finalize-proposal and execute-proposal after the timelock.");
+    } else {
+        println!("Failed: {}", result.error.unwrap_or_default());
+    }
+    Ok(())
+}
+
 pub async fn cmd_propose_migrate_team_pool_to_vesting(
     rpc: &RpcClient,
     from: &str,

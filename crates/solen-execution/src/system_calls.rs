@@ -679,6 +679,27 @@ fn execute_governance_call(
             });
             Ok(())
         }
+        "propose_set_voting_period" => {
+            // args: epochs[8] + desc[...]
+            if args.len() < 8 {
+                return err("invalid args: need epochs[8]");
+            }
+            let epochs = u64::from_le_bytes(args[0..8].try_into().unwrap());
+            let desc = String::from_utf8_lossy(&args[8..]).to_string();
+            let epoch = read_current_epoch(store);
+            let id = gov.create_proposal(
+                *sender,
+                ProposalAction::SetGovernanceVotingPeriod { epochs },
+                desc,
+                epoch,
+            );
+            events.push(Event {
+                emitter: GOVERNANCE_ADDRESS,
+                topic: b"proposal_created".to_vec(),
+                data: id.to_le_bytes().to_vec(),
+            });
+            Ok(())
+        }
         "vote" => {
             // args: proposal_id[8] + support[1] + stake_weight[16]
             let proposal_id = match read_u64(args, 0) {
@@ -876,6 +897,12 @@ fn execute_governance_call(
                                 _ => 0,
                             };
                             format!("migrated_team_pool_to_vesting={moved}")
+                        }
+                        ProposalAction::SetGovernanceVotingPeriod { epochs } => {
+                            // Correct the stored voting period. The create-time
+                            // clamp still guards proposals if this is set absurd.
+                            gov.voting_period = *epochs;
+                            format!("voting_period={epochs}")
                         }
                         _ => format!("{:?}", action),
                     };

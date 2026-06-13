@@ -102,6 +102,16 @@ enum Commands {
         description: String,
     },
 
+    /// Propose setting the governance voting period, in epochs (governance).
+    ProposeSetVotingPeriod {
+        /// Your key name
+        from: String,
+        /// New voting period in epochs (mainnet epoch = 10 min; 2016 ≈ 14 days)
+        epochs: u64,
+        /// Description of the proposal
+        description: String,
+    },
+
     /// Propose setting the authorized bridge relayer (governance).
     /// Until set, bridge_from_base releases are disabled (fail-closed).
     ProposeSetBridgeRelayer {
@@ -402,6 +412,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::ProposeMigrateTeamPoolToVesting { from, description } => {
             commands::cmd_propose_migrate_team_pool_to_vesting(&rpc, &from, &description, chain_id).await?
+        }
+        Commands::ProposeSetVotingPeriod { from, epochs, description } => {
+            commands::cmd_propose_set_voting_period(&rpc, &from, epochs, &description, chain_id).await?
         }
         Commands::ProposeSetBridgeRelayer { from, relayer, description } => {
             commands::cmd_propose_set_bridge_relayer(&rpc, &from, &relayer, &description, chain_id).await?

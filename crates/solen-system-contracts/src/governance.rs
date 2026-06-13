@@ -11,6 +11,20 @@ use thiserror::Error;
 /// Default voting period in epochs (used if not set in genesis).
 pub const DEFAULT_VOTING_PERIOD: u64 = 14;
 
+/// Upper bound on a sane voting period (epochs). A stored value above this is
+/// treated as a misconfiguration: mainnet genesis set `governance_voting_period`
+/// to 201,600 — that was "14 days in 6-second blocks", but this field is counted
+/// in EPOCHS (100 blocks each), making it ~100× too long (~3.8 years), which
+/// would freeze governance because no proposal could ever be finalized. When the
+/// stored value exceeds this bound, `effective_voting_period()` substitutes
+/// `SANE_VOTING_PERIOD`. ~50,000 epochs ≈ 1 year at mainnet's 10-minute epochs.
+pub const MAX_SANE_VOTING_PERIOD: u64 = 50_000;
+
+/// Fallback voting period (epochs) used when the configured one is out of range
+/// (0 or absurdly large). 2,016 epochs ≈ 14 days at mainnet's 10-minute epochs —
+/// the apparent original intent of the 201,600 genesis value.
+pub const SANE_VOTING_PERIOD: u64 = 2_016;
+
 /// Timelock delay after passing (in epochs).
 pub const TIMELOCK_DELAY: u64 = 3;
 
@@ -80,6 +94,10 @@ pub enum ProposalAction {
     /// funds instead of minting. Idempotent (a second run moves 0). See the
     /// MigrateTeamPoolToVesting execution arm.
     MigrateTeamPoolToVesting,
+    /// Set the governance voting period (in epochs). Lets governance correct
+    /// the stored value once unfrozen; the create-time clamp
+    /// (`effective_voting_period`) still guards against an absurd setting.
+    SetGovernanceVotingPeriod { epochs: u64 },
 }
 
 /// Status of a governance proposal.
@@ -142,6 +160,20 @@ impl GovernanceContract {
         }
     }
 
+    /// The voting period actually applied to new proposals, clamped so a
+    /// misconfigured stored value can't freeze governance. Pure and
+    /// deterministic — it reads, never mutates, stored state, so it carries no
+    /// fork risk and needs no migration height. A stored value of 0 or above
+    /// `MAX_SANE_VOTING_PERIOD` falls back to `SANE_VOTING_PERIOD`; any sane
+    /// value (e.g. one later set via SetGovernanceVotingPeriod) is used as-is.
+    pub fn effective_voting_period(&self) -> u64 {
+        if self.voting_period == 0 || self.voting_period > MAX_SANE_VOTING_PERIOD {
+            SANE_VOTING_PERIOD
+        } else {
+            self.voting_period
+        }
+    }
+
     /// Create a new proposal.
     pub fn create_proposal(
         &mut self,
@@ -153,7 +185,7 @@ impl GovernanceContract {
         let id = self.next_proposal_id;
         self.next_proposal_id += 1;
 
-        let voting_end = current_epoch + self.voting_period;
+        let voting_end = current_epoch + self.effective_voting_period();
         let execute_after = voting_end + TIMELOCK_DELAY;
 
         self.proposals.push(Proposal {
@@ -354,6 +386,27 @@ mod tests {
             gov.get_proposal(pid).unwrap().status,
             ProposalStatus::Executed
         );
+    }
+
+    #[test]
+    fn absurd_voting_period_is_clamped() {
+        // Reproduce the mainnet misconfiguration: voting_period = 201,600 epochs.
+        let mut gov = GovernanceContract::new();
+        gov.voting_period = 201_600;
+        assert_eq!(gov.effective_voting_period(), SANE_VOTING_PERIOD);
+
+        // A proposal created at epoch 100 must end at 100 + SANE, not + 201,600,
+        // so it can actually be finalized.
+        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyPause, "x".into(), 100);
+        assert_eq!(
+            gov.get_proposal(pid).unwrap().voting_end_epoch,
+            100 + SANE_VOTING_PERIOD
+        );
+
+        // A sane stored value is respected as-is (not overridden by the clamp).
+        let mut gov2 = GovernanceContract::new();
+        gov2.voting_period = 1_000;
+        assert_eq!(gov2.effective_voting_period(), 1_000);
     }
 
     #[test]

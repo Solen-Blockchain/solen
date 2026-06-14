@@ -31,6 +31,7 @@ members = [
     "tools/stsolen-deploy",
     "tools/stsolen-deposit",
     "tools/stsolen-admin",
+    "tools/account-census",
 ]
 
 [workspace.package]

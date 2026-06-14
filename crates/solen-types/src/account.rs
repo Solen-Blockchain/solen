@@ -46,6 +46,14 @@ pub enum AuthMethod {
         allowed_targets: Vec<AccountId>,
         /// Allowed methods (empty = all allowed).
         allowed_methods: Vec<String>,
+        /// When true, `allowed_targets`/`allowed_methods` are enforced not just
+        /// on the operation's top-level actions but on every contract sub-call
+        /// in its execution tree (queued contract→contract calls). Defaults to
+        /// false: sub-calls run as the called contract on its own behalf and
+        /// cannot touch the owner's funds, so top-level enforcement already
+        /// bounds owner exposure; set true for a locked-down agent that must
+        /// never transitively trigger a non-allowlisted contract.
+        restrict_subcalls: bool,
     },
 }
 

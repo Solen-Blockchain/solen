@@ -94,6 +94,21 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'st
     }
 }
 
+/// Restrictions enforced on the contract sub-calls of a session-authorized
+/// operation (only built when the session opted in via `restrict_subcalls`).
+struct SubcallPolicy {
+    allowed_targets: Vec<AccountId>,
+    allowed_methods: Vec<String>,
+}
+
+/// Output of `validate_and_prepare`: the optional session-budget charge to
+/// commit on success, and the optional sub-call policy to enforce while the
+/// operation executes.
+struct PreparedOp {
+    session_charge: Option<(Vec<u8>, u128)>,
+    subcall_policy: Option<SubcallPolicy>,
+}
+
 /// State key holding a session key's cumulative lifetime spend:
 /// `session_spent/{owner_hex}/{session_pk_hex}`. The value is a u128 LE total.
 fn session_spent_key(owner: &AccountId, session_key: &[u8; 32]) -> Vec<u8> {
@@ -577,10 +592,10 @@ impl BlockExecutor {
         }
 
         // Validate signature against the account's auth methods.
-        let session_charge = {
+        let (session_charge, subcall_policy) = {
             let mut state = StateManager::new(store);
             match self.validate_and_prepare(&mut state, op) {
-                Ok(charge) => charge,
+                Ok(p) => (p.session_charge, p.subcall_policy),
                 Err(e) => {
                     warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
                     return ExecutionReceipt {
@@ -656,7 +671,7 @@ impl BlockExecutor {
             }
 
             let mut state = StateManager::new(store);
-            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, height, &mut events) {
+            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, height, &mut events, subcall_policy.as_ref()) {
                 Ok(gas) => gas_used += gas,
                 Err(e) => {
                     action_failed = Some(e.to_string());
@@ -772,8 +787,9 @@ impl BlockExecutor {
         &self,
         state: &mut StateManager<'_>,
         op: &UserOperation,
-    ) -> Result<Option<(Vec<u8>, u128)>, ExecutionError> {
+    ) -> Result<PreparedOp, ExecutionError> {
         let mut session_charge: Option<(Vec<u8>, u128)> = None;
+        let mut subcall_policy: Option<SubcallPolicy> = None;
         let account = state
             .get_account(&op.sender)?
             .ok_or_else(|| ExecutionError::AccountNotFound(format!("{:?}", &op.sender[..4])))?;
@@ -816,9 +832,19 @@ impl BlockExecutor {
             budget_total,
             allowed_targets,
             allowed_methods,
+            restrict_subcalls,
             ..
         }) = matched_session
         {
+            // If the session opted into sub-call restriction, carry its allowlist
+            // forward so the executor enforces it on every contract sub-call too
+            // (no-op when both lists are empty — empty means "all allowed").
+            if *restrict_subcalls && (!allowed_targets.is_empty() || !allowed_methods.is_empty()) {
+                subcall_policy = Some(SubcallPolicy {
+                    allowed_targets: allowed_targets.clone(),
+                    allowed_methods: allowed_methods.clone(),
+                });
+            }
             // Check expiry (read current block height from chain meta).
             let current_height = state.current_height().unwrap_or(0);
             if current_height > *expires_at {
@@ -965,7 +991,7 @@ impl BlockExecutor {
             state.consume_nonce(&op.sender, op.nonce)?;
         }
 
-        Ok(session_charge)
+        Ok(PreparedOp { session_charge, subcall_policy })
     }
 
     /// Compute the message that must be signed for an operation.
@@ -988,6 +1014,7 @@ impl BlockExecutor {
         msg_value: u128,
         height: u64,
         events: &mut Vec<Event>,
+        subcall_policy: Option<&SubcallPolicy>,
     ) -> Result<u64, ExecutionError> {
         match action {
             Action::Transfer { to, amount } => {
@@ -1033,6 +1060,7 @@ impl BlockExecutor {
                     events,
                     0,
                     &mut fuel_budget,
+                    subcall_policy,
                 )
             }
             Action::SetAuth { auth_methods } => {
@@ -1145,6 +1173,7 @@ impl BlockExecutor {
         events: &mut Vec<Event>,
         depth: u32,
         fuel_budget: &mut u64,
+        subcall_policy: Option<&SubcallPolicy>,
     ) -> Result<u64, ExecutionError> {
         // Cap recursion from pending-call fan-out. Matches actor-style depth
         // budgets in other chains. Each queued call can itself queue more,
@@ -1154,6 +1183,27 @@ impl BlockExecutor {
             return Err(ExecutionError::State(StateError::AccountNotFound(
                 format!("call depth exceeded: {depth} > {MAX_CALL_DEPTH}"),
             )));
+        }
+
+        // Enforce a session key's sub-call allowlist (opt-in via
+        // `restrict_subcalls`). The op's TOP-LEVEL call/target/method are already
+        // checked in `validate_and_prepare`, so this only gates the queued
+        // contract→contract sub-calls (depth > 0) of a restricted session.
+        if depth > 0 {
+            if let Some(policy) = subcall_policy {
+                if !policy.allowed_targets.is_empty() && !policy.allowed_targets.contains(target) {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(
+                        "session key not authorized for sub-call target".into(),
+                    )));
+                }
+                if !policy.allowed_methods.is_empty()
+                    && !policy.allowed_methods.iter().any(|m| m.as_bytes() == method)
+                {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(
+                        "session key not authorized for sub-call method".into(),
+                    )));
+                }
+            }
         }
 
         // Queued calls to system contracts route through the same path that
@@ -1318,6 +1368,7 @@ impl BlockExecutor {
                 events,
                 depth + 1,
                 fuel_budget, // same shared budget across the whole tree
+                subcall_policy, // carry the session allowlist down the call tree
             )?;
             total_gas = total_gas.saturating_add(sub_gas);
         }
@@ -2012,6 +2063,119 @@ mod tests {
         )
     )
     "#;
+
+    /// Fixture: a contract whose `call()` queues one contract→contract call to
+    /// the fixed target B = 0x42*32 with method "ping" and no args. Used to test
+    /// that a session key's sub-call allowlist gates queued calls.
+    const QUEUE_TO_B_WAT: &str = r#"
+    (module
+        (import "env" "queue_contract_call" (func $queue_contract_call
+            (param i32 i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0)
+            "\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42\42")
+        (data (i32.const 32) "ping")
+        (func (export "call") (param i32 i32) (result i32)
+            (drop (call $queue_contract_call
+                (i32.const 0) (i32.const 32) (i32.const 4) (i32.const 36) (i32.const 0)))
+            (i32.const 0)
+        )
+    )
+    "#;
+
+    /// Build artifact for the agent-wallet devnet demo: emit the QUEUE_TO_B
+    /// contract bytecode so the demo can deploy a real sub-call-queueing
+    /// contract. Ignored by default; run with `--ignored --exact`.
+    #[test]
+    #[ignore]
+    fn dump_queue_to_b_wasm() {
+        let wasm = wat::parse_str(QUEUE_TO_B_WAT).expect("WAT parse failed");
+        std::fs::create_dir_all("/tmp/solen-demo").unwrap();
+        std::fs::write("/tmp/solen-demo/queue_to_b.wasm", &wasm).unwrap();
+        eprintln!("wrote /tmp/solen-demo/queue_to_b.wasm ({} bytes)", wasm.len());
+    }
+
+    /// Deploy QUEUE_TO_B, grant alice a session key scoped to ONLY that contract
+    /// with the given `restrict_subcalls`, then call the contract with the
+    /// session key. Returns whether that session-key op succeeded. With
+    /// restriction on, the queued sub-call to the non-allowlisted B must abort
+    /// the op; with it off, the sub-call proceeds (top-level enforcement only).
+    fn session_subcall_op_succeeds(restrict_subcalls: bool) -> bool {
+        let (mut store, kp, alice, _treasury) = setup();
+        let executor = zero_fee_executor();
+        let session_kp = Keypair::generate();
+
+        // Deploy the queueing contract (owner-signed).
+        let wasm = wat::parse_str(QUEUE_TO_B_WAT).expect("WAT parse failed");
+        let mut deploy = UserOperation {
+            sender: alice, nonce: 0,
+            actions: vec![Action::Deploy { code: wasm.to_vec(), salt: [0xCD; 32] }],
+            max_fee: 200_000, signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut deploy);
+        let r = executor.execute_block(&mut store, &[deploy]);
+        assert!(r.receipts[0].success, "deploy failed: {:?}", r.receipts[0]);
+        let mut contract_id = [0u8; 32];
+        contract_id.copy_from_slice(&r.receipts[0].events[0].data);
+
+        // Make B = 0x42*32 exist (code-less) so an *unrestricted* queued sub-call
+        // to it reaches the no-op path instead of failing on require_account.
+        let mut transfer_b = UserOperation {
+            sender: alice, nonce: 1,
+            actions: vec![Action::Transfer { to: [0x42; 32], amount: 1 }],
+            max_fee: 0, signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut transfer_b);
+        assert!(executor.execute_block(&mut store, &[transfer_b]).receipts[0].success, "transfer to B failed");
+
+        // Add a session key allowed to call ONLY that contract.
+        let session = AuthMethod::Session {
+            session_key: session_kp.public_key(),
+            expires_at: 999_999,
+            spending_limit: 0,
+            budget_total: 0,
+            allowed_targets: vec![contract_id],
+            allowed_methods: vec![],
+            restrict_subcalls,
+        };
+        let mut setauth = UserOperation {
+            sender: alice, nonce: 2,
+            actions: vec![Action::SetAuth {
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: kp.public_key() }, session],
+            }],
+            max_fee: 0, signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut setauth);
+        let r2 = executor.execute_block(&mut store, &[setauth]);
+        assert!(r2.receipts[0].success, "setauth failed: {:?}", r2.receipts[0]);
+
+        // Session-key op: call the (allowed) contract, which queues a sub-call to
+        // the non-allowlisted B.
+        let mut callop = UserOperation {
+            sender: alice, nonce: 3,
+            actions: vec![Action::Call { target: contract_id, method: "call".into(), args: vec![] }],
+            max_fee: 0, signature: vec![],
+        };
+        let msg = executor.operation_signing_message(&callop);
+        callop.signature = session_kp.sign(&msg).to_vec();
+        executor.execute_block(&mut store, &[callop]).receipts[0].success
+    }
+
+    #[test]
+    fn session_subcall_allowlist_blocks_unlisted_target() {
+        assert!(
+            !session_subcall_op_succeeds(true),
+            "restrict_subcalls must abort the queued sub-call to a non-allowlisted target",
+        );
+    }
+
+    #[test]
+    fn session_subcalls_proceed_without_restriction() {
+        assert!(
+            session_subcall_op_succeeds(false),
+            "default (top-level only) must let the queued sub-call proceed",
+        );
+    }
 
     /// Setup with a richer alice (1 SOLEN at 8 decimals = 10^8 base units)
     /// and a pre-registered staking validator. Used by the queued-system-call

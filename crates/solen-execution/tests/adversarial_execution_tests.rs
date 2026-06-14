@@ -614,6 +614,7 @@ fn expired_session_key_rejected() {
                         budget_total: 0,
                         allowed_targets: vec![],
                         allowed_methods: vec![],
+                        restrict_subcalls: false,
                     },
                 ],
             },

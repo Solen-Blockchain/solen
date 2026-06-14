@@ -401,7 +401,8 @@ fn session_key_cannot_set_auth() {
                     spending_limit: 1_000_000_000,
                     budget_total: 0,
                     allowed_targets: vec![],  // all targets
-                    allowed_methods: vec![],  // all methods
+                    allowed_methods: vec![],
+                    restrict_subcalls: false,  // all methods
                 },
             ],
         }],
@@ -484,6 +485,7 @@ fn session_key_cumulative_budget_enforced() {
                     budget_total: 100,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],
@@ -536,6 +538,7 @@ fn session_budget_not_charged_on_reverted_op() {
                     budget_total: 100_000, // budget is not the limiter here
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],
@@ -768,6 +771,7 @@ fn session_key_cannot_deploy() {
                     budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],
@@ -820,6 +824,7 @@ fn session_key_cannot_call_guardian() {
                     budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],
@@ -878,6 +883,7 @@ fn session_key_cannot_create_proposal() {
                     budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],
@@ -1060,6 +1066,7 @@ fn session_key_cannot_finalize_proposal() {
                     budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
+                    restrict_subcalls: false,
                 },
             ],
         }],

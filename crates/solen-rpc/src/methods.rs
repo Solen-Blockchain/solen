@@ -26,6 +26,10 @@ pub struct AccountInfo {
     pub code_hash: String,
     /// Amount staked by this account (if validator). "0" for non-validators.
     pub staked: String,
+    /// The account's auth methods (externally-tagged, matching the on-chain
+    /// `AuthMethod` enum). Lets clients compose a `SetAuth` op (e.g. granting an
+    /// agent session key) without clobbering existing methods.
+    pub auth_methods: Vec<solen_types::account::AuthMethod>,
 }
 
 /// Block info returned by the RPC.
@@ -843,6 +847,7 @@ impl SolenApiServer for SolenRpc {
             nonce: account.nonce,
             code_hash: hex_encode(&account.code_hash),
             staked: staked.to_string(),
+            auth_methods: account.auth_methods.clone(),
         })
     }
 

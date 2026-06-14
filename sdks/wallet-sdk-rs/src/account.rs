@@ -27,10 +27,24 @@ impl SmartAccountBuilder {
         self.with_ed25519_owner(kp.public_key())
     }
 
-    /// Add a passkey auth method (P-256/secp256r1).
-    pub fn with_passkey(mut self, credential_id: Vec<u8>, public_key_x: [u8; 32], public_key_y: [u8; 32]) -> Self {
-        self.auth_methods
-            .push(AuthMethod::Passkey { credential_id, public_key_x, public_key_y });
+    /// Add a passkey auth method (P-256/secp256r1) bound to a WebAuthn
+    /// Relying Party ID and an allowlist of origins. Pass an empty `rp_id`
+    /// or empty `origins` to leave that binding unenforced.
+    pub fn with_passkey(
+        mut self,
+        credential_id: Vec<u8>,
+        public_key_x: [u8; 32],
+        public_key_y: [u8; 32],
+        rp_id: String,
+        origins: Vec<String>,
+    ) -> Self {
+        self.auth_methods.push(AuthMethod::Passkey {
+            credential_id,
+            public_key_x,
+            public_key_y,
+            rp_id,
+            origins,
+        });
         self
     }
 

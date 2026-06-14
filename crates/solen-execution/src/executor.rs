@@ -73,8 +73,8 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'st
             }
             if valid_count >= *threshold { Some("threshold") } else { None }
         }
-        AuthMethod::Passkey { public_key_x, public_key_y, .. } => {
-            if verify_passkey(public_key_x, public_key_y, msg, signature) {
+        AuthMethod::Passkey { public_key_x, public_key_y, rp_id, origins, .. } => {
+            if verify_passkey(public_key_x, public_key_y, rp_id, origins, msg, signature) {
                 Some("passkey")
             } else {
                 None
@@ -94,6 +94,20 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'st
     }
 }
 
+/// State key holding a session key's cumulative lifetime spend:
+/// `session_spent/{owner_hex}/{session_pk_hex}`. The value is a u128 LE total.
+fn session_spent_key(owner: &AccountId, session_key: &[u8; 32]) -> Vec<u8> {
+    let mut key = b"session_spent/".to_vec();
+    for b in owner {
+        key.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    key.push(b'/');
+    for b in session_key {
+        key.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    key
+}
+
 /// Verify a WebAuthn/Passkey P-256 (secp256r1) ECDSA signature.
 ///
 /// Signature format:
@@ -101,9 +115,18 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'st
 ///
 /// Verification:
 ///   1. Extract challenge from clientDataJSON, verify it matches base64url(msg)
-///   2. Compute signed_data = authenticatorData || SHA-256(clientDataJSON)
-///   3. Verify P-256 ECDSA signature over SHA-256(signed_data)
-fn verify_passkey(pk_x: &[u8; 32], pk_y: &[u8; 32], msg: &[u8], signature: &[u8]) -> bool {
+///   2. Verify clientDataJSON type is "webauthn.get" and origin is allowed
+///   3. Verify authenticatorData rpIdHash == SHA-256(rp_id) (if rp_id is set)
+///   4. Compute signed_data = authenticatorData || SHA-256(clientDataJSON)
+///   5. Verify P-256 ECDSA signature over SHA-256(signed_data)
+fn verify_passkey(
+    pk_x: &[u8; 32],
+    pk_y: &[u8; 32],
+    rp_id: &str,
+    origins: &[String],
+    msg: &[u8],
+    signature: &[u8],
+) -> bool {
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
     use p256::EncodedPoint;
     use sha2::{Digest, Sha256};
@@ -151,10 +174,39 @@ fn verify_passkey(pk_x: &[u8; 32], pk_y: &[u8; 32], msg: &[u8], signature: &[u8]
         return false;
     }
 
+    // 1b. The clientDataJSON type MUST be "webauthn.get" (an assertion).
+    // Without this, a "webauthn.create" registration clientDataJSON carrying
+    // the same challenge could be replayed to authenticate a transaction.
+    match extract_json_string(client_data_str, "type") {
+        Some("webauthn.get") => {}
+        _ => return false,
+    }
+
+    // 1c. Bind the assertion's origin to the account's allowlist (if set).
+    // Stops an assertion produced for a different (e.g. phishing) origin from
+    // being replayed against this account. Empty allowlist = not enforced.
+    if !origins.is_empty() {
+        match extract_json_string(client_data_str, "origin") {
+            Some(o) if origins.iter().any(|allowed| allowed == o) => {}
+            _ => return false,
+        }
+    }
+
     // 2. Verify authenticatorData flags (UP bit must be set).
     if auth_data.len() < 37 {
         return false;
     }
+
+    // 2b. Bind authenticatorData rpIdHash to SHA-256(rp_id) (if rp_id is set).
+    // The first 32 bytes of authenticatorData are the RP ID hash; binding it
+    // ensures the credential is being used for this Relying Party, not another.
+    if !rp_id.is_empty() {
+        let expected_rp_hash = Sha256::digest(rp_id.as_bytes());
+        if auth_data[0..32] != expected_rp_hash[..] {
+            return false;
+        }
+    }
+
     let flags = auth_data[32];
     if flags & 0x01 == 0 {
         return false; // User Present flag not set.
@@ -525,21 +577,24 @@ impl BlockExecutor {
         }
 
         // Validate signature against the account's auth methods.
-        {
+        let session_charge = {
             let mut state = StateManager::new(store);
-            if let Err(e) = self.validate_and_prepare(&mut state, op) {
-                warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
-                return ExecutionReceipt {
-                    sender: op.sender,
-                    nonce: op.nonce,
-                    success: false,
-                    gas_used: 0,
-                    error: Some(e.to_string()),
-                    events: vec![],
-                    auth_method: "ed25519".to_string(),
-                };
+            match self.validate_and_prepare(&mut state, op) {
+                Ok(charge) => charge,
+                Err(e) => {
+                    warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
+                    return ExecutionReceipt {
+                        sender: op.sender,
+                        nonce: op.nonce,
+                        success: false,
+                        gas_used: 0,
+                        error: Some(e.to_string()),
+                        events: vec![],
+                        auth_method: "ed25519".to_string(),
+                    };
+                }
             }
-        }
+        };
 
         // Take a savepoint before any state mutation so a failed operation can
         // be rolled back completely — including the fee reserve below,
@@ -687,6 +742,14 @@ impl BlockExecutor {
             }
         }
 
+        // The op succeeded — commit the session key's cumulative budget increment.
+        // (On the failure path above this is skipped, so reverts never burn budget.)
+        if let Some((key, new_total)) = session_charge {
+            if let Err(e) = store.put(&key, &new_total.to_le_bytes()) {
+                warn!(error = %e, "failed to persist session budget ledger");
+            }
+        }
+
         debug!(sender = ?op.sender[..4], gas_used, "operation executed successfully");
 
         ExecutionReceipt {
@@ -701,11 +764,16 @@ impl BlockExecutor {
     }
 
     /// Validate the operation: check account exists, verify nonce, verify signature.
+    ///
+    /// Returns an optional session-budget charge `(ledger_key, new_running_total)`
+    /// that the caller must commit to state **only if the operation succeeds**, so
+    /// that reverted operations do not consume a session key's lifetime budget.
     fn validate_and_prepare(
         &self,
         state: &mut StateManager<'_>,
         op: &UserOperation,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<(Vec<u8>, u128)>, ExecutionError> {
+        let mut session_charge: Option<(Vec<u8>, u128)> = None;
         let account = state
             .get_account(&op.sender)?
             .ok_or_else(|| ExecutionError::AccountNotFound(format!("{:?}", &op.sender[..4])))?;
@@ -742,8 +810,10 @@ impl BlockExecutor {
         };
 
         if let Some(AuthMethod::Session {
+            session_key,
             expires_at,
             spending_limit,
+            budget_total,
             allowed_targets,
             allowed_methods,
             ..
@@ -757,36 +827,67 @@ impl BlockExecutor {
                 )));
             }
 
-            // Check spending limit — counts all balance-affecting actions,
-            // including system contract calls (staking, bridge deposits, etc.).
-            if *spending_limit > 0 {
-                let total_spend: u128 = op.actions.iter().map(|a| match a {
-                    Action::Transfer { amount, .. } => *amount,
-                    Action::Call { target, args, .. } => {
-                        // System calls that deduct balance: delegate, deposit, register_rollup, etc.
-                        // The amount is typically encoded in args as u128 at a known offset.
-                        if solen_types::system::is_system_contract(target) && args.len() >= 48 {
-                            // Most system calls: args contain amount at offset 32 as u128 LE.
-                            // (staking: validator[32] + amount[16], bridge deposit: rollup_id[8] + amount[16])
-                            let amount_offset = if target == &solen_types::system::BRIDGE_ADDRESS { 8 } else { 32 };
-                            if args.len() >= amount_offset + 16 {
-                                let mut buf = [0u8; 16];
-                                buf.copy_from_slice(&args[amount_offset..amount_offset + 16]);
-                                u128::from_le_bytes(buf)
-                            } else {
-                                0
-                            }
+            // Compute this operation's spend once — counts all balance-affecting
+            // actions, including system contract calls (staking, bridge deposits,
+            // etc.). Used by both the per-op cap and the cumulative budget.
+            let this_spend: u128 = op.actions.iter().map(|a| match a {
+                Action::Transfer { amount, .. } => *amount,
+                Action::Call { target, args, .. } => {
+                    // System calls that deduct balance: delegate, deposit, register_rollup, etc.
+                    // The amount is typically encoded in args as u128 at a known offset.
+                    if solen_types::system::is_system_contract(target) && args.len() >= 48 {
+                        // Most system calls: args contain amount at offset 32 as u128 LE.
+                        // (staking: validator[32] + amount[16], bridge deposit: rollup_id[8] + amount[16])
+                        let amount_offset = if target == &solen_types::system::BRIDGE_ADDRESS { 8 } else { 32 };
+                        if args.len() >= amount_offset + 16 {
+                            let mut buf = [0u8; 16];
+                            buf.copy_from_slice(&args[amount_offset..amount_offset + 16]);
+                            u128::from_le_bytes(buf)
                         } else {
                             0
                         }
+                    } else {
+                        0
                     }
-                    Action::Deploy { .. } => 0,
-                    _ => 0,
-                }).sum();
-                if total_spend > *spending_limit {
-                    return Err(ExecutionError::State(StateError::AccountNotFound(
-                        format!("session spending limit exceeded: {} > {}", total_spend, spending_limit),
-                    )));
+                }
+                Action::Deploy { .. } => 0,
+                _ => 0,
+            }).sum();
+
+            // Per-operation spend cap.
+            if *spending_limit > 0 && this_spend > *spending_limit {
+                return Err(ExecutionError::State(StateError::AccountNotFound(
+                    format!("session spending limit exceeded: {} > {}", this_spend, spending_limit),
+                )));
+            }
+
+            // Cumulative lifetime budget across every op signed by this session
+            // key. The running total lives at session_spent/{owner_hex}/{pk_hex}.
+            // We only verify here; execute_operation commits the new total if the
+            // op succeeds, so a reverted op never burns budget.
+            if *budget_total > 0 {
+                let key = session_spent_key(&op.sender, session_key);
+                let prior = state
+                    .store_mut()
+                    .get(&key)
+                    .ok()
+                    .flatten()
+                    .filter(|v| v.len() >= 16)
+                    .map(|v| {
+                        let mut b = [0u8; 16];
+                        b.copy_from_slice(&v[..16]);
+                        u128::from_le_bytes(b)
+                    })
+                    .unwrap_or(0);
+                let new_total = prior.saturating_add(this_spend);
+                if new_total > *budget_total {
+                    return Err(ExecutionError::State(StateError::AccountNotFound(format!(
+                        "session budget exhausted: {} + {} > {}",
+                        prior, this_spend, budget_total
+                    ))));
+                }
+                if this_spend > 0 {
+                    session_charge = Some((key, new_total));
                 }
             }
 
@@ -864,7 +965,7 @@ impl BlockExecutor {
             state.consume_nonce(&op.sender, op.nonce)?;
         }
 
-        Ok(())
+        Ok(session_charge)
     }
 
     /// Compute the message that must be signed for an operation.
@@ -1410,6 +1511,80 @@ mod tests {
     use solen_crypto::Keypair;
     use solen_storage::MemoryStore;
     use crate::genesis::{apply_genesis, GenesisAccount};
+
+    /// Build a valid passkey signature blob over `msg`, bound to `rp_id` and
+    /// `origin`, signed by `signing_key`. Lets the binding tests vary one field
+    /// at a time. Returns (signature_blob, pk_x, pk_y).
+    fn make_passkey_assertion(
+        signing_key: &p256::ecdsa::SigningKey,
+        rp_id: &str,
+        origin: &str,
+        msg: &[u8],
+    ) -> (Vec<u8>, [u8; 32], [u8; 32]) {
+        use p256::ecdsa::{signature::Signer, Signature};
+        use sha2::{Digest, Sha256};
+
+        // authenticatorData: rpIdHash[32] = SHA-256(rp_id), flags[1] = UP, counter[4].
+        let mut auth_data = vec![0u8; 37];
+        auth_data[0..32].copy_from_slice(&Sha256::digest(rp_id.as_bytes()));
+        auth_data[32] = 0x01;
+
+        let client_data = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{}"}}"#,
+            base64url_encode(msg),
+            origin
+        );
+        let client_data_bytes = client_data.as_bytes();
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&auth_data);
+        signed_data.extend_from_slice(&Sha256::digest(client_data_bytes));
+        let sig: Signature = signing_key.sign(&signed_data);
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(auth_data.len() as u16).to_le_bytes());
+        blob.extend_from_slice(&auth_data);
+        blob.extend_from_slice(&(client_data_bytes.len() as u16).to_le_bytes());
+        blob.extend_from_slice(client_data_bytes);
+        blob.extend_from_slice(&sig.r().to_bytes());
+        blob.extend_from_slice(&sig.s().to_bytes());
+
+        let vk = signing_key.verifying_key();
+        let pt = vk.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        let mut y = [0u8; 32];
+        x.copy_from_slice(pt.x().unwrap());
+        y.copy_from_slice(pt.y().unwrap());
+        (blob, x, y)
+    }
+
+    #[test]
+    fn passkey_rp_id_and_origin_binding() {
+        let sk = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        let rp = "wallet.solenchain.io";
+        let origin = "https://wallet.solenchain.io";
+        let msg = b"transfer-op-signing-message";
+        let (blob, x, y) = make_passkey_assertion(&sk, rp, origin, msg);
+        let origins = vec![origin.to_string()];
+
+        // Correct rp_id + allowed origin → accepted.
+        assert!(verify_passkey(&x, &y, rp, &origins, msg, &blob));
+
+        // Wrong rp_id (assertion's rpIdHash no longer matches) → rejected.
+        assert!(!verify_passkey(&x, &y, "evil.example.com", &origins, msg, &blob));
+
+        // Disallowed origin → rejected.
+        let other_origins = vec!["https://phishing.example.com".to_string()];
+        assert!(!verify_passkey(&x, &y, rp, &other_origins, msg, &blob));
+
+        // Empty rp_id / origins → bindings not enforced (back-compat), still valid sig.
+        assert!(verify_passkey(&x, &y, "", &[], msg, &blob));
+
+        // An assertion minted for a different RP must not verify against this account.
+        let (evil_blob, ex, ey) =
+            make_passkey_assertion(&sk, "evil.example.com", "https://phishing.example.com", msg);
+        assert!(!verify_passkey(&ex, &ey, rp, &origins, msg, &evil_blob));
+    }
 
     fn treasury_id() -> AccountId {
         crate::fees::TREASURY_ADDRESS

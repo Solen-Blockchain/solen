@@ -399,6 +399,7 @@ fn session_key_cannot_set_auth() {
                     session_key: session_kp.public_key(),
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
+                    budget_total: 0,
                     allowed_targets: vec![],  // all targets
                     allowed_methods: vec![],  // all methods
                 },
@@ -434,6 +435,139 @@ fn session_key_cannot_set_auth() {
         result.receipts[0].error.as_ref().unwrap().contains("session keys cannot modify"),
         "error should explain session key restriction"
     );
+}
+
+// ── Session cumulative lifetime budget ───────────────────────
+
+/// Read the on-chain session-spend ledger for (owner, session_key).
+fn session_spent(store: &MemoryStore, owner: &AccountId, pk: &[u8; 32]) -> u128 {
+    let mut key = b"session_spent/".to_vec();
+    for b in owner {
+        key.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    key.push(b'/');
+    for b in pk {
+        key.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    store
+        .get(&key)
+        .ok()
+        .flatten()
+        .filter(|v| v.len() >= 16)
+        .map(|v| {
+            let mut b = [0u8; 16];
+            b.copy_from_slice(&v[..16]);
+            u128::from_le_bytes(b)
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn session_key_cumulative_budget_enforced() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x0A; 32]);
+    let session_kp = Keypair::from_seed(&[0x0B; 32]);
+    let owner = owner_kp.public_key();
+    let recipient = [0x22u8; 32];
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 1_000_000_000,
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 0, // no per-op cap; only the lifetime budget
+                    budget_total: 100,
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let spend = |store: &mut MemoryStore, nonce: u64, amount: u128| -> bool {
+        let mut op = UserOperation {
+            sender: owner,
+            nonce,
+            actions: vec![Action::Transfer { to: recipient, amount }],
+            max_fee: 0,
+            signature: vec![],
+        };
+        let msg = executor.operation_signing_message(&op);
+        op.signature = session_kp.sign(&msg).to_vec();
+        executor.execute_block(store, &[op]).receipts[0].success
+    };
+
+    assert!(spend(&mut store, 0, 60), "60 is within the 100 budget");
+    assert!(spend(&mut store, 1, 30), "running total 90 is within budget");
+    assert!(!spend(&mut store, 2, 20), "90 + 20 exceeds the 100 budget");
+    // The budget-rejected op never consumed nonce 2 (the check precedes nonce
+    // consumption), so the agent can retry the same nonce with a smaller amount.
+    assert!(spend(&mut store, 2, 10), "90 + 10 == 100 is exactly at budget");
+    assert!(!spend(&mut store, 3, 1), "budget is now fully spent");
+    assert_eq!(session_spent(&store, &owner, &session_kp.public_key()), 100);
+}
+
+#[test]
+fn session_budget_not_charged_on_reverted_op() {
+    let mut store = MemoryStore::new();
+    let owner_kp = Keypair::from_seed(&[0x1A; 32]);
+    let session_kp = Keypair::from_seed(&[0x1B; 32]);
+    let owner = owner_kp.public_key();
+    let recipient = [0x33u8; 32];
+
+    apply_genesis(
+        &mut store,
+        vec![GenesisAccount {
+            id: owner,
+            balance: 100, // smaller than the first transfer, to force a revert
+            auth_methods: vec![
+                AuthMethod::Ed25519 { public_key: owner },
+                AuthMethod::Session {
+                    session_key: session_kp.public_key(),
+                    expires_at: 999_999,
+                    spending_limit: 0,
+                    budget_total: 100_000, // budget is not the limiter here
+                    allowed_targets: vec![],
+                    allowed_methods: vec![],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let executor = zero_fee_executor();
+    let run = |store: &mut MemoryStore, nonce: u64, amount: u128| -> bool {
+        let mut op = UserOperation {
+            sender: owner,
+            nonce,
+            actions: vec![Action::Transfer { to: recipient, amount }],
+            max_fee: 0,
+            signature: vec![],
+        };
+        let msg = executor.operation_signing_message(&op);
+        op.signature = session_kp.sign(&msg).to_vec();
+        executor.execute_block(store, &[op]).receipts[0].success
+    };
+
+    // Transfer 500 from a balance of 100 passes the budget check but reverts in
+    // execution (insufficient balance). The revert must NOT consume budget.
+    assert!(!run(&mut store, 0, 500), "transfer exceeds balance → reverts");
+    assert_eq!(
+        session_spent(&store, &owner, &session_kp.public_key()),
+        0,
+        "a reverted op must not burn any session budget"
+    );
+
+    // A subsequent successful spend is charged normally.
+    assert!(run(&mut store, 1, 50), "50 is within balance and budget");
+    assert_eq!(session_spent(&store, &owner, &session_kp.public_key()), 50);
 }
 
 // ── Test #18: Passkey JSON injection rejected ────────────────
@@ -631,6 +765,7 @@ fn session_key_cannot_deploy() {
                     session_key: session_kp.public_key(),
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
+                    budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
                 },
@@ -682,6 +817,7 @@ fn session_key_cannot_call_guardian() {
                     session_key: session_kp.public_key(),
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
+                    budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
                 },
@@ -739,6 +875,7 @@ fn session_key_cannot_create_proposal() {
                     session_key: session_kp.public_key(),
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
+                    budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
                 },
@@ -920,6 +1057,7 @@ fn session_key_cannot_finalize_proposal() {
                     session_key: session_kp.public_key(),
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
+                    budget_total: 0,
                     allowed_targets: vec![],
                     allowed_methods: vec![],
                 },
@@ -1000,6 +1138,14 @@ fn unjail_cooldown_enforced_after_slash() {
     meta.extend_from_slice(&100u64.to_le_bytes()); // height=100 → epoch=1
     meta.extend_from_slice(&1u64.to_le_bytes());   // epoch field
     store.put(b"__chain_meta__", &meta).unwrap();
+
+    // Consensus records slashing evidence on-chain (slash/{offender_hex}/{height})
+    // before a slash op is accepted — this prevents a proposer from fabricating
+    // slashes. Mimic that prerequisite here.
+    let off_hex: String = validator.iter().map(|b| format!("{b:02x}")).collect();
+    store
+        .put(format!("slash/{off_hex}/100").as_bytes(), b"downtime")
+        .unwrap();
 
     // Slash the validator via system op.
     let mut slash_args = Vec::new();

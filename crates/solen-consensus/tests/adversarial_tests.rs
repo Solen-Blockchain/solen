@@ -244,8 +244,9 @@ fn mempool_per_sender_limit() {
     let mempool = Mempool::new(10_000);
     let sender = [0x01; 32];
 
-    // Submit 16 operations (the limit).
-    for i in 0..16u64 {
+    // Submit exactly the per-sender limit worth of operations.
+    let limit = solen_consensus::mempool::MAX_OPS_PER_SENDER as u64;
+    for i in 0..limit {
         let op = solen_types::transaction::UserOperation {
             sender,
             nonce: i,
@@ -256,17 +257,17 @@ fn mempool_per_sender_limit() {
         assert!(mempool.submit(op), "op {} should be accepted", i);
     }
 
-    // 17th should be rejected.
-    let op17 = solen_types::transaction::UserOperation {
+    // One past the limit should be rejected.
+    let op_over = solen_types::transaction::UserOperation {
         sender,
-        nonce: 16,
+        nonce: limit,
         actions: vec![],
         max_fee: 100,
         signature: vec![0; 64],
     };
     assert!(
-        !mempool.submit(op17),
-        "17th op from same sender must be rejected"
+        !mempool.submit(op_over),
+        "op past per-sender limit must be rejected"
     );
 
     // Different sender should still work.
@@ -563,24 +564,25 @@ fn missed_block_counter_resets_on_successful_proposal() {
         ValidatorInfo::new(v1, 100),
     ]);
 
-    // Miss 49 blocks (just under threshold).
-    for _ in 0..49 {
+    // Miss one short of the downtime threshold.
+    let threshold = solen_consensus::slashing::DOWNTIME_THRESHOLD;
+    for _ in 0..threshold - 1 {
         assert!(record_missed_block(&mut vs, &v1).is_none());
     }
-    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, 49);
+    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, threshold - 1);
 
     // Reset by successful proposal.
     vs.get_mut(&v1).unwrap().missed_blocks = 0;
 
-    // Miss 49 more — should NOT trigger slash (counter was reset).
-    for _ in 0..49 {
+    // Miss threshold-1 more — should NOT trigger slash (counter was reset).
+    for _ in 0..threshold - 1 {
         assert!(record_missed_block(&mut vs, &v1).is_none());
     }
-    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, 49);
+    assert_eq!(vs.get_mut(&v1).unwrap().missed_blocks, threshold - 1);
 
-    // One more miss triggers slash.
+    // One more miss reaches the threshold and triggers slash.
     let evidence = record_missed_block(&mut vs, &v1);
-    assert!(evidence.is_some(), "50th miss must trigger slash");
+    assert!(evidence.is_some(), "miss at downtime threshold must trigger slash");
 }
 
 #[test]

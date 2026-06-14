@@ -611,6 +611,7 @@ fn expired_session_key_rejected() {
                         session_key: session_kp.public_key(),
                         expires_at: 0, // already expired at height 0
                         spending_limit: 1_000_000_000,
+                        budget_total: 0,
                         allowed_targets: vec![],
                         allowed_methods: vec![],
                     },

@@ -52,6 +52,8 @@ fuzz_target!(|input: FuzzPasskeyInput| {
                     credential_id: input.credential_id,
                     public_key_x: input.pk_x,
                     public_key_y: input.pk_y,
+                    rp_id: String::new(),
+                    origins: Vec::new(),
                 }],
             },
             GenesisAccount {

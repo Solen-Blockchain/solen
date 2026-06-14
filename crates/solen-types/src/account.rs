@@ -17,6 +17,13 @@ pub enum AuthMethod {
         public_key_x: [u8; 32],
         /// P-256 public key y-coordinate.
         public_key_y: [u8; 32],
+        /// WebAuthn Relying Party ID this credential is bound to (e.g.
+        /// "wallet.solenchain.io"). The assertion's authenticatorData rpIdHash
+        /// must equal SHA-256(rp_id). Empty = unbound (rpId not enforced).
+        rp_id: String,
+        /// Allowed clientDataJSON origins (e.g. "https://wallet.solenchain.io").
+        /// The assertion's origin must be one of these. Empty = origin not enforced.
+        origins: Vec<String>,
     },
     Ed25519 { public_key: [u8; 32] },
     Threshold { signers: Vec<[u8; 32]>, threshold: u16 },
@@ -27,8 +34,14 @@ pub enum AuthMethod {
         session_key: [u8; 32],
         /// Block height after which this session expires.
         expires_at: u64,
-        /// Maximum total spend allowed (base units). 0 = unlimited.
+        /// Maximum spend allowed per single operation (base units). 0 = no
+        /// per-op cap.
         spending_limit: u128,
+        /// Cumulative lifetime spend cap across every operation signed by this
+        /// session key (base units). 0 = unlimited. The running total is tracked
+        /// on-chain at `session_spent/{owner_hex}/{session_pk_hex}` and is
+        /// incremented only by operations that succeed.
+        budget_total: u128,
         /// Allowed contract targets (empty = all allowed).
         allowed_targets: Vec<AccountId>,
         /// Allowed methods (empty = all allowed).

@@ -174,15 +174,32 @@ impl ValidatorSet {
     }
 
     /// Check if a set of attesters forms a 2/3+ quorum by stake.
+    ///
+    /// SAFETY-CRITICAL: the quorum denominator is the TOTAL committed stake of
+    /// every validator in the set — NOT the locally-active subset. Local,
+    /// pre-consensus downtime jailing (see `engine::process_slashing`) flips an
+    /// unreachable validator to `Jailed` immediately so *proposer rotation*
+    /// skips it, but it must NEVER shrink the quorum denominator. If it did, a
+    /// partitioned minority that locally jails the unreachable majority would
+    /// measure a bogus "2/3 quorum" against its own narrowed view and
+    /// force-finalize a divergent chain — the split-brain that shattered
+    /// mainnet (2026-06-03 / 06-08 / 06-23). Only deterministic on-chain
+    /// changes (stake slash / validator exit / unjail), which every node
+    /// applies identically during block execution, may move this denominator.
+    ///
+    /// The numerator likewise counts any attester in the committed set: an
+    /// attestation is cryptographic proof of participation, so excluding a
+    /// (locally, possibly-erroneously) jailed-but-attesting validator could
+    /// only ever *prevent* a legitimate quorum, never enable a false one.
     pub fn has_quorum(&self, attester_ids: &[ValidatorId]) -> bool {
-        let total = self.total_active_stake();
+        let total: u128 = self.validators.iter().map(|v| v.stake).sum();
         if total == 0 {
             return false;
         }
         let attested_stake: u128 = self
             .validators
             .iter()
-            .filter(|v| v.is_active() && attester_ids.contains(&v.id))
+            .filter(|v| attester_ids.contains(&v.id))
             .map(|v| v.stake)
             .sum();
 
@@ -276,6 +293,29 @@ mod tests {
         // Proposer rotation skips jailed validator
         assert_eq!(vs.proposer_for_height(0), Some(vid(1)));
         assert_eq!(vs.proposer_for_height(1), Some(vid(3)));
+    }
+
+    #[test]
+    fn jailing_does_not_shrink_quorum_denominator() {
+        // Split-brain regression (mainnet fork 2026-06-03/06-08/06-23):
+        // a partitioned minority that locally jails the unreachable majority
+        // must NOT be able to self-certify a "quorum" against its own
+        // shrunken view. Quorum is always measured against the full set.
+        let mut vs = ValidatorSet::new(
+            (1..=9).map(|n| ValidatorInfo::new(vid(n), 100)).collect(),
+        );
+        // Minority side sees only v1,v2,v3 (300 of 900 stake) and locally
+        // jails the six it can't reach.
+        for n in 4..=9 {
+            vs.jail(&vid(n));
+        }
+        assert_eq!(vs.active_count(), 3);
+        // Even though only 3 validators are locally "active", their 3/9 stake
+        // is nowhere near 2/3 of the full committed set — no false quorum.
+        assert!(!vs.has_quorum(&[vid(1), vid(2), vid(3)]));
+        // The genuine majority (6/9) still forms a quorum regardless of how
+        // any single node has locally jailed the rest.
+        assert!(vs.has_quorum(&[vid(1), vid(2), vid(3), vid(4), vid(5), vid(6), vid(7)]));
     }
 
     #[test]

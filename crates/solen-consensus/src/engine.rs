@@ -1068,22 +1068,47 @@ impl ConsensusEngine {
     /// check if we've already received a pending block at this height from
     /// another validator. If so, we don't propose — we wait for that block
     /// to either reach quorum or timeout.
-    pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
-        let min_wait = std::time::Duration::from_millis(self.config.block_time_ms * 3);
-        if stalled_for < min_wait {
-            return false;
-        }
-
+    /// Whether THIS node is the designated backup proposer right now, for when
+    /// the primary proposer is slow/down.
+    ///
+    /// DETERMINISTIC across the fleet: the stall is measured against a SHARED
+    /// reference — the wall-clock timestamp the last finalized block was produced
+    /// with (carried in its header) — not each node's own `last_finalized_at`.
+    /// With NTP-synced clocks every node computes the same backup round, so
+    /// exactly ONE backup produces per round. The previous version keyed the
+    /// round off each node's *local* elapsed time, so nodes that finalized a few
+    /// hundred ms apart each believed they were the backup and emitted competing
+    /// blocks at the same height — splitting attestations into a fork (root cause
+    /// of 2026-06-08 and the 2026-06-24 fork cascade). The partition prober
+    /// already fixed this for the latched state; this fixes normal operation.
+    pub fn is_backup_proposer(&self) -> bool {
         let next_height = self.height() + 1;
         let seed = self.epoch_seed();
-        let vs = self.validator_set.read().unwrap();
-        let order = vs.proposer_order_for_height(next_height, &seed);
+        let (order, last_ts_ms) = {
+            let order = {
+                let vs = self.validator_set.read().unwrap();
+                vs.proposer_order_for_height(next_height, &seed)
+            };
+            let last_ts_ms = self
+                .chain
+                .read()
+                .unwrap()
+                .last()
+                .map(|b| b.header.timestamp_ms)
+                .unwrap_or(0);
+            (order, last_ts_ms)
+        };
         if order.len() <= 1 {
             return false;
         }
 
-        // Compute which backup round we're in based on elapsed time.
-        let elapsed_past_min = stalled_for.as_millis() as u64 - min_wait.as_millis() as u64;
+        // Elapsed since the last block was produced, by shared wall-clock.
+        let now = now_ms();
+        let min_wait_ms = self.config.block_time_ms * 3;
+        if last_ts_ms == 0 || now <= last_ts_ms.saturating_add(min_wait_ms) {
+            return false;
+        }
+        let elapsed_past_min = now - last_ts_ms - min_wait_ms;
         let round_interval_ms = (self.config.block_time_ms * 2).max(4000);
         let round = (elapsed_past_min / round_interval_ms) as usize;
 
@@ -1885,14 +1910,19 @@ impl ConsensusEngine {
     /// deterministic system operation. All validators will execute the
     /// slash identically as part of block execution.
     fn process_slashing(&self, evidence: &crate::slashing::SlashingEvidence) {
-        // Update in-memory set immediately (affects local proposer rotation).
+        // Reset only the offender's missed-block COUNTER so we don't regenerate
+        // the same evidence every block. Do NOT mutate stake or status here:
+        // those are consensus-visible (they change proposer selection and the
+        // quorum denominator), and each node would apply them at a slightly
+        // different moment, so the fleet would diverge on the validator set and
+        // compute different proposers → competing blocks → fork (the 2026-06-24
+        // cascade). The penalty + jailing apply deterministically via the queued
+        // on-chain slash below: it executes identically in every node's block,
+        // and the consensus set picks up the resulting `is_active=false` at the
+        // next epoch sync (removing the offender for everyone at once).
         {
-            let penalty_bps = evidence.reason.penalty_bps();
             let mut vs = self.validator_set.write().unwrap();
             if let Some(v) = vs.get_mut(&evidence.offender) {
-                let penalty = v.stake * (penalty_bps as u128) / 10_000;
-                v.stake = v.stake.saturating_sub(penalty);
-                v.status = crate::validator::ValidatorStatus::Jailed;
                 v.missed_blocks = 0;
             }
         }
@@ -2858,6 +2888,37 @@ mod tests {
         // The chain can advance again cleanly after rollback.
         produce_transfer(2, 100);
         assert_eq!(engine.height(), target_h + 1);
+    }
+
+    #[test]
+    fn process_slashing_does_not_locally_mutate_consensus_set() {
+        // Determinism guarantee: queuing downtime evidence must NOT change the
+        // offender's stake or active status in the in-memory consensus set —
+        // only the deterministic on-chain slash (applied identically by every
+        // node) may. Otherwise nodes diverge on proposer selection / quorum and
+        // emit competing blocks (the 2026-06-24 fork cascade).
+        let engine = setup_multi_validator_engine();
+        let offender = [2u8; 32];
+        let evidence = crate::slashing::SlashingEvidence {
+            offender,
+            reason: crate::slashing::SlashingReason::Downtime { missed_blocks: 100 },
+        };
+
+        let (stake_before, active_before) = {
+            let vs = engine.validator_set();
+            let vs = vs.read().unwrap();
+            let v = vs.all().iter().find(|v| v.id == offender).unwrap();
+            (v.stake, v.is_active())
+        };
+        assert!(active_before);
+
+        engine.process_slashing(&evidence);
+
+        let vs = engine.validator_set();
+        let vs = vs.read().unwrap();
+        let v = vs.all().iter().find(|v| v.id == offender).unwrap();
+        assert_eq!(v.stake, stake_before, "stake must not change locally");
+        assert!(v.is_active(), "status must remain Active locally (jail only via finalized on-chain slash)");
     }
 
     #[test]

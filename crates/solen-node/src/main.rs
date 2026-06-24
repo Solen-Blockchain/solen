@@ -25,6 +25,16 @@ use tracing_subscriber::EnvFilter;
 /// the last `LOCAL_SNAPSHOT_KEEP * 500` blocks of rollback range.
 const LOCAL_SNAPSHOT_KEEP: usize = 3;
 
+/// Stranded-node auto-recovery: when a validator is latched in partition
+/// recovery AND the network is at least this many blocks ahead of it for
+/// `STRANDED_RESYNC_AFTER`, it has lost a competing-block fork and won't rejoin
+/// on its own (the strict quorum correctly refuses to finalize its minority
+/// block, but nothing triggers recovery). We then request a resync, which runs
+/// the tiered recovery (rollback journal → checkpoint → snapshot → remote) to
+/// pull it back onto the canonical chain. Closes the "safe but stuck" gap.
+const STRANDED_BEHIND_BLOCKS: u64 = 8;
+const STRANDED_RESYNC_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Native RocksDB checkpoints (hard-linked, cheap) for fine-grained,
 /// restart-surviving local fork recovery. Created every
 /// `ROCKS_CHECKPOINT_INTERVAL` blocks, keeping the newest `ROCKS_CHECKPOINT_KEEP`
@@ -1436,6 +1446,7 @@ async fn main() -> anyhow::Result<()> {
     let net_for_resync = net;
     let local_snapshots_for_resync = local_snapshots.clone();
     let rocks_checkpoints_for_resync = rocks_checkpoints.clone();
+    let net_height_for_consensus = network_height.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -1485,6 +1496,9 @@ async fn main() -> anyhow::Result<()> {
         let mut last_partition_sync_at = std::time::Instant::now()
             .checked_sub(partition_sync_interval)
             .unwrap_or_else(std::time::Instant::now);
+        // When this node first became "latched AND behind the network" — used to
+        // trigger auto-recovery once it's been stranded for STRANDED_RESYNC_AFTER.
+        let mut stranded_since: Option<std::time::Instant> = None;
 
         loop {
             poll.tick().await;
@@ -1867,8 +1881,15 @@ async fn main() -> anyhow::Result<()> {
             // permanent deadlock (2026-06-08). Pending blocks are cleared on
             // partition detection (engine force-finalize loop), so there is no stale
             // block to compete with the prober's across windows.
+            let is_partitioned = is_validator
+                && engine_clone.height() > 0
+                && engine_clone.is_likely_partitioned();
+            if !is_partitioned {
+                // Healthy (or un-latched): clear the stranded timer.
+                stranded_since = None;
+            }
             let mut probe_producer = false;
-            if is_validator && engine_clone.height() > 0 && engine_clone.is_likely_partitioned() {
+            if is_partitioned {
                 // Clear bans either way so probe + attestation traffic can flow.
                 if let Some(ref handle) = net_for_blocks {
                     handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
@@ -1879,13 +1900,39 @@ async fn main() -> anyhow::Result<()> {
                     // Fall through to production below.
                 } else {
                     tracing::warn!("skipping production — partition detected (not the prober this window)");
+
+                    // Stranded-node auto-recovery: if we're latched AND the network
+                    // is well ahead of us, we've lost a competing-block fork and
+                    // won't rejoin on our own. After STRANDED_RESYNC_AFTER, request
+                    // a resync so the tiered recovery (rollback/checkpoint/snapshot)
+                    // pulls us back onto the canonical chain.
+                    let our_h = engine_clone.height();
+                    let known_net = net_height_for_consensus.load(std::sync::atomic::Ordering::Relaxed);
+                    if known_net > our_h + STRANDED_BEHIND_BLOCKS {
+                        let now = std::time::Instant::now();
+                        let since = *stranded_since.get_or_insert(now);
+                        if now.duration_since(since) >= STRANDED_RESYNC_AFTER
+                            && !engine_clone.is_resyncing()
+                        {
+                            tracing::warn!(
+                                our_height = our_h,
+                                network_height = known_net,
+                                "stranded behind network while latched — triggering recovery resync"
+                            );
+                            engine_clone.request_resync();
+                            stranded_since = None; // resync handler runs next iteration
+                        }
+                    } else {
+                        // Caught up, or network not ahead — not stranded.
+                        stranded_since = None;
+                    }
+
                     // Throttled: request sync to try to reconnect / catch up, but
                     // at most once per partition_sync_interval so a latched node
                     // doesn't flood the network ~20×/sec (see declaration above).
                     if last_partition_sync_at.elapsed() >= partition_sync_interval {
                         last_partition_sync_at = std::time::Instant::now();
                         if let Some(ref handle) = net_for_blocks {
-                            let our_h = engine_clone.height();
                             handle.broadcast(NetworkMessage::SyncRequest {
                                 from_height: our_h + 1,
                                 to_height: our_h + 10,
@@ -1899,7 +1946,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let is_proposer = engine_clone.is_next_proposer();
-            let is_backup = engine_clone.is_backup_proposer(stalled_for);
+            let is_backup = engine_clone.is_backup_proposer();
             let active_count = engine_clone.active_validator_count();
             let should_propose = active_count <= 1
                 || (is_proposer && !already_pending)

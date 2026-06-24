@@ -593,6 +593,19 @@ impl ConsensusEngine {
         info!(height, epoch, "engine state reset after snapshot restore");
     }
 
+    /// After the store has been wholesale-replaced from a local RocksDB
+    /// checkpoint, re-initialise the in-memory chain/epoch from the restored
+    /// chain metadata (the checkpoint carries its own `__chain_meta__`). Returns
+    /// the restored `(height, epoch)`.
+    pub fn reset_to_store_meta(&self) -> (u64, u64) {
+        let (height, epoch) = {
+            let store = self.store.read().unwrap();
+            load_chain_meta(store.as_ref())
+        };
+        self.reset_to_height(height, epoch);
+        (height, epoch)
+    }
+
     /// The lowest height the in-memory rollback journal can rewind to, if any.
     /// The node layer uses this to bound its common-ancestor search before
     /// attempting an in-place rollback.

@@ -25,6 +25,14 @@ use tracing_subscriber::EnvFilter;
 /// the last `LOCAL_SNAPSHOT_KEEP * 500` blocks of rollback range.
 const LOCAL_SNAPSHOT_KEEP: usize = 3;
 
+/// Native RocksDB checkpoints (hard-linked, cheap) for fine-grained,
+/// restart-surviving local fork recovery. Created every
+/// `ROCKS_CHECKPOINT_INTERVAL` blocks, keeping the newest `ROCKS_CHECKPOINT_KEEP`
+/// (≈ keep × interval blocks of coverage). Hard links share SSTs, so the on-disk
+/// cost is far below that many full copies.
+const ROCKS_CHECKPOINT_KEEP: usize = 8;
+const ROCKS_CHECKPOINT_INTERVAL: u64 = 100;
+
 /// Network environment.
 ///
 /// Port scheme:
@@ -1348,6 +1356,47 @@ async fn main() -> anyhow::Result<()> {
         rpc_addr, engine.clone(), tx_broadcaster, Some(local_snapshots.clone()),
     ).await?;
 
+    // Fine-grained, restart-surviving local recovery via native RocksDB
+    // checkpoints (hard-linked, cheap). Created periodically below; consulted by
+    // the resync path before falling back to the serialized snapshot / remote.
+    let rocks_checkpoints = solen_consensus::snapshot::RocksCheckpoints::new(
+        PathBuf::from(&data_dir).join("rocks-checkpoints"), ROCKS_CHECKPOINT_KEEP,
+    );
+    {
+        let engine_cp = engine.clone();
+        let rc = rocks_checkpoints.clone();
+        tokio::spawn(async move {
+            let mut last_h = 0u64;
+            let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                let h = engine_cp.height();
+                if h == 0 || h < last_h + ROCKS_CHECKPOINT_INTERVAL {
+                    continue;
+                }
+                // Create under the store read lock so no commit advances the
+                // height between reading it and snapshotting — the checkpoint
+                // then matches (height, root) exactly. block_in_place because
+                // checkpoint creation flushes + hard-links (blocking IO).
+                let res = tokio::task::block_in_place(|| {
+                    let store_arc = engine_cp.store();
+                    let guard = store_arc.read().unwrap();
+                    let cur_h = engine_cp.height();
+                    let root = guard.state_root();
+                    rc.create(&**guard, cur_h, &root).map(|_| cur_h)
+                });
+                // Advance last_h on either outcome so a persistent failure (e.g.
+                // a non-RocksDB store, or a full disk) retries at most once per
+                // interval rather than every tick.
+                last_h = h;
+                match res {
+                    Ok(cur_h) => info!(height = cur_h, "local RocksDB checkpoint created"),
+                    Err(e) => warn!(error = %e, "local RocksDB checkpoint failed"),
+                }
+            }
+        });
+    }
+
     // --- Event indexer + Explorer API ---
     let index_store = std::sync::Arc::new(std::sync::RwLock::new(
         solen_indexer::store::IndexStore::new(),
@@ -1386,6 +1435,7 @@ async fn main() -> anyhow::Result<()> {
     let syncing_for_consensus = syncing.clone();
     let net_for_resync = net;
     let local_snapshots_for_resync = local_snapshots.clone();
+    let rocks_checkpoints_for_resync = rocks_checkpoints.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -1596,6 +1646,37 @@ async fn main() -> anyhow::Result<()> {
                             resync_ok = true;
                             return;
                         }
+                    }
+                }
+
+                // --- Phase 3: restore a fine-grained local RocksDB checkpoint
+                // (hard-linked, restart-surviving) whose height a canonical peer
+                // confirms, then sync forward. Finer than the serialized snapshot
+                // below, so it rewinds and replays less; covers the case where the
+                // in-memory journal is gone (e.g. after a restart). ---
+                let tip = engine_clone.height();
+                for entry in rocks_checkpoints_for_resync.list().into_iter().rev()
+                    .filter(|e| e.height <= tip)
+                {
+                    if !checkpoint_is_canonical(&resync_urls, entry.height, &entry.state_root) {
+                        info!(height = entry.height, "rocks checkpoint not confirmed canonical — trying older / next tier");
+                        continue;
+                    }
+                    info!(height = entry.height, path = %entry.db_path.display(),
+                          "restoring from local RocksDB checkpoint (no download)");
+                    let restored = {
+                        let store = engine_clone.store();
+                        let mut store = store.write().unwrap();
+                        store.restore_from_checkpoint(&entry.db_path)
+                    };
+                    match restored {
+                        Ok(()) => {
+                            let (h, ep) = engine_clone.reset_to_store_meta();
+                            info!(height = h, epoch = ep, "RocksDB checkpoint restored — resync complete");
+                            resync_ok = true;
+                            return;
+                        }
+                        Err(err) => warn!(error = %err, "rocks checkpoint restore failed — trying older / next tier"),
                     }
                 }
 

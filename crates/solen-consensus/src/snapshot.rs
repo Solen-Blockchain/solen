@@ -310,6 +310,104 @@ impl LocalSnapshots {
     }
 }
 
+/// A single on-disk RocksDB checkpoint: its height, state root (from the
+/// sidecar written at creation, so verification is cheap — no scan), and the
+/// path to the checkpoint DB directory to restore from.
+pub struct RocksCheckpointEntry {
+    pub height: u64,
+    pub state_root: Hash,
+    pub db_path: std::path::PathBuf,
+}
+
+/// Manages a ring of native RocksDB checkpoints (hard-linked, near-instant,
+/// restart-surviving) for fine-grained local fork recovery. Each lives in
+/// `<dir>/ckpt-<height>/`, with the checkpoint DB under `db/` and a `meta`
+/// sidecar holding `(height, state_root)`. Finer-grained and far cheaper to
+/// create than the serialized [`LocalSnapshots`]; used as the recovery tier
+/// between the in-memory rollback journal and the serialized snapshot.
+#[derive(Clone)]
+pub struct RocksCheckpoints {
+    dir: std::path::PathBuf,
+    keep: usize,
+}
+
+impl RocksCheckpoints {
+    pub fn new(dir: impl Into<std::path::PathBuf>, keep: usize) -> Self {
+        Self { dir: dir.into(), keep: keep.max(1) }
+    }
+
+    /// Create a checkpoint of `store` at `height`/`state_root`, then prune to
+    /// the newest `keep`. The caller must read `height` and `state_root` under
+    /// the same store lock used here so the checkpoint matches them exactly.
+    pub fn create(
+        &self,
+        store: &dyn StateStore,
+        height: u64,
+        state_root: &Hash,
+    ) -> std::io::Result<()> {
+        let entry_dir = self.dir.join(format!("ckpt-{height}"));
+        if entry_dir.exists() {
+            return Ok(()); // already checkpointed this height
+        }
+        std::fs::create_dir_all(&entry_dir)?;
+        let db_path = entry_dir.join("db");
+        store
+            .create_checkpoint_at(&db_path)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut meta = Vec::with_capacity(40);
+        meta.extend_from_slice(&height.to_le_bytes());
+        meta.extend_from_slice(state_root);
+        std::fs::write(entry_dir.join("meta"), &meta)?;
+        self.prune();
+        Ok(())
+    }
+
+    /// All checkpoints, ascending by height.
+    pub fn list(&self) -> Vec<RocksCheckpointEntry> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&self.dir) {
+            for entry in rd.flatten() {
+                let entry_dir = entry.path();
+                let db_path = entry_dir.join("db");
+                let meta_path = entry_dir.join("meta");
+                let Ok(meta) = std::fs::read(&meta_path) else { continue };
+                if meta.len() < 40 || !db_path.is_dir() {
+                    continue;
+                }
+                let mut h = [0u8; 8];
+                h.copy_from_slice(&meta[..8]);
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&meta[8..40]);
+                out.push(RocksCheckpointEntry {
+                    height: u64::from_le_bytes(h),
+                    state_root: root,
+                    db_path,
+                });
+            }
+        }
+        out.sort_by_key(|e| e.height);
+        out
+    }
+
+    /// The newest checkpoint at or below `height`, if any.
+    pub fn newest_at_or_below(&self, height: u64) -> Option<RocksCheckpointEntry> {
+        self.list().into_iter().rev().find(|e| e.height <= height)
+    }
+
+    fn prune(&self) {
+        let all = self.list();
+        if all.len() <= self.keep {
+            return;
+        }
+        for e in &all[..all.len() - self.keep] {
+            // Remove the whole ckpt-<height> dir (db/ + meta).
+            if let Some(parent) = e.db_path.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +471,52 @@ mod tests {
     fn bad_magic_rejected() {
         let result = read_snapshot_meta(b"BADXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         assert!(matches!(result, Err(SnapshotError::Invalid(_))));
+    }
+
+    /// A MemoryStore returns "unsupported" for create_checkpoint_at, so this
+    /// exercises the manager's dir/sidecar bookkeeping using a fake store whose
+    /// create_checkpoint_at just makes the dir. We can't easily do a real
+    /// RocksDB checkpoint here without the feature, so verify the metadata ring.
+    struct FakeCkptStore;
+    impl solen_storage::StateStore for FakeCkptStore {
+        fn get(&self, _k: &[u8]) -> Result<Option<Vec<u8>>, solen_storage::StorageError> { Ok(None) }
+        fn put(&mut self, _k: &[u8], _v: &[u8]) -> Result<(), solen_storage::StorageError> { Ok(()) }
+        fn delete(&mut self, _k: &[u8]) -> Result<(), solen_storage::StorageError> { Ok(()) }
+        fn state_root(&self) -> Hash { [0u8; 32] }
+        fn len(&self) -> usize { 0 }
+        fn snapshot(&self) -> Box<dyn solen_storage::StateStore> { Box::new(MemoryStore::new()) }
+        fn scan_prefix(&self, _p: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> { Ok(vec![]) }
+        fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> { Ok(vec![]) }
+        fn create_checkpoint_at(&self, dir: &std::path::Path) -> Result<(), solen_storage::StorageError> {
+            std::fs::create_dir_all(dir).map_err(|e| solen_storage::StorageError::Backend(e.to_string()))
+        }
+    }
+
+    #[test]
+    fn rocks_checkpoints_create_prune_and_verify_sidecar() {
+        let dir = std::env::temp_dir().join(format!("solen-rockckpt-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mgr = RocksCheckpoints::new(&dir, 2);
+        let store = FakeCkptStore;
+
+        for h in [10u64, 20, 30] {
+            let mut root = [0u8; 32];
+            root[0] = h as u8;
+            mgr.create(&store, h, &root).unwrap();
+        }
+
+        // Keep only newest 2.
+        let entries = mgr.list();
+        let heights: Vec<u64> = entries.iter().map(|e| e.height).collect();
+        assert_eq!(heights, vec![20, 30]);
+        // Sidecar round-trips height + root.
+        let newest = mgr.newest_at_or_below(35).unwrap();
+        assert_eq!(newest.height, 30);
+        assert_eq!(newest.state_root[0], 30);
+        assert_eq!(mgr.newest_at_or_below(25).unwrap().height, 20);
+        assert!(mgr.newest_at_or_below(15).is_none(), "oldest kept is 20");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

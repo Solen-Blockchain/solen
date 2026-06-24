@@ -136,6 +136,20 @@ pub trait StateStore: Send + Sync {
         Ok(())
     }
 
+    /// Create a native, restart-surviving checkpoint of the store at `dir`
+    /// (which must not already exist). Backends that support it (RocksDB, via
+    /// hard-linked SST files) produce a near-instant, space-efficient copy used
+    /// for fast local fork recovery. Default: unsupported.
+    fn create_checkpoint_at(&self, _dir: &std::path::Path) -> Result<(), StorageError> {
+        Err(StorageError::Backend("checkpoints not supported by this backend".into()))
+    }
+
+    /// Replace the entire contents of this store with the checkpoint at `dir`
+    /// (created by [`create_checkpoint_at`]). Default: unsupported.
+    fn restore_from_checkpoint(&mut self, _dir: &std::path::Path) -> Result<(), StorageError> {
+        Err(StorageError::Backend("checkpoints not supported by this backend".into()))
+    }
+
     /// Create a writable in-memory snapshot for trial execution.
     /// Unlike `snapshot()` which may be read-only, this always returns a
     /// fully writable store suitable for speculative execution.

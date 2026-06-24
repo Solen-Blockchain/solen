@@ -273,6 +273,42 @@ impl StateStore for RocksStore {
             .map_err(|e| StorageError::Backend(e.to_string()))
     }
 
+    fn create_checkpoint_at(&self, dir: &Path) -> Result<(), StorageError> {
+        // Hard-linked, near-instant, restart-surviving checkpoint at a stable path.
+        let cp = Checkpoint::new(&self.db)
+            .map_err(|e| StorageError::Backend(format!("checkpoint create: {e}")))?;
+        cp.create_checkpoint(dir)
+            .map_err(|e| StorageError::Backend(format!("checkpoint write: {e}")))?;
+        info!(path = %dir.display(), "RocksDB persistent checkpoint created");
+        Ok(())
+    }
+
+    fn restore_from_checkpoint(&mut self, dir: &Path) -> Result<(), StorageError> {
+        // Open the checkpoint read-only and stream its contents into this store,
+        // wholesale-replacing current state. Used by the local fork-recovery path.
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        let src = DB::open_for_read_only(&opts, dir, false)
+            .map_err(|e| StorageError::Backend(format!("checkpoint open: {e}")))?;
+
+        self.clear()?;
+        let mut batch = WriteBatch::default();
+        let mut n = 0u64;
+        for item in src.iterator(IteratorMode::Start) {
+            let (k, v) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+            batch.put(&k, &v);
+            n += 1;
+            if batch.len() >= 10_000 {
+                self.db.write(std::mem::take(&mut batch))
+                    .map_err(|e| StorageError::Backend(e.to_string()))?;
+            }
+        }
+        self.db.write(batch).map_err(|e| StorageError::Backend(e.to_string()))?;
+        self.invalidate_root_cache();
+        info!(path = %dir.display(), entries = n, "restored state from local RocksDB checkpoint");
+        Ok(())
+    }
+
     fn snapshot(&self) -> Box<dyn StateStore> {
         // Use native RocksDB checkpoint (instant, hard-linked, read-only).
         if let Ok(cp) = self.checkpoint() {
@@ -388,6 +424,35 @@ mod tests {
 
         store.delete(b"key1").unwrap();
         assert_eq!(store.get(b"key1").unwrap(), None);
+    }
+
+    #[test]
+    fn checkpoint_create_and_restore_roundtrip() {
+        let (mut store, _dir) = temp_store();
+        for i in 0u32..50 {
+            store.put(&i.to_le_bytes(), &(i * 7).to_le_bytes()).unwrap();
+        }
+        let root_at_checkpoint = store.state_root();
+
+        // Create a persistent checkpoint at a fresh path.
+        let ckpt_parent = TempDir::new().unwrap();
+        let ckpt_dir = ckpt_parent.path().join("db"); // must not pre-exist
+        store.create_checkpoint_at(&ckpt_dir).unwrap();
+
+        // Diverge the live store after the checkpoint.
+        for i in 50u32..80 {
+            store.put(&i.to_le_bytes(), &(i * 7).to_le_bytes()).unwrap();
+        }
+        store.delete(&0u32.to_le_bytes()).unwrap();
+        assert_ne!(store.state_root(), root_at_checkpoint);
+
+        // Restore wholesale from the checkpoint — divergence is undone.
+        store.restore_from_checkpoint(&ckpt_dir).unwrap();
+        assert_eq!(store.state_root(), root_at_checkpoint, "root restored");
+        assert_eq!(store.get(&0u32.to_le_bytes()).unwrap(), Some(0u32.to_le_bytes().to_vec()));
+        assert_eq!(store.get(&49u32.to_le_bytes()).unwrap(), Some((49u32 * 7).to_le_bytes().to_vec()));
+        // Keys created after the checkpoint are gone.
+        assert_eq!(store.get(&60u32.to_le_bytes()).unwrap(), None);
     }
 
     #[test]

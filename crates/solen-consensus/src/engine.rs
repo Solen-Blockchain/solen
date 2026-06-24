@@ -1448,30 +1448,32 @@ impl ConsensusEngine {
                 gas_used: 0,
             })
         } else {
-            // Received from peer — execute now (Tendermint "Commit" phase).
+            // Received from peer — execute now (Tendermint "Commit" phase),
+            // committing only if our computed root matches the proposer's claim.
+            // On mismatch the block is reverted (cheap reverse-delta), so the
+            // store stays clean at the previous height instead of being left
+            // corrupted by a half-applied divergent block.
             let exec_result = {
                 let mut store = self.store.write().unwrap();
-                self.executor.execute_block_with_height(
-                    store.as_mut(), &pb.operations, height,
+                self.executor.execute_block_checked(
+                    store.as_mut(), &pb.operations, height, &pb.header.state_root,
                 )
             };
 
-            // Verify state root matches the proposer's claim.
-            // If mismatch, the block is rejected. The execution already mutated
-            // the store, so the node's state is now divergent. It will detect
-            // this on subsequent blocks and resync from peers. This is safer
-            // than trying to rollback (which is expensive and error-prone).
-            if exec_result.state_root != pb.header.state_root {
+            // A mismatch here is against a block we're finalizing (it carries a
+            // quorum of attestations), so the canonical chain genuinely diverges
+            // from our state — we must resync. The revert above means we do so
+            // from a clean prior-height state rather than a corrupted one.
+            let Some(exec_result) = exec_result else {
                 warn!(
                     height,
                     proposer = ?&pb.header.proposer[..4],
-                    ours = ?&exec_result.state_root[..4],
                     theirs = ?&pb.header.state_root[..4],
-                    "state root mismatch on finalization — requesting snapshot resync"
+                    "state root mismatch on finalization — reverted, requesting snapshot resync"
                 );
                 self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
-            }
+            };
 
             exec_result
         };
@@ -1880,24 +1882,27 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Execute directly on the real store and verify the state root.
-        // If it mismatches (different fork), the node-level fork isolation
-        // will prevent further blocks from this fork, and the state will
-        // self-correct when the correct chain's blocks are applied.
+        // Execute on the real store but commit ONLY if the state root matches.
+        // On mismatch (different fork) the block is reverted, leaving our state
+        // untouched, so a wrong-fork block can't corrupt us — the state
+        // self-corrects when the correct chain's blocks arrive. Previously the
+        // mismatching block was committed and left in place, which permanently
+        // diverged the node and forced a full-snapshot re-download to recover.
         let exec_result = {
             let mut store = self.store.write().unwrap();
-            self.executor.execute_block_with_height(store.as_mut(), operations, height)
+            self.executor.execute_block_checked(
+                store.as_mut(), operations, height, &header.state_root,
+            )
         };
 
-        if exec_result.state_root != header.state_root {
+        let Some(exec_result) = exec_result else {
             debug!(
                 height,
-                ours = ?&exec_result.state_root[..4],
                 theirs = ?&header.state_root[..4],
-                "state root mismatch in synced block — rejecting"
+                "state root mismatch in synced block — reverted, rejecting"
             );
             return false;
-        }
+        };
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).

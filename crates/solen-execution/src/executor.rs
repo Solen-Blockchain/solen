@@ -388,14 +388,33 @@ impl BlockExecutor {
         operations: &[UserOperation],
         height: u64,
     ) -> BlockResult {
-        // Execute the whole block against an in-memory overlay, then flush all
-        // of its writes to the real store as ONE atomic, fsync'd batch. A crash
-        // mid-block then leaves the store either fully before or fully after
-        // this block — never a partial block (which would diverge the state
-        // root and force a resync). The state root is still computed over the
-        // committed store afterward, so the root computation is unchanged and
-        // cannot diverge from other nodes.
-        let mut overlay = solen_storage::OverlayStore::new(&*store);
+        // Stage the block in an in-memory overlay, then flush all of its writes
+        // to the real store as ONE atomic, fsync'd batch. A crash mid-block then
+        // leaves the store either fully before or fully after this block — never
+        // a partial block (which would diverge the state root and force a
+        // resync). The root is recomputed over the committed store afterward, so
+        // it is unchanged and cannot diverge from other nodes.
+        let (mut result, changes) = self.stage_block(store, operations, height);
+        if let Err(e) = store.apply_batch_atomic(&changes, true) {
+            tracing::error!(error = %e, height, "atomic block commit failed");
+        }
+        result.state_root = store.state_root();
+        store.commit_root();
+        result
+    }
+
+    /// Stage a block against an in-memory overlay WITHOUT touching the real
+    /// store, returning the receipts/gas plus the staged change set (writes and
+    /// deletes). The caller decides whether to commit. Note: `result.state_root`
+    /// here is only the overlay's placeholder (base root) — the authoritative
+    /// root is computed over the store after the changes are applied.
+    fn stage_block(
+        &self,
+        store: &dyn StateStore,
+        operations: &[UserOperation],
+        height: u64,
+    ) -> (BlockResult, std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>) {
+        let mut overlay = solen_storage::OverlayStore::new(store);
 
         let mut result = if operations.len() >= 200 {
             self.execute_block_parallel(&mut overlay, operations, height)
@@ -409,16 +428,51 @@ impl BlockExecutor {
             result.receipts.extend(reward_receipts);
         }
 
-        // Atomically commit the block, then compute the root over the committed
-        // store (the intermediate root computed inside the sequential/parallel
-        // helpers ran against the overlay and is overwritten here).
-        let changes = overlay.into_changes();
+        (result, overlay.into_changes())
+    }
+
+    /// Execute a block and commit it ONLY if the resulting state root matches
+    /// `expected_root`. On mismatch the block's writes are reverted via a cheap
+    /// reverse-delta over just the touched keys (NOT a full-store snapshot —
+    /// RocksDB's `snapshot()` copies the entire DB), leaving the store exactly
+    /// as it was. Returns `Some(result)` when committed, `None` when reverted.
+    ///
+    /// This keeps a divergent block from a peer (wrong fork, lying proposer, or
+    /// execution we disagree with) from corrupting local state — which is what
+    /// used to leave a node permanently unable to apply the canonical chain and
+    /// force a full-snapshot re-download to recover.
+    pub fn execute_block_checked(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+        height: u64,
+        expected_root: &solen_types::Hash,
+    ) -> Option<BlockResult> {
+        let (mut result, changes) = self.stage_block(&*store, operations, height);
+
+        // Capture the pre-commit value of every key this block touches, so we
+        // can restore exactly if the root doesn't match. O(touched keys).
+        let revert: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> = changes
+            .keys()
+            .map(|k| (k.clone(), store.get(k).ok().flatten()))
+            .collect();
+
         if let Err(e) = store.apply_batch_atomic(&changes, true) {
             tracing::error!(error = %e, height, "atomic block commit failed");
         }
         result.state_root = store.state_root();
-        store.commit_root();
-        result
+
+        if &result.state_root == expected_root {
+            store.commit_root();
+            Some(result)
+        } else {
+            // Roll back the just-applied writes — store returns to its prior state.
+            if let Err(e) = store.apply_batch_atomic(&revert, true) {
+                tracing::error!(error = %e, height, "block revert after root mismatch failed");
+            }
+            store.commit_root();
+            None
+        }
     }
 
     /// Sequential execution (original path).
@@ -1695,6 +1749,47 @@ mod tests {
         let msg = executor.operation_signing_message(op);
         let sig = kp.sign(&msg);
         op.signature = sig.to_vec();
+    }
+
+    #[test]
+    fn execute_block_checked_commits_on_match_reverts_on_mismatch() {
+        let (mut store, kp, alice, bob) = setup();
+        let executor = zero_fee_executor();
+
+        let mut op = UserOperation {
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Transfer { to: bob, amount: 200 }],
+            max_fee: 1000,
+            signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut op);
+
+        // Root + balances BEFORE applying the block.
+        let root_before = store.state_root();
+        let alice_before = StateManager::new(&mut store).get_balance(&alice).unwrap();
+
+        // Wrong expected root → block must be reverted, store fully restored.
+        let bad_root = [0xABu8; 32];
+        let rejected = executor.execute_block_checked(&mut store, &[op.clone()], 1, &bad_root);
+        assert!(rejected.is_none(), "block with wrong expected root must be rejected");
+        assert_eq!(store.state_root(), root_before, "root must be restored after revert");
+        assert_eq!(
+            StateManager::new(&mut store).get_balance(&alice).unwrap(),
+            alice_before,
+            "balances must be restored after revert"
+        );
+
+        // Compute the real root the block produces (on a throwaway store), then
+        // pass it as expected → block must commit and move the balances.
+        let mut probe = store.snapshot();
+        let real_root = executor.execute_block_with_height(probe.as_mut(), &[op.clone()], 1).state_root;
+
+        let committed = executor.execute_block_checked(&mut store, &[op], 1, &real_root);
+        assert!(committed.is_some(), "block with correct expected root must commit");
+        assert_eq!(store.state_root(), real_root);
+        assert_eq!(StateManager::new(&mut store).get_balance(&alice).unwrap(), alice_before - 200);
+        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 700);
     }
 
     #[test]

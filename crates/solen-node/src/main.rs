@@ -1413,6 +1413,16 @@ async fn main() -> anyhow::Result<()> {
         // This prevents all validators from thinking they're backup proposers at genesis.
         let mut last_finalized_at = std::time::Instant::now();
         let mut last_proposed_at = std::time::Instant::now();
+        // Throttle the partition-recovery SyncRequest broadcast. The production
+        // loop polls every 50 ms, so an unthrottled broadcast here fires ~20×/sec
+        // on every latched validator — the bandwidth storm that saturated links
+        // during the 2026-06-23 partition. A reconnect is detected just as well
+        // at a few-second cadence. Initialized in the past so the first probe is
+        // immediate.
+        let partition_sync_interval = std::time::Duration::from_secs(3);
+        let mut last_partition_sync_at = std::time::Instant::now()
+            .checked_sub(partition_sync_interval)
+            .unwrap_or_else(std::time::Instant::now);
 
         loop {
             poll.tick().await;
@@ -1717,13 +1727,18 @@ async fn main() -> anyhow::Result<()> {
                     // Fall through to production below.
                 } else {
                     tracing::warn!("skipping production — partition detected (not the prober this window)");
-                    if let Some(ref handle) = net_for_blocks {
-                        // Request sync to try to reconnect / catch up.
-                        let our_h = engine_clone.height();
-                        handle.broadcast(NetworkMessage::SyncRequest {
-                            from_height: our_h + 1,
-                            to_height: our_h + 10,
-                        });
+                    // Throttled: request sync to try to reconnect / catch up, but
+                    // at most once per partition_sync_interval so a latched node
+                    // doesn't flood the network ~20×/sec (see declaration above).
+                    if last_partition_sync_at.elapsed() >= partition_sync_interval {
+                        last_partition_sync_at = std::time::Instant::now();
+                        if let Some(ref handle) = net_for_blocks {
+                            let our_h = engine_clone.height();
+                            handle.broadcast(NetworkMessage::SyncRequest {
+                                from_height: our_h + 1,
+                                to_height: our_h + 10,
+                            });
+                        }
                     }
                     // Still check for dropped blocks.
                     let _ = engine_clone.take_dropped_block_height();

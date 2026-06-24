@@ -1,0 +1,18 @@
+{
+  "chain_name": "Solen Drill Devnet",
+  "chain_id": 1337,
+  "block_time_ms": 1000,
+  "epoch_length": 50,
+  "validators": [
+    { "name": "drill-v0", "seed_hex": "0101010101010101010101010101010101010101010101010101010101010101", "stake": 5000000000000 },
+    { "name": "drill-v1", "seed_hex": "0202020202020202020202020202020202020202020202020202020202020202", "stake": 5000000000000 },
+    { "name": "drill-v2", "seed_hex": "0303030303030303030303030303030303030303030303030303030303030303", "stake": 5000000000000 },
+    { "name": "drill-v3", "seed_hex": "0404040404040404040404040404040404040404040404040404040404040404", "stake": 5000000000000 }
+  ],
+  "accounts": [
+    { "name": "alice", "balance": 100000000000000, "seed_hex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a" },
+    { "name": "bob", "balance": 50000000000000, "seed_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b" }
+  ],
+  "faucet": { "account_name": "faucet", "seed_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a", "drip_amount": 10000000000000, "cooldown_secs": 5 },
+  "governance_voting_period": 14
+}

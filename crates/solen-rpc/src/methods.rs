@@ -578,6 +578,18 @@ const CONFIRM_MAX_TIMEOUT_SECS: u64 = 180;
 
 impl SolenRpc {
     pub fn new(engine: Arc<ConsensusEngine>, tx_broadcaster: Option<TxBroadcaster>) -> Self {
+        Self::with_local_snapshots(engine, tx_broadcaster, None)
+    }
+
+    /// Like [`SolenRpc::new`], but also persists each freshly-built snapshot to
+    /// a local on-disk ring (`local_snapshots`) so a diverged node can roll back
+    /// from a local file instead of re-downloading the chain. Reuses the
+    /// snapshot the background refresher already builds — no extra build cost.
+    pub fn with_local_snapshots(
+        engine: Arc<ConsensusEngine>,
+        tx_broadcaster: Option<TxBroadcaster>,
+        local_snapshots: Option<solen_consensus::snapshot::LocalSnapshots>,
+    ) -> Self {
         let cache = Arc::new(std::sync::Mutex::new(None));
 
         // Keep the snapshot cache fresh in the background. The chunked download
@@ -589,6 +601,7 @@ impl SolenRpc {
         // advanced at least SNAPSHOT_CACHE_INTERVAL blocks past the cached snapshot.
         let engine_bg = engine.clone();
         let cache_bg = cache.clone();
+        let local_snapshots_bg = local_snapshots.clone();
         std::thread::spawn(move || {
             // Let the node settle before the first (expensive) snapshot build.
             std::thread::sleep(std::time::Duration::from_secs(30));
@@ -643,6 +656,14 @@ impl SolenRpc {
                                     data: String::new(),
                                     checkpoint: None, // overlaid live from the engine at serve time
                                 };
+                                // Persist a local checkpoint (reusing the bytes
+                                // we just built) for fast local fork recovery.
+                                if let Some(ref ls) = local_snapshots_bg {
+                                    match ls.persist(height, &data) {
+                                        Ok(p) => tracing::info!(height, path = %p.display(), "local snapshot checkpoint written"),
+                                        Err(e) => tracing::warn!(height, error = %e, "local snapshot checkpoint write failed"),
+                                    }
+                                }
                                 *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
                                 tracing::info!(height, "snapshot cache refreshed");
                             }

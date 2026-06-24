@@ -239,6 +239,77 @@ pub fn restore_snapshot(
     })
 }
 
+/// Manages a small ring of on-disk state snapshots ("local checkpoints") so a
+/// diverged node can roll back from a *local* file instead of re-downloading
+/// the entire chain from a remote RPC. Each file is a full snapshot blob in the
+/// same format as [`create_snapshot`] / [`restore_snapshot`], named
+/// `snap-<height>.bin`. The newest `keep` are retained.
+///
+/// This is distinct from the consensus `checkpoint` module (which tracks
+/// lightweight attestation/trusted markers, not full state).
+#[derive(Clone)]
+pub struct LocalSnapshots {
+    dir: std::path::PathBuf,
+    keep: usize,
+}
+
+impl LocalSnapshots {
+    pub fn new(dir: impl Into<std::path::PathBuf>, keep: usize) -> Self {
+        Self { dir: dir.into(), keep: keep.max(1) }
+    }
+
+    /// Persist `bytes` as the checkpoint for `height` (atomic publish via a
+    /// temp file + rename), then prune to the newest `keep`. Best-effort.
+    pub fn persist(&self, height: u64, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+        std::fs::create_dir_all(&self.dir)?;
+        let tmp = self.dir.join(format!("snap-{height}.bin.tmp"));
+        let final_path = self.dir.join(format!("snap-{height}.bin"));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &final_path)?;
+        self.prune();
+        Ok(final_path)
+    }
+
+    /// All checkpoints, ascending by height.
+    pub fn list(&self) -> Vec<(u64, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&self.dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if let Some(h) = Self::height_of(&path) {
+                    out.push((h, path));
+                }
+            }
+        }
+        out.sort_by_key(|(h, _)| *h);
+        out
+    }
+
+    /// The newest checkpoint at or below `height`, if any.
+    pub fn newest_at_or_below(&self, height: u64) -> Option<(u64, std::path::PathBuf)> {
+        self.list().into_iter().rev().find(|(h, _)| *h <= height)
+    }
+
+    fn prune(&self) {
+        let all = self.list();
+        if all.len() <= self.keep {
+            return;
+        }
+        for (_, path) in &all[..all.len() - self.keep] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn height_of(path: &std::path::Path) -> Option<u64> {
+        path.file_name()?
+            .to_str()?
+            .strip_prefix("snap-")?
+            .strip_suffix(".bin")?
+            .parse()
+            .ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +373,30 @@ mod tests {
     fn bad_magic_rejected() {
         let result = read_snapshot_meta(b"BADXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         assert!(matches!(result, Err(SnapshotError::Invalid(_))));
+    }
+
+    #[test]
+    fn local_snapshots_persist_prune_and_lookup() {
+        let dir = std::env::temp_dir().join(format!("solen-localsnap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cp = LocalSnapshots::new(&dir, 3);
+
+        // Persist five checkpoints; only the newest 3 should survive.
+        for h in [100u64, 200, 300, 400, 500] {
+            cp.persist(h, format!("snapshot-at-{h}").as_bytes()).unwrap();
+        }
+        let heights: Vec<u64> = cp.list().into_iter().map(|(h, _)| h).collect();
+        assert_eq!(heights, vec![300, 400, 500], "should keep only newest 3");
+
+        // newest_at_or_below picks the right one.
+        assert_eq!(cp.newest_at_or_below(450).map(|(h, _)| h), Some(400));
+        assert_eq!(cp.newest_at_or_below(500).map(|(h, _)| h), Some(500));
+        assert_eq!(cp.newest_at_or_below(250).map(|(h, _)| h), None, "all retained are above 250");
+
+        // Bytes round-trip.
+        let (_, path) = cp.newest_at_or_below(500).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"snapshot-at-500");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

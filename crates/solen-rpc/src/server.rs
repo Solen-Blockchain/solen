@@ -31,6 +31,17 @@ pub async fn start_rpc_server_with_broadcast(
     engine: Arc<ConsensusEngine>,
     broadcaster: Option<TxBroadcaster>,
 ) -> Result<jsonrpsee::server::ServerHandle, RpcError> {
+    start_rpc_server_full(addr, engine, broadcaster, None).await
+}
+
+/// Start the JSON-RPC server, additionally persisting local snapshot checkpoints
+/// for fast fork recovery.
+pub async fn start_rpc_server_full(
+    addr: SocketAddr,
+    engine: Arc<ConsensusEngine>,
+    broadcaster: Option<TxBroadcaster>,
+    local_snapshots: Option<solen_consensus::snapshot::LocalSnapshots>,
+) -> Result<jsonrpsee::server::ServerHandle, RpcError> {
     // Per-IP rate limiting should be configured at the reverse proxy layer
     // (nginx/caddy) in production. The RPC server provides global rate limits
     // via RpcRateLimiter on write operations (submit_operation, submit_solution).
@@ -48,7 +59,7 @@ pub async fn start_rpc_server_with_broadcast(
         .await
         .map_err(|e| RpcError::Server(e.to_string()))?;
 
-    let rpc = SolenRpc::new(engine, broadcaster);
+    let rpc = SolenRpc::with_local_snapshots(engine, broadcaster, local_snapshots);
     let handle = server.start(rpc.into_rpc());
 
     info!(%addr, "JSON-RPC server started (HTTP + WebSocket)");

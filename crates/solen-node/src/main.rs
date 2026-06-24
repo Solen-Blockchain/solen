@@ -20,6 +20,11 @@ use solen_types::encoding::{account_to_base58, hex_encode as encoding_hex_encode
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+/// Number of local snapshot checkpoints to retain for fast fork recovery.
+/// Written every SNAPSHOT_CACHE_INTERVAL (~500) blocks, so this covers roughly
+/// the last `LOCAL_SNAPSHOT_KEEP * 500` blocks of rollback range.
+const LOCAL_SNAPSHOT_KEEP: usize = 3;
+
 /// Network environment.
 ///
 /// Port scheme:
@@ -1333,8 +1338,14 @@ async fn main() -> anyhow::Result<()> {
         });
         broadcaster
     });
-    let _rpc_handle = solen_rpc::server::start_rpc_server_with_broadcast(
-        rpc_addr, engine.clone(), tx_broadcaster
+    // Local snapshot checkpoints for fast fork recovery (roll back from a local
+    // file instead of re-downloading the whole chain). Keep the newest few.
+    let checkpoints_dir = PathBuf::from(&data_dir).join("checkpoints");
+    let local_snapshots = solen_consensus::snapshot::LocalSnapshots::new(
+        checkpoints_dir.clone(), LOCAL_SNAPSHOT_KEEP,
+    );
+    let _rpc_handle = solen_rpc::server::start_rpc_server_full(
+        rpc_addr, engine.clone(), tx_broadcaster, Some(local_snapshots.clone()),
     ).await?;
 
     // --- Event indexer + Explorer API ---
@@ -1374,6 +1385,7 @@ async fn main() -> anyhow::Result<()> {
     let att_kp_for_consensus = attestation_kp.clone();
     let syncing_for_consensus = syncing.clone();
     let net_for_resync = net;
+    let local_snapshots_for_resync = local_snapshots.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -1569,6 +1581,47 @@ async fn main() -> anyhow::Result<()> {
                 // the blocking client (and its runtime drop) run without panicking
                 // — required now that mainnet has resync URLs.
                 tokio::task::block_in_place(|| {
+                // --- Phase 1: try a verified LOCAL checkpoint before any network
+                // download. Restore from the newest on-disk snapshot whose height
+                // a canonical peer confirms (so we never restore our own forked
+                // state), falling back to older checkpoints then the remote path.
+                // This avoids re-downloading the whole chain and works even when
+                // the public RPC is itself unreachable. ---
+                let our_h = engine_clone.height();
+                for (cp_h, cp_path) in local_snapshots_for_resync.list().into_iter().rev()
+                    .filter(|(h, _)| *h <= our_h)
+                {
+                    let bytes = match std::fs::read(&cp_path) {
+                        Ok(b) => b,
+                        Err(e) => { warn!(height = cp_h, error = %e, "local checkpoint read failed — skipping"); continue; }
+                    };
+                    let meta = match solen_consensus::snapshot::read_snapshot_meta(&bytes) {
+                        Ok(m) => m,
+                        Err(e) => { warn!(height = cp_h, error = %e, "local checkpoint unreadable — skipping"); continue; }
+                    };
+                    if !checkpoint_is_canonical(&resync_urls, meta.height, &meta.state_root) {
+                        info!(height = meta.height, "local checkpoint not confirmed canonical — trying older / remote");
+                        continue;
+                    }
+                    info!(height = meta.height, path = %cp_path.display(),
+                          "restoring from verified local checkpoint (no download)");
+                    let store = engine_clone.store();
+                    let mut store = store.write().unwrap();
+                    store.clear().ok();
+                    match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &bytes) {
+                        Ok(m) => {
+                            drop(store);
+                            engine_clone.reset_to_height(m.height, m.epoch);
+                            resync_ok = true;
+                            info!(height = m.height, epoch = m.epoch, "local checkpoint restored — resync complete");
+                            break;
+                        }
+                        Err(e) => warn!(error = %e, "local checkpoint restore failed — falling back to remote"),
+                    }
+                }
+
+                if resync_ok { return; }
+
                 for url in &resync_urls {
                     // Skip if this URL points to ourselves — check by comparing height.
                     let client = match reqwest::blocking::Client::builder()
@@ -1847,6 +1900,42 @@ fn create_persistent_store(data_dir: &str) -> anyhow::Result<Box<dyn StateStore>
 
 fn hex(bytes: &[u8]) -> String {
     encoding_hex_encode(bytes)
+}
+
+/// Confirm a local checkpoint is on the canonical chain by checking its height's
+/// state root against a seed RPC, before we trust it for a local restore — so we
+/// never roll back into our own forked state. Returns the verdict from the first
+/// seed that answers (reachable + root matches → true; reachable + root differs
+/// → false). If no seed answers we can't confirm, so return false and let the
+/// caller fall back to the remote download path.
+fn checkpoint_is_canonical(urls: &[String], height: u64, expected_root: &[u8; 32]) -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let want = hex(expected_root);
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{height}]}}"#
+    );
+    for url in urls {
+        if let Ok(resp) = client.post(url.as_str())
+            .header("Content-Type", "application/json")
+            .body(body.clone())
+            .send()
+        {
+            if let Ok(json) = resp.json::<serde_json::Value>() {
+                if let Some(root) = json["result"]["state_root"].as_str() {
+                    // First seed with a definitive answer decides.
+                    return root.eq_ignore_ascii_case(&want);
+                }
+            }
+        }
+        // This seed didn't answer — try the next.
+    }
+    false
 }
 
 /// Build the deterministic payload for attestation signing/verification.

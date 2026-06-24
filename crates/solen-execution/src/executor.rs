@@ -12,6 +12,12 @@ use crate::fees::FeeConfig;
 use crate::receipt::{BlockResult, Event, ExecutionReceipt};
 use crate::state::{StateError, StateManager};
 
+/// Reverse-delta for one block: the pre-commit value of every key the block
+/// touched (`None` = the key did not exist). Applying it to the store undoes
+/// exactly that block. Used by the rollback journal to rewind a shallow fork
+/// to its common ancestor without a snapshot restore.
+pub type BlockRevert = std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>;
+
 const TRANSFER_GAS: u64 = 100;
 const ACCOUNT_CREATION_GAS: u64 = 25_000; // surcharge for auto-creating recipient
 const CALL_BASE_GAS: u64 = 500;
@@ -431,11 +437,48 @@ impl BlockExecutor {
         (result, overlay.into_changes())
     }
 
+    /// Capture the pre-commit value of every key in `changes` (so the block can
+    /// be undone later), then atomically commit. Returns the reverse-delta. The
+    /// capture is O(touched keys) — small per block, and cheap on any backend
+    /// (unlike RocksDB's `snapshot()`, which copies the whole DB).
+    fn commit_capturing_revert(
+        &self,
+        store: &mut dyn StateStore,
+        changes: BlockRevert,
+        height: u64,
+    ) -> BlockRevert {
+        let revert: BlockRevert = changes
+            .keys()
+            .map(|k| (k.clone(), store.get(k).ok().flatten()))
+            .collect();
+        if let Err(e) = store.apply_batch_atomic(&changes, true) {
+            tracing::error!(error = %e, height, "atomic block commit failed");
+        }
+        revert
+    }
+
+    /// Execute and commit a block, returning the result and the reverse-delta
+    /// needed to undo it (for the rollback journal). Used on the produce path
+    /// and any path where we already trust the block.
+    pub fn execute_block_journaled(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+        height: u64,
+    ) -> (BlockResult, BlockRevert) {
+        let (mut result, changes) = self.stage_block(&*store, operations, height);
+        let revert = self.commit_capturing_revert(store, changes, height);
+        result.state_root = store.state_root();
+        store.commit_root();
+        (result, revert)
+    }
+
     /// Execute a block and commit it ONLY if the resulting state root matches
     /// `expected_root`. On mismatch the block's writes are reverted via a cheap
     /// reverse-delta over just the touched keys (NOT a full-store snapshot —
     /// RocksDB's `snapshot()` copies the entire DB), leaving the store exactly
-    /// as it was. Returns `Some(result)` when committed, `None` when reverted.
+    /// as it was. Returns `Some((result, revert))` when committed (the revert is
+    /// for the rollback journal), `None` when reverted.
     ///
     /// This keeps a divergent block from a peer (wrong fork, lying proposer, or
     /// execution we disagree with) from corrupting local state — which is what
@@ -447,24 +490,14 @@ impl BlockExecutor {
         operations: &[UserOperation],
         height: u64,
         expected_root: &solen_types::Hash,
-    ) -> Option<BlockResult> {
+    ) -> Option<(BlockResult, BlockRevert)> {
         let (mut result, changes) = self.stage_block(&*store, operations, height);
-
-        // Capture the pre-commit value of every key this block touches, so we
-        // can restore exactly if the root doesn't match. O(touched keys).
-        let revert: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> = changes
-            .keys()
-            .map(|k| (k.clone(), store.get(k).ok().flatten()))
-            .collect();
-
-        if let Err(e) = store.apply_batch_atomic(&changes, true) {
-            tracing::error!(error = %e, height, "atomic block commit failed");
-        }
+        let revert = self.commit_capturing_revert(store, changes, height);
         result.state_root = store.state_root();
 
         if &result.state_root == expected_root {
             store.commit_root();
-            Some(result)
+            Some((result, revert))
         } else {
             // Roll back the just-applied writes — store returns to its prior state.
             if let Err(e) = store.apply_batch_atomic(&revert, true) {
@@ -1787,6 +1820,9 @@ mod tests {
 
         let committed = executor.execute_block_checked(&mut store, &[op], 1, &real_root);
         assert!(committed.is_some(), "block with correct expected root must commit");
+        // The committed path returns the reverse-delta for the rollback journal.
+        let (_res, revert) = committed.unwrap();
+        assert!(!revert.is_empty(), "a non-empty block must yield a non-empty revert");
         assert_eq!(store.state_root(), real_root);
         assert_eq!(StateManager::new(&mut store).get_balance(&alice).unwrap(), alice_before - 200);
         assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 700);

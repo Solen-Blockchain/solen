@@ -1581,6 +1581,24 @@ async fn main() -> anyhow::Result<()> {
                 // the blocking client (and its runtime drop) run without panicking
                 // — required now that mainnet has resync URLs.
                 tokio::task::block_in_place(|| {
+                // --- Phase 2: in-place rollback to the common ancestor. If the
+                // fork is shallow enough to sit within the rollback journal, find
+                // the deepest height where our state root still matches the
+                // canonical chain and undo just the forked suffix — no download,
+                // no snapshot restore, rewind = actual fork depth. ---
+                if let Some(min_target) = engine_clone.min_rollback_target() {
+                    let tip = engine_clone.height();
+                    if let Some((anc_h, anc_root)) =
+                        find_common_ancestor(&resync_urls, &engine_clone, min_target, tip)
+                    {
+                        if anc_h < tip && engine_clone.rollback_to_height(anc_h, &anc_root) {
+                            info!(from = tip, to = anc_h, "in-place rollback to common ancestor — resync complete");
+                            resync_ok = true;
+                            return;
+                        }
+                    }
+                }
+
                 // --- Phase 1: try a verified LOCAL checkpoint before any network
                 // download. Restore from the newest on-disk snapshot whose height
                 // a canonical peer confirms (so we never restore our own forked
@@ -1900,6 +1918,66 @@ fn create_persistent_store(data_dir: &str) -> anyhow::Result<Box<dyn StateStore>
 
 fn hex(bytes: &[u8]) -> String {
     encoding_hex_encode(bytes)
+}
+
+/// Find the deepest height in `[min_height, tip)` where our local block's state
+/// root still matches the canonical chain (per a seed RPC) — the common ancestor
+/// to roll back to. Walks down from the tip; the first match (highest height) is
+/// returned as `(height, our_root)`. Returns `None` if no seed answers or no
+/// height within range agrees (fork deeper than the journal → caller falls back
+/// to a snapshot restore).
+fn find_common_ancestor(
+    urls: &[String],
+    engine: &ConsensusEngine,
+    min_height: u64,
+    tip: u64,
+) -> Option<(u64, [u8; 32])> {
+    if tip == 0 {
+        return None;
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let mut h = tip.saturating_sub(1);
+    loop {
+        if h < min_height {
+            break;
+        }
+        let our_root = match engine.get_block(h) {
+            Some(b) => b.header.state_root,
+            None => break, // missing local block — can't compare deeper
+        };
+        let want = hex(&our_root);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{h}]}}"#
+        );
+        let mut canonical: Option<String> = None;
+        for url in urls {
+            if let Ok(resp) = client.post(url.as_str())
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send()
+            {
+                if let Ok(j) = resp.json::<serde_json::Value>() {
+                    if let Some(r) = j["result"]["state_root"].as_str() {
+                        canonical = Some(r.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        match canonical {
+            Some(r) if r.eq_ignore_ascii_case(&want) => return Some((h, our_root)),
+            Some(_) => {} // still diverged at h — go deeper
+            None => return None, // no seed answered — bail to other recovery paths
+        }
+        if h == min_height {
+            break;
+        }
+        h -= 1;
+    }
+    None
 }
 
 /// Confirm a local checkpoint is on the canonical chain by checking its height's

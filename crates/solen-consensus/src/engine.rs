@@ -22,7 +22,7 @@ use solen_types::transaction::UserOperation;
 use solen_types::{BlockHeight, Hash, ValidatorId};
 use thiserror::Error;
 use tokio::time::{interval, Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::epoch::EpochManager;
 use crate::events::NodeEvent;
@@ -101,8 +101,59 @@ struct PendingBlock {
     already_executed: bool,
     /// Execution result, only present if already_executed.
     result: Option<BlockResult>,
+    /// Reverse-delta captured when we executed this block (only present if
+    /// `already_executed`). Moved into the rollback journal on finalization so
+    /// the journal stays aligned with the chain.
+    revert: Option<solen_execution::executor::BlockRevert>,
     /// Count of attestation hash mismatches — other validators have a different block.
     mismatch_count: u32,
+}
+
+/// How many recent blocks' reverse-deltas to retain — the maximum fork depth
+/// recoverable by in-place rollback before falling back to a snapshot restore.
+const ROLLBACK_JOURNAL_CAP: usize = 256;
+
+/// In-memory ring of per-block reverse-deltas. Lets a shallow fork be rolled
+/// back to its common ancestor in place (apply the undo-deltas for the forked
+/// suffix) instead of restoring a snapshot or re-downloading the chain. Bounded;
+/// a fork deeper than the retained range falls back to the local-snapshot /
+/// remote path. Lost on restart (the snapshot path covers that). Recorded in
+/// lock-step with the chain Vec, so entry heights are contiguous and ascending.
+struct RollbackJournal {
+    entries: std::collections::VecDeque<(u64, solen_execution::executor::BlockRevert)>,
+    cap: usize,
+}
+
+impl RollbackJournal {
+    fn new(cap: usize) -> Self {
+        Self { entries: std::collections::VecDeque::new(), cap: cap.max(1) }
+    }
+
+    /// Record block `height`'s reverse-delta. A non-contiguous height (after a
+    /// snapshot restore / reset) clears the journal so we never stitch a
+    /// rollback across a discontinuity.
+    fn record(&mut self, height: u64, revert: solen_execution::executor::BlockRevert) {
+        if let Some((last_h, _)) = self.entries.back() {
+            if height != last_h + 1 {
+                self.entries.clear();
+            }
+        }
+        self.entries.push_back((height, revert));
+        while self.entries.len() > self.cap {
+            self.entries.pop_front();
+        }
+    }
+
+    /// Lowest height we can roll back to: rolling back "to" `target` means
+    /// undoing every block above it, so we need entries for `target+1..=tip`.
+    /// That bottoms out one below the oldest retained entry.
+    fn min_rollback_target(&self) -> Option<u64> {
+        self.entries.front().map(|(h, _)| h.saturating_sub(1))
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 /// The consensus engine manages block production, validation, and finality.
@@ -154,6 +205,8 @@ pub struct ConsensusEngine {
     needs_resync: Arc<std::sync::atomic::AtomicBool>,
     /// True while a snapshot restore is in progress — blocks should not be finalized.
     resyncing: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-block reverse-deltas for in-place shallow-fork rollback.
+    rollback_journal: Arc<RwLock<RollbackJournal>>,
     /// Broadcast channel for node events (WebSocket subscriptions, indexers).
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
@@ -247,6 +300,7 @@ impl ConsensusEngine {
             dropped_block_height: Arc::new(RwLock::new(None)),
             needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rollback_journal: Arc::new(RwLock::new(RollbackJournal::new(ROLLBACK_JOURNAL_CAP))),
             event_tx: tokio::sync::broadcast::channel(8192).0,
         }
     }
@@ -486,6 +540,8 @@ impl ConsensusEngine {
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
         *self.last_partition_probe_at.write().unwrap() = None;
         *self.dropped_block_height.write().unwrap() = None;
+        // The journal can't span a snapshot discontinuity.
+        self.rollback_journal.write().unwrap().clear();
 
         // Update epoch manager.
         {
@@ -535,6 +591,103 @@ impl ConsensusEngine {
         }
 
         info!(height, epoch, "engine state reset after snapshot restore");
+    }
+
+    /// The lowest height the in-memory rollback journal can rewind to, if any.
+    /// The node layer uses this to bound its common-ancestor search before
+    /// attempting an in-place rollback.
+    pub fn min_rollback_target(&self) -> Option<u64> {
+        self.rollback_journal.read().unwrap().min_rollback_target()
+    }
+
+    /// Roll the store back to `target` height in place by applying the journaled
+    /// reverse-deltas for every block above it (newest-first), then truncating
+    /// the chain, journal, and pending state to `target`. The caller must have
+    /// confirmed `target` is a real common ancestor with the canonical chain
+    /// (e.g. matching state roots) — as a safety net we verify the post-rollback
+    /// state root equals `expected_root`.
+    ///
+    /// Returns true on success. Returns false either (a) early, before any
+    /// mutation, when `target` is out of journal range; or (b) after partially
+    /// applying reverts, if the safety-net root check fails (only reachable on a
+    /// journal/target bug). In case (b) the store is left rolled back but the
+    /// chain is NOT truncated, so it is inconsistent — the caller MUST fall back
+    /// to a snapshot restore, which wipes and overwrites the store wholesale.
+    pub fn rollback_to_height(&self, target: u64, expected_root: &Hash) -> bool {
+        let tip = self.height();
+        if target >= tip {
+            return false;
+        }
+        // Must have contiguous journal coverage for target+1..=tip.
+        match self.rollback_journal.read().unwrap().min_rollback_target() {
+            Some(min) if target >= min => {}
+            _ => {
+                warn!(target, tip, "rollback target outside journal range — cannot roll back in place");
+                return false;
+            }
+        }
+
+        // Apply undo-deltas newest-first under the store lock.
+        {
+            let journal = self.rollback_journal.read().unwrap();
+            let mut store = self.store.write().unwrap();
+            for (h, revert) in journal.entries.iter().rev() {
+                if *h <= target {
+                    break;
+                }
+                if let Err(e) = store.apply_batch_atomic(revert, true) {
+                    error!(height = *h, error = %e, "rollback revert apply failed — aborting");
+                    // Partial rollback applied; the caller's snapshot-restore
+                    // fallback will overwrite the store wholesale, so no
+                    // permanent corruption results.
+                    return false;
+                }
+            }
+            store.commit_root();
+
+            // Safety net: the rolled-back root must match the canonical root at
+            // `target`. If not, our journal/target was wrong; bail to snapshot.
+            let rolled_root = store.state_root();
+            if &rolled_root != expected_root {
+                warn!(
+                    target,
+                    ours = ?&rolled_root[..4],
+                    expected = ?&expected_root[..4],
+                    "post-rollback state root mismatch — aborting in-place rollback"
+                );
+                return false;
+            }
+        }
+
+        // Truncate chain, journal, pending state, and persisted meta to `target`.
+        {
+            let mut chain = self.chain.write().unwrap();
+            chain.retain(|b| b.header.height <= target);
+        }
+        {
+            let mut journal = self.rollback_journal.write().unwrap();
+            while matches!(journal.entries.back(), Some((h, _)) if *h > target) {
+                journal.entries.pop_back();
+            }
+        }
+        self.pending_blocks.write().unwrap().clear();
+        self.pending_attestations.write().unwrap().clear();
+        self.early_attestations.write().unwrap().clear();
+        *self.dropped_block_height.write().unwrap() = None;
+        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let target_epoch = target / crate::epoch::EPOCH_LENGTH;
+        {
+            let mut em = self.epoch_manager.write().unwrap();
+            em.current_epoch = target_epoch;
+        }
+        {
+            let mut store = self.store.write().unwrap();
+            save_chain_meta(store.as_mut(), target, target_epoch);
+        }
+
+        info!(from = tip, to = target, "rolled back to common ancestor in place (no snapshot)");
+        true
     }
 
     pub fn chain(&self) -> Arc<RwLock<Vec<FinalizedBlock>>> {
@@ -779,10 +932,12 @@ impl ConsensusEngine {
             (parent, h)
         };
 
-        // Execute block with height so the executor handles epoch rewards deterministically.
-        let result = {
+        // Execute block with height so the executor handles epoch rewards
+        // deterministically. Capture the reverse-delta for the rollback journal
+        // (recorded on finalization, keeping the journal aligned with the chain).
+        let (result, revert) = {
             let mut store = self.store.write().unwrap();
-            self.executor.execute_block_with_height(store.as_mut(), &ops, height)
+            self.executor.execute_block_journaled(store.as_mut(), &ops, height)
         };
 
         let epoch = {
@@ -830,6 +985,7 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
+            self.rollback_journal.write().unwrap().record(height, revert);
             self.persist_block_and_meta(&block);
             self.emit_block_events(&block);
             self.mempool.remove_finalized(&block.operations);
@@ -856,6 +1012,7 @@ impl ConsensusEngine {
                     proposed_at: std::time::Instant::now(),
                     already_executed: true,
                     result: Some(result),
+                    revert: Some(revert),
                     mismatch_count: 0,
                 },
             );
@@ -1264,6 +1421,7 @@ impl ConsensusEngine {
                 proposed_at: std::time::Instant::now(),
                 already_executed: false,
                 result: None,
+                revert: None,
                 mismatch_count: 0,
             },
         );
@@ -1440,13 +1598,14 @@ impl ConsensusEngine {
 
         let Some(pb) = pending_block else { return };
 
-        let result = if pb.already_executed {
-            // We produced this block — state already applied.
-            pb.result.unwrap_or(BlockResult {
+        let (result, block_revert) = if pb.already_executed {
+            // We produced this block — state already applied; revert was stashed.
+            let result = pb.result.unwrap_or(BlockResult {
                 state_root: pb.header.state_root,
                 receipts: vec![],
                 gas_used: 0,
-            })
+            });
+            (result, pb.revert.unwrap_or_default())
         } else {
             // Received from peer — execute now (Tendermint "Commit" phase),
             // committing only if our computed root matches the proposer's claim.
@@ -1464,7 +1623,7 @@ impl ConsensusEngine {
             // quorum of attestations), so the canonical chain genuinely diverges
             // from our state — we must resync. The revert above means we do so
             // from a clean prior-height state rather than a corrupted one.
-            let Some(exec_result) = exec_result else {
+            let Some((exec_result, revert)) = exec_result else {
                 warn!(
                     height,
                     proposer = ?&pb.header.proposer[..4],
@@ -1475,7 +1634,7 @@ impl ConsensusEngine {
                 return;
             };
 
-            exec_result
+            (exec_result, revert)
         };
 
         let block = FinalizedBlock {
@@ -1486,6 +1645,7 @@ impl ConsensusEngine {
         };
 
         self.chain.write().unwrap().push(block.clone());
+        self.rollback_journal.write().unwrap().record(height, block_revert);
         self.persist_block_and_meta(&block);
         self.emit_block_events(&block);
 
@@ -1895,7 +2055,7 @@ impl ConsensusEngine {
             )
         };
 
-        let Some(exec_result) = exec_result else {
+        let Some((exec_result, revert)) = exec_result else {
             debug!(
                 height,
                 theirs = ?&header.state_root[..4],
@@ -1926,6 +2086,7 @@ impl ConsensusEngine {
         };
 
         self.chain.write().unwrap().push(block.clone());
+        self.rollback_journal.write().unwrap().record(height, revert);
         self.persist_block_and_meta(&block);
 
         // Advance epoch counter (rewards already handled by executor).
@@ -2615,5 +2776,97 @@ mod tests {
         // State root might not match since our store computes differently.
         // The key test is that the flow doesn't panic.
         // In production, both nodes start from the same genesis.
+    }
+
+    /// Read alice/any account balance from the engine's live store.
+    fn engine_balance(engine: &ConsensusEngine, id: &[u8; 32]) -> u128 {
+        let store = engine.store();
+        let store = store.read().unwrap();
+        solen_execution::state::ReadonlyStateManager::new(store.as_ref())
+            .get_balance(id)
+            .unwrap()
+    }
+
+    #[test]
+    fn rollback_to_height_rewinds_state_to_common_ancestor() {
+        let (engine, kp, alice, bob) = setup_engine();
+        let executor = BlockExecutor::new();
+
+        let mut produce_transfer = |nonce: u64, amount: u128| {
+            let mut op = UserOperation {
+                sender: alice,
+                nonce,
+                actions: vec![Action::Transfer { to: bob, amount }],
+                max_fee: 1000,
+                signature: vec![],
+            };
+            let msg = executor.operation_signing_message(&op);
+            op.signature = kp.sign(&msg).to_vec();
+            engine.mempool().submit(op);
+            engine.produce_block();
+        };
+
+        // Two committed blocks → the common ancestor we'll roll back to.
+        produce_transfer(0, 500);
+        produce_transfer(1, 300);
+        let target_h = engine.height();
+        let target_root = engine.get_block(target_h).unwrap().header.state_root;
+        // Captured dynamically (the executor also charges fees, so we compare
+        // against the captured values rather than hardcoded transfer math).
+        let alice_at_target = engine_balance(&engine, &alice);
+        let bob_at_target = engine_balance(&engine, &bob);
+        assert_eq!(bob_at_target, 1_000 + 800, "bob receives transfers (no fees on the recipient)");
+
+        // Three more blocks form the "forked suffix" to undo.
+        produce_transfer(2, 100);
+        produce_transfer(3, 100);
+        produce_transfer(4, 100);
+        assert_eq!(engine.height(), target_h + 3);
+        assert_ne!(
+            engine.get_block(engine.height()).unwrap().header.state_root,
+            target_root
+        );
+        assert_ne!(engine_balance(&engine, &alice), alice_at_target);
+
+        // Roll back in place to the common ancestor.
+        assert!(engine.rollback_to_height(target_h, &target_root));
+        assert_eq!(engine.height(), target_h);
+        assert_eq!(engine.get_block(target_h).unwrap().header.state_root, target_root);
+        {
+            let store = engine.store();
+            let store = store.read().unwrap();
+            assert_eq!(store.state_root(), target_root, "live store root restored");
+        }
+        assert_eq!(engine_balance(&engine, &alice), alice_at_target, "alice balance restored");
+        assert_eq!(engine_balance(&engine, &bob), bob_at_target, "bob balance restored");
+        // The forked suffix blocks are gone from the chain.
+        assert!(engine.get_block(target_h + 1).is_none());
+
+        // The chain can advance again cleanly after rollback.
+        produce_transfer(2, 100);
+        assert_eq!(engine.height(), target_h + 1);
+    }
+
+    #[test]
+    fn rollback_rejects_target_outside_journal_range() {
+        let (engine, kp, alice, bob) = setup_engine();
+        let executor = BlockExecutor::new();
+        let mut op = UserOperation {
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            max_fee: 1000,
+            signature: vec![],
+        };
+        op.signature = kp.sign(&executor.operation_signing_message(&op)).to_vec();
+        engine.mempool().submit(op);
+        engine.produce_block();
+        let h = engine.height();
+        let root = engine.get_block(h).unwrap().header.state_root;
+
+        // target >= tip is rejected without mutating.
+        assert!(!engine.rollback_to_height(h, &root));
+        assert!(!engine.rollback_to_height(h + 5, &root));
+        assert_eq!(engine.height(), h, "height unchanged after rejected rollback");
     }
 }

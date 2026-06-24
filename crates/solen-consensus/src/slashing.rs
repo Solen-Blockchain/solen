@@ -60,10 +60,24 @@ pub fn check_double_sign(a: &BlockHeader, b: &BlockHeader) -> Option<SlashingEvi
     let hash_b = crate::engine::block_hash(b);
 
     // block_hash() excludes the signature, so two headers with the same hash
-    // are the same block (or a re-sign), not equivocation. Comparing hashes —
-    // rather than state_root — also catches equivocation between two distinct
-    // headers that happen to share a state root.
+    // are the same block (or a re-sign), not equivocation.
     if hash_a == hash_b {
+        return None;
+    }
+
+    // Two headers that build on the same parent, include the same transactions,
+    // and yield the same state are the SAME logical block, merely re-proposed
+    // with a fresh wall-clock timestamp/signature — e.g. after the proposer
+    // restarted and re-produced a not-yet-finalized height. That is NOT
+    // equivocation: nothing forks, the chain is unchanged. Slashing it would
+    // punish honest validators for a normal restart AND (because the two hashes
+    // split attestations) wedge consensus — the failure the 2026-06-24 devnet
+    // drill surfaced. Genuine equivocation differs in parent, transactions, or
+    // resulting state — any of which still trips this check.
+    if a.parent_hash == b.parent_hash
+        && a.transactions_root == b.transactions_root
+        && a.state_root == b.state_root
+    {
         return None;
     }
 

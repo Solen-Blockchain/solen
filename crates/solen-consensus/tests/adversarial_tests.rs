@@ -614,8 +614,12 @@ fn double_sign_detection_uses_block_hash() {
         "identical block must NOT trigger double-sign"
     );
 
-    // Same height/proposer, SAME state root but a different timestamp — these
-    // are two distinct signed headers, which IS equivocation.
+    // Same height/proposer, same parent/txs/state, only a different timestamp:
+    // the SAME logical block re-proposed (e.g. the proposer restarted and
+    // re-produced a not-yet-finalized height), NOT equivocation. Nothing forks.
+    // Slashing it would self-punish honest restarts and wedge consensus by
+    // splitting attestations across the two hashes (the 2026-06-24 drill
+    // finding). Must NOT trigger a double-sign.
     let mut header_b = solen_types::block::BlockHeader {
         timestamp_ms: 200,
         proposer_signature: vec![],
@@ -623,8 +627,8 @@ fn double_sign_detection_uses_block_hash() {
     };
     sign_header(&kp, &mut header_b);
     assert!(
-        check_double_sign(&header_a, &header_b).is_some(),
-        "two distinct signed headers at the same height must trigger double-sign"
+        check_double_sign(&header_a, &header_b).is_none(),
+        "same-content block re-proposed with a new timestamp must NOT be a double-sign"
     );
 
     // Different state root — also a double sign.

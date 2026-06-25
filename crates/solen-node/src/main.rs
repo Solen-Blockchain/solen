@@ -1245,11 +1245,27 @@ async fn main() -> anyhow::Result<()> {
                                 syncing_for_p2p.store(false, std::sync::atomic::Ordering::Relaxed);
                                 sync_fail_count = 0;
                                 fork_mismatch_detected = true;
+                                // If the network is meaningfully AHEAD of us, our committed
+                                // tip is forked and behind — normal sync can never advance us
+                                // (peers keep serving canonical blocks our forked state rejects,
+                                // and we're not finalizing, so the finalize-path resync never
+                                // fires either). Trigger a resync so the tiered recovery
+                                // (rollback → checkpoint → snapshot → remote) pulls us back onto
+                                // canonical. Gated on being behind so a transient mismatch at the
+                                // tip doesn't spuriously resync. This is the fork-strand escape
+                                // hatch — replay_synced_block's revert counter can't reach its
+                                // threshold here because bad_state_roots skips repeat-bad blocks.
+                                if known_net_height > our_height + 2 && !engine_for_p2p.is_resyncing() {
+                                    tracing::warn!(
+                                        our_height,
+                                        known_net_height,
+                                        "stranded on a forked tip behind the network — triggering resync"
+                                    );
+                                    engine_for_p2p.request_resync();
+                                }
                                 // Reset tracked peer heights so we don't think we're behind.
                                 peer_heights_for_p2p.lock().unwrap().clear();
                                 net_height_for_p2p.store(0, std::sync::atomic::Ordering::Relaxed);
-                                // Don't auto-resync from sync rejection — it could be transient.
-                                // Only state root mismatches during finalization trigger resync.
                                 continue;
                             }
                         }

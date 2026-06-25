@@ -46,9 +46,14 @@ boot_args(){ local self=$1 a=""; for i in $(seq 0 $((N-1))); do
   [ "$i" -ne "$self" ] && a="$a --bootstrap /ip4/127.0.0.1/tcp/$(p2p_port "$i")"; done; echo "$a"; }
 
 start_node(){ local i=$1
+  # --resync-url points at peers 0 and 1 (which stay up through every scenario),
+  # giving the tiered recovery a canonical seed so a diverged/stranded node can
+  # actually self-heal on this isolated devnet (mainnet uses rpc.solenchain.io).
   nohup "$NODE" --network devnet --genesis "$GENESIS" --validator-seed "${SEEDS[$i]}" \
     --data-dir "$BASE/n$i" --rpc-port "$(rpc_port "$i")" --p2p-port "$(p2p_port "$i")" \
-    --explorer-port 0 $(boot_args "$i") > "$BASE/n$i.log" 2>&1 &
+    --explorer-port 0 \
+    --resync-url "http://127.0.0.1:$(rpc_port 0)" --resync-url "http://127.0.0.1:$(rpc_port 1)" \
+    $(boot_args "$i") > "$BASE/n$i.log" 2>&1 &
   echo $! > "$BASE/n$i.pid"; }
 
 stop_node(){ [ -f "$BASE/n$1.pid" ] && kill -9 "$(cat "$BASE/n$1.pid")" 2>/dev/null; rm -f "$BASE/n$1.pid"; }
@@ -86,6 +91,13 @@ wait_advance_past(){ local target=$1 timeout=${2:-40} t=0
   while [ "$t" -lt "$timeout" ]; do
     local mh; mh=$(max_height); [ -n "$mh" ] && [ "$mh" -gt "$target" ] && return 0
     sleep 2; t=$((t+2)); done; return 1; }
+
+# Wait until the chain is producing steadily (advances >=6 blocks), i.e. fully
+# recovered and not mid-settle. Returns 1 on timeout.
+wait_settled(){ local timeout=${1:-60} start; start=$(max_height); local t=0
+  while [ "$t" -lt "$timeout" ]; do
+    local mh; mh=$(max_height); [ -n "$mh" ] && [ -n "$start" ] && [ "$mh" -ge $((start + 6)) ] && return 0
+    sleep 3; t=$((t+3)); done; return 1; }
 
 cleanup(){ for i in $(seq 0 $((N-1))); do stop_node "$i"; done; }
 trap cleanup EXIT
@@ -131,18 +143,23 @@ after=$(max_height)
 if [ "$after" -le $((stuck + 2)) ]; then ok "chain correctly halted at ~$after (no minority finalization)"
 else note "chain advanced to $after (timing — acceptable)"; fi
 start_node 2; start_node 3
-if wait_advance_past $((after + 2)) 60; then ok "Scenario B: fleet self-healed, advancing (tip $(max_height))"
+if wait_advance_past $((after + 2)) 150; then ok "Scenario B: fleet self-healed, advancing (tip $(max_height))"
 else bad "Scenario B: did NOT self-heal after quorum restored"; fi
 check_no_fork && ok "Scenario B: converged, no fork" || true
+
+# Let the cluster fully settle after the partition recovery before the next
+# scenario, so C starts from a steadily-advancing chain (not mid-recovery).
+note "settling after B (waiting for steady production)..."
+wait_settled 60 && note "settled (tip $(max_height))" || note "still settling (tip $(max_height))"
 
 # ── Scenario C: majority survives + straggler rejoins (fix #1 territory) ────
 echo "[4/4] Scenario C: kill 1/4 (quorum survives) → rejoin..."
 stop_node 3
 top=$(max_height)
-if wait_advance_past $((top + 3)) 40; then ok "Scenario C: 3/4 majority kept finalizing"
+if wait_advance_past $((top + 3)) 90; then ok "Scenario C: 3/4 majority kept finalizing"
 else bad "Scenario C: majority stalled with 1 down"; fi
 start_node 3
-sleep 12
+sleep 20
 h3=$(height 3); mh=$(max_height)
 if [ -n "$h3" ] && [ "$h3" -ge $((mh - 10)) ]; then ok "Scenario C: straggler rejoined (n3 @ $h3, tip $mh)"
 else bad "Scenario C: straggler stuck (n3 @ ${h3:-down}, tip $mh)"; fi

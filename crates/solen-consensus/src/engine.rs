@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use solen_crypto::blake3_hash;
 use solen_execution::executor::BlockExecutor;
@@ -113,6 +112,11 @@ struct PendingBlock {
 /// recoverable by in-place rollback before falling back to a snapshot restore.
 const ROLLBACK_JOURNAL_CAP: usize = 256;
 
+/// Consecutive un-appliable canonical sync blocks before we declare ourselves
+/// stranded on a forked tip and trigger a resync. Above 1 so a single transient
+/// bad-fork block from a minority peer doesn't force a resync.
+const SYNC_REVERT_RESYNC_THRESHOLD: u32 = 5;
+
 /// In-memory ring of per-block reverse-deltas. Lets a shallow fork be rolled
 /// back to its common ancestor in place (apply the undo-deltas for the forked
 /// suffix) instead of restoring a snapshot or re-downloading the chain. Bounded;
@@ -203,6 +207,13 @@ pub struct ConsensusEngine {
     dropped_block_height: Arc<RwLock<Option<u64>>>,
     /// Set when the node needs a full snapshot resync (state diverged irrecoverably).
     needs_resync: Arc<std::sync::atomic::AtomicBool>,
+    /// Consecutive synced canonical blocks we couldn't apply (reverted on a state
+    /// root mismatch). A node stuck on a forked tip rejects every canonical block
+    /// at its next height; once this crosses a threshold the node is genuinely
+    /// stranded (not transiently rejecting one bad-fork block) and triggers a
+    /// resync. Reset whenever a synced block applies. Precise fork-strand signal:
+    /// it never fires during a partition-halt (no higher blocks arrive to revert).
+    consecutive_sync_reverts: Arc<std::sync::atomic::AtomicU32>,
     /// True while a snapshot restore is in progress — blocks should not be finalized.
     resyncing: Arc<std::sync::atomic::AtomicBool>,
     /// Per-block reverse-deltas for in-place shallow-fork rollback.
@@ -299,6 +310,7 @@ impl ConsensusEngine {
             },
             dropped_block_height: Arc::new(RwLock::new(None)),
             needs_resync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            consecutive_sync_reverts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rollback_journal: Arc::new(RwLock::new(RollbackJournal::new(ROLLBACK_JOURNAL_CAP))),
             event_tx: tokio::sync::broadcast::channel(8192).0,
@@ -538,6 +550,7 @@ impl ConsensusEngine {
         self.early_attestations.write().unwrap().clear();
         self.mempool.clear();
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
         *self.last_partition_probe_at.write().unwrap() = None;
         *self.dropped_block_height.write().unwrap() = None;
         // The journal can't span a snapshot discontinuity.
@@ -1093,36 +1106,39 @@ impl ConsensusEngine {
     /// blocks at the same height — splitting attestations into a fork (root cause
     /// of 2026-06-08 and the 2026-06-24 fork cascade). The partition prober
     /// already fixed this for the latched state; this fixes normal operation.
-    pub fn is_backup_proposer(&self) -> bool {
+    pub fn is_backup_proposer(&self, stalled_for: std::time::Duration) -> bool {
+        // Local timing GATE: only consider stepping in once the primary has had a
+        // few block-intervals to produce. `stalled_for` is per-node (not shared),
+        // but it only gates WHEN we act, not WHO acts — selection below is
+        // deterministic — so it cannot cause competing blocks, only briefly delay
+        // the single chosen backup.
+        let min_wait = std::time::Duration::from_millis(self.config.block_time_ms * 3);
+        if stalled_for < min_wait {
+            return false;
+        }
+
         let next_height = self.height() + 1;
         let seed = self.epoch_seed();
-        let (order, last_ts_ms) = {
-            let order = {
-                let vs = self.validator_set.read().unwrap();
-                vs.proposer_order_for_height(next_height, &seed)
-            };
-            let last_ts_ms = self
-                .chain
-                .read()
-                .unwrap()
-                .last()
-                .map(|b| b.header.timestamp_ms)
-                .unwrap_or(0);
-            (order, last_ts_ms)
+        let order = {
+            let vs = self.validator_set.read().unwrap();
+            vs.proposer_order_for_height(next_height, &seed)
         };
         if order.len() <= 1 {
             return false;
         }
 
-        // Elapsed since the last block was produced, by shared wall-clock.
-        let now = now_ms();
-        let min_wait_ms = self.config.block_time_ms * 3;
-        if last_ts_ms == 0 || now <= last_ts_ms.saturating_add(min_wait_ms) {
-            return false;
-        }
-        let elapsed_past_min = now - last_ts_ms - min_wait_ms;
-        let round_interval_ms = (self.config.block_time_ms * 2).max(4000);
-        let round = (elapsed_past_min / round_interval_ms) as usize;
+        // Deterministic backup SELECTION from shared wall-clock (NTP), rotating
+        // each window — the same mechanism as the partition prober. Every node
+        // picks the SAME single backup, so no competing blocks. Crucially this is
+        // independent of block timestamps: those are now logical (parent +
+        // block_time, for idempotent re-proposal), so `now - last_block_ts` is no
+        // longer a real elapsed time and must NOT drive backup timing.
+        let interval_secs = ((self.config.block_time_ms * 2).max(4000) / 1000).max(1);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let round = (now_secs / interval_secs) as usize;
 
         // Position in the proposer order: 0 = designated, 1 = first backup, etc.
         let backup_position = (round + 1) % order.len();
@@ -2111,13 +2127,36 @@ impl ConsensusEngine {
         };
 
         let Some((exec_result, revert)) = exec_result else {
+            // We received a canonical block at our next height but couldn't apply
+            // it (root mismatch — our tip diverges). One such revert can be a
+            // transient bad-fork block from a minority peer; but if we revert
+            // CONSECUTIVE canonical blocks at our next height, our committed tip
+            // is genuinely forked and normal sync can never advance us — we're
+            // stranded (validator6's 2026-06-25 case). Trigger a resync so the
+            // tiered recovery rolls us back to the common ancestor and forward.
+            let n = self
+                .consecutive_sync_reverts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
             debug!(
                 height,
+                consecutive = n,
                 theirs = ?&header.state_root[..4],
                 "state root mismatch in synced block — reverted, rejecting"
             );
+            if n >= SYNC_REVERT_RESYNC_THRESHOLD && !self.is_resyncing() {
+                warn!(
+                    height,
+                    consecutive = n,
+                    "stranded on a forked tip (canonical blocks won't apply) — requesting resync"
+                );
+                self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
             return false;
         };
+        // A synced block applied cleanly — we're tracking canonical, not stranded.
+        self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).
@@ -2540,12 +2579,6 @@ fn compute_receipts_root(result: &BlockResult) -> Hash {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
 
 /// Credit an account balance by the given amount.
 fn credit_account(store: &mut dyn StateStore, account_id: &[u8; 32], amount: u128) {

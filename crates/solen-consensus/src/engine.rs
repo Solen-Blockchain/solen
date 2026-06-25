@@ -935,14 +935,15 @@ impl ConsensusEngine {
 
         let op_count = ops.len();
 
-        let (parent_hash, height) = {
+        let (parent_hash, height, parent_ts) = {
             let chain = self.chain.read().unwrap();
             let parent = chain
                 .last()
                 .map(|b| block_hash(&b.header))
                 .unwrap_or([0u8; 32]);
             let h = chain.last().map(|b| b.header.height + 1).unwrap_or(1);
-            (parent, h)
+            let pts = chain.last().map(|b| b.header.timestamp_ms).unwrap_or(0);
+            (parent, h, pts)
         };
 
         // Execute block with height so the executor handles epoch rewards
@@ -966,7 +967,18 @@ impl ConsensusEngine {
             transactions_root: compute_tx_root(&ops),
             receipts_root: compute_receipts_root(&result),
             proposer: self.config.validator_id,
-            timestamp_ms: now_ms(),
+            // DETERMINISTIC block timestamp = parent's + one block interval, NOT
+            // wall-clock. This makes block production idempotent: re-proposing a
+            // height (after a quorum-timeout drop, by the partition prober, or
+            // after a proposer restart) yields the SAME block hash, so
+            // attestations accumulate on one block and the fleet converges
+            // instead of splitting across ever-changing hashes — the wedge the
+            // devnet drill surfaced and the root of the 2026-06 fork cascade.
+            // Monotonic by construction (> parent); stays <= wall-clock because
+            // production is rate-limited to one block per interval, so it never
+            // trips the future-drift check. On a live chain it continues from the
+            // last real timestamp, so block times stay wall-clock-aligned.
+            timestamp_ms: parent_ts.saturating_add(self.config.block_time_ms),
             proposer_signature: vec![],
         };
         // Sign the header (signature covers all fields except itself).

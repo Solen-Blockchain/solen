@@ -33,6 +33,18 @@ const LOCAL_SNAPSHOT_KEEP: usize = 3;
 const ROCKS_CHECKPOINT_KEEP: usize = 8;
 const ROCKS_CHECKPOINT_INTERVAL: u64 = 100;
 
+/// Sync-starved strand auto-recovery thresholds. A node that is at least
+/// `STRANDED_BEHIND_BLOCKS` behind a live network and whose height has not
+/// advanced for `STRANDED_RESYNC_AFTER` is wedged: block-sync is requesting but
+/// not delivering blocks (observed on mainnet 2026-06-25 — a fallen-behind
+/// validator could not fetch the epoch-transition block via sync and froze).
+/// Neither the finalize-path nor the fork-mismatch resync covers this, because
+/// both require `replay_synced_block` to be reached and here no sync block is
+/// ever applied. The "behind" margin is well beyond normal sync lag (a few
+/// blocks); the freeze timer means a node that IS catching up never trips it.
+const STRANDED_BEHIND_BLOCKS: u64 = 12;
+const STRANDED_RESYNC_AFTER: std::time::Duration = std::time::Duration::from_secs(40);
+
 /// Network environment.
 ///
 /// Port scheme:
@@ -1460,6 +1472,7 @@ async fn main() -> anyhow::Result<()> {
     let cli_resync_urls = cli.resync_url.clone();
     let local_snapshots_for_resync = local_snapshots.clone();
     let rocks_checkpoints_for_resync = rocks_checkpoints.clone();
+    let network_height_for_consensus = network_height.clone();
     let consensus_handle = tokio::spawn(async move {
         // Wait for P2P mesh to form before producing blocks.
         // Gossipsub needs several heartbeats to build the mesh after peers connect.
@@ -1509,6 +1522,11 @@ async fn main() -> anyhow::Result<()> {
         let mut last_partition_sync_at = std::time::Instant::now()
             .checked_sub(partition_sync_interval)
             .unwrap_or_else(std::time::Instant::now);
+        // Sync-starved strand tracker: the height we were last seen at and when it
+        // last changed. If it stays frozen while we're behind a live network, the
+        // block-sync path is starved and we trigger a resync (see consts above).
+        let mut last_stranded_height = engine_clone.height();
+        let mut last_stranded_progress_at = std::time::Instant::now();
 
         loop {
             poll.tick().await;
@@ -1516,6 +1534,41 @@ async fn main() -> anyhow::Result<()> {
             if *shutdown_rx.borrow() {
                 info!("consensus engine stopping");
                 break;
+            }
+
+            // --- Sync-starved strand auto-recovery ---
+            // Runs BEFORE the "syncing → continue" gate below: a sync-starved node
+            // IS in syncing mode (it keeps requesting sync) but its height never
+            // advances, so any check placed after that gate would never run for it.
+            // Detect it directly — meaningfully behind a live network with a frozen
+            // height — and request a resync so the tiered recovery pulls us to the
+            // tip. Gated on NOT being partition-latched (partitions self-heal via
+            // the deterministic prober; an earlier ungated "behind + not advancing"
+            // heuristic disrupted that) and not already resyncing.
+            {
+                let our_h = engine_clone.height();
+                let net_h = network_height_for_consensus
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let stranded = our_h > 0
+                    && net_h > our_h + STRANDED_BEHIND_BLOCKS
+                    && !engine_clone.is_resyncing()
+                    && !engine_clone.is_likely_partitioned();
+                if stranded && our_h == last_stranded_height {
+                    if last_stranded_progress_at.elapsed() >= STRANDED_RESYNC_AFTER {
+                        warn!(
+                            our_height = our_h,
+                            network_height = net_h,
+                            "behind network with no block-sync progress — triggering resync (sync-starved strand)"
+                        );
+                        engine_clone.request_resync();
+                        // Debounce so we don't re-fire before the resync runs.
+                        last_stranded_progress_at = std::time::Instant::now();
+                    }
+                } else {
+                    // Advancing, caught up, partitioned, or resyncing — reset.
+                    last_stranded_height = our_h;
+                    last_stranded_progress_at = std::time::Instant::now();
+                }
             }
 
             // Don't do anything consensus-related while syncing.
@@ -1662,6 +1715,21 @@ async fn main() -> anyhow::Result<()> {
                 // the blocking client (and its runtime drop) run without panicking
                 // — required now that mainnet has resync URLs.
                 tokio::task::block_in_place(|| {
+                // If our current tip is already canonical we are not forked —
+                // only behind/sync-starved — and the backward recovery tiers
+                // below would merely REGRESS us to an earlier canonical height,
+                // from which the same starved block-sync path re-strands us (an
+                // endless resync loop). Those tiers are correct only for a FORKED
+                // tip; when our tip is canonical, skip straight to the
+                // forward-pulling remote snapshot. (state_root collides across
+                // heights on an idle chain, but it is compared at the SAME height
+                // here, so the check is sound.)
+                let tip_canonical = {
+                    let h = engine_clone.height();
+                    let root = engine_clone.store().read().unwrap().state_root();
+                    h > 0 && checkpoint_is_canonical(&resync_urls, h, &root)
+                };
+                if !tip_canonical {
                 // --- Phase 2: in-place rollback to the common ancestor. If the
                 // fork is shallow enough to sit within the rollback journal, find
                 // the deepest height where our state root still matches the
@@ -1749,6 +1817,7 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => warn!(error = %e, "local checkpoint restore failed — falling back to remote"),
                     }
                 }
+                } // end backward recovery tiers (run only when our tip is forked)
 
                 if resync_ok { return; }
 

@@ -1921,6 +1921,16 @@ async fn main() -> anyhow::Result<()> {
                         store.clear().ok();
                         match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data) {
                             Ok(meta) => {
+                                // Release the store WRITE lock BEFORE reset_to_height,
+                                // which takes a store READ lock to read the restored
+                                // state_root. std RwLock is not reentrant, so calling it
+                                // while still holding this write guard self-deadlocks the
+                                // thread — freezing consensus AND every RPC store reader.
+                                // (2026-06-26 validator3 hang: its last log line was
+                                // exactly "snapshot restored — resync complete", then 6h
+                                // of silence with RPC dead.) The local-checkpoint path
+                                // above already drops the guard first for this reason.
+                                drop(store);
                                 info!(
                                     height = meta.height,
                                     epoch = meta.epoch,

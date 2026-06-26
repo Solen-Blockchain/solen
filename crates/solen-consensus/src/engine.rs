@@ -533,6 +533,14 @@ impl ConsensusEngine {
         self.needs_resync.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Peek whether a resync has been requested, without clearing it. Used by
+    /// the consensus loop's "syncing → continue" gate so a pending resync is
+    /// not skipped: a sync-starved node is in syncing mode, and the resync
+    /// executor lives after that gate.
+    pub fn resync_requested(&self) -> bool {
+        self.needs_resync.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Check if a snapshot restore is in progress.
     pub fn is_resyncing(&self) -> bool {
         self.resyncing.load(std::sync::atomic::Ordering::Relaxed)

@@ -1571,8 +1571,18 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Don't do anything consensus-related while syncing.
-            if syncing_for_consensus.load(std::sync::atomic::Ordering::Relaxed) {
+            // Don't do anything consensus-related while syncing — UNLESS a resync
+            // has been requested. A sync-starved node is permanently in syncing
+            // mode (it keeps requesting sync that never delivers), and the resync
+            // executor (take_resync_request, below) lives after this gate; without
+            // this exception the sync-starved trigger would set needs_resync but
+            // the loop would `continue` here every iteration and never execute the
+            // resync — the flag is set and re-set forever while the node stays
+            // wedged (observed on mainnet 2026-06-26: validator9 logged the trigger
+            // repeatedly at 40s intervals but never resynced).
+            if syncing_for_consensus.load(std::sync::atomic::Ordering::Relaxed)
+                && !engine_clone.resync_requested()
+            {
                 // Still track finalization from sync so we don't stall after sync completes.
                 let current_height = engine_clone.height();
                 if current_height > last_finalized_height {

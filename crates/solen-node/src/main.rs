@@ -986,24 +986,31 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                 }
                             }
-                            // Send our signed attestation back.
-                            let bh = solen_consensus::engine::block_hash(&header);
-                            let att_payload = attestation_payload(engine_for_p2p.config().chain_id, header.height, &bh);
-                            let att_sig = att_kp_for_p2p.sign(&att_payload);
-                            let att_msg = NetworkMessage::Attestation {
-                                validator_id: engine_for_p2p.validator_id(),
-                                block_height: header.height,
-                                block_hash: bh,
-                                signature: att_sig.to_vec(),
-                            };
-                            net_for_attest.broadcast(att_msg);
+                            if engine_for_p2p.fc_v2_active(header.height) {
+                                // v2: the engine already recorded our vote on the
+                                // deterministic leader inside accept_block. Broadcast
+                                // any vote(s) it wants us to (re)cast.
+                                broadcast_v2_revotes(&engine_for_p2p, &att_kp_for_p2p, &net_for_attest);
+                            } else {
+                                // v1: single attestation for the block we accepted.
+                                let bh = solen_consensus::engine::block_hash(&header);
+                                let att_payload = attestation_payload(engine_for_p2p.config().chain_id, header.height, &bh);
+                                let att_sig = att_kp_for_p2p.sign(&att_payload);
+                                let att_msg = NetworkMessage::Attestation {
+                                    validator_id: engine_for_p2p.validator_id(),
+                                    block_height: header.height,
+                                    block_hash: bh,
+                                    signature: att_sig.to_vec(),
+                                };
+                                net_for_attest.broadcast(att_msg);
 
-                            // Also self-attest locally.
-                            engine_for_p2p.accept_attestation(
-                                engine_for_p2p.validator_id(),
-                                header.height,
-                                bh,
-                            );
+                                // Also self-attest locally.
+                                engine_for_p2p.accept_attestation(
+                                    engine_for_p2p.validator_id(),
+                                    header.height,
+                                    bh,
+                                );
+                            }
                         } else {
                             // Block not accepted — if it's ahead of us, request sync.
                             let our_h = engine_for_p2p.height();
@@ -1039,6 +1046,12 @@ async fn main() -> anyhow::Result<()> {
                                     block_height,
                                     block_hash,
                                 );
+                                // v2: a peer's vote may have moved our leader —
+                                // broadcast our (possibly changed) vote so the fleet
+                                // converges.
+                                if engine_for_p2p.fc_v2_active(block_height) {
+                                    broadcast_v2_revotes(&engine_for_p2p, &att_kp_for_p2p, &net_for_attest);
+                                }
                             } else {
                                 let v_b58 = account_to_base58(&validator_id);
                                 tracing::warn!(
@@ -2093,15 +2106,21 @@ async fn main() -> anyhow::Result<()> {
                     // is offline (e.g. 3 of 4 online), this means non-proposers only
                     // collect 2/4 = 50% of stake — below the 2/3 quorum threshold —
                     // causing every backup-proposed block to force-finalize.
-                    let bh = solen_consensus::engine::block_hash(&header_for_att);
-                    let att_payload = attestation_payload(engine_clone.config().chain_id, header_for_att.height, &bh);
-                    let att_sig = att_kp_for_consensus.sign(&att_payload);
-                    handle.broadcast(NetworkMessage::Attestation {
-                        validator_id: engine_clone.validator_id(),
-                        block_height: header_for_att.height,
-                        block_hash: bh,
-                        signature: att_sig.to_vec(),
-                    });
+                    if engine_clone.fc_v2_active(header_for_att.height) {
+                        // v2: produce_block already registered our block as a
+                        // candidate and self-voted; broadcast that vote.
+                        broadcast_v2_revotes(&engine_clone, &att_kp_for_consensus, handle);
+                    } else {
+                        let bh = solen_consensus::engine::block_hash(&header_for_att);
+                        let att_payload = attestation_payload(engine_clone.config().chain_id, header_for_att.height, &bh);
+                        let att_sig = att_kp_for_consensus.sign(&att_payload);
+                        handle.broadcast(NetworkMessage::Attestation {
+                            validator_id: engine_clone.validator_id(),
+                            block_height: header_for_att.height,
+                            block_hash: bh,
+                            signature: att_sig.to_vec(),
+                        });
+                    }
                 }
             }
         }
@@ -2241,6 +2260,27 @@ fn checkpoint_is_canonical(urls: &[String], height: u64, expected_root: &[u8; 32
 fn attestation_payload(chain_id: u64, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
     // Use the engine's domain-separated payload to ensure consistency.
     solen_consensus::engine::ConsensusEngine::attestation_signing_payload(chain_id, height, block_hash)
+}
+
+/// v2 fork choice: broadcast any (height, hash) attestations the engine wants us
+/// to (re)cast because our vote moved to the deterministic leader. The engine
+/// has already recorded our own vote in v2 state; this only propagates it to
+/// peers so the fleet converges. No-op under v1 (the queue stays empty).
+fn broadcast_v2_revotes(
+    engine: &solen_consensus::engine::ConsensusEngine,
+    att_kp: &solen_crypto::Keypair,
+    net: &solen_p2p::network::NetworkHandle,
+) {
+    for (height, hash) in engine.take_v2_revotes() {
+        let payload = attestation_payload(engine.config().chain_id, height, &hash);
+        let sig = att_kp.sign(&payload);
+        net.broadcast(NetworkMessage::Attestation {
+            validator_id: engine.validator_id(),
+            block_height: height,
+            block_hash: hash,
+            signature: sig.to_vec(),
+        });
+    }
 }
 
 fn rand_seed() -> [u8; 32] {

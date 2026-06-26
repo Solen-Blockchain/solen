@@ -582,6 +582,10 @@ impl ConsensusEngine {
         self.pending_blocks.write().unwrap().clear();
         self.pending_attestations.write().unwrap().clear();
         self.early_attestations.write().unwrap().clear();
+        // v2 fork-choice state can't span a snapshot discontinuity.
+        self.v2_blocks.write().unwrap().clear();
+        self.v2_votes.write().unwrap().clear();
+        self.v2_revotes.lock().unwrap().clear();
         self.mempool.clear();
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
         self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1073,6 +1077,35 @@ impl ConsensusEngine {
             }
         } else {
             // Epoch rewards are handled by the executor via execute_block_with_height.
+
+            // v2: register OUR executed block as a candidate (preserving the
+            // already-executed result + revert so finalization doesn't re-run it)
+            // and cast our self-vote. v2_record_vote enqueues a revote for the
+            // node layer to broadcast.
+            if self.fc_v2_active(height) {
+                self.v2_blocks.write().unwrap().entry(height).or_default().insert(
+                    bh,
+                    PendingBlock {
+                        header: header.clone(),
+                        operations: ops.clone(),
+                        proposed_at: std::time::Instant::now(),
+                        already_executed: true,
+                        result: Some(result),
+                        revert: Some(revert),
+                        mismatch_count: 0,
+                    },
+                );
+                self.persist_last_attestation(height, &bh);
+                // Cast our self-vote and ENQUEUE it for the node layer to
+                // broadcast (v2_reevaluate only enqueues on a vote *change*, but
+                // here we're the proposer casting a fresh vote for our own block).
+                self.v2_votes.write().unwrap().entry(height).or_default()
+                    .insert(self.config.validator_id, bh);
+                self.v2_revotes.lock().unwrap().push((height, bh));
+                self.v2_reevaluate(height);
+                info!(height, ops = op_count, epoch, "block proposed (v2), waiting for attestations");
+                return ProducedBlock { finalized: None, header, operations: ops };
+            }
 
             // Store as pending, self-attest,
             // wait for peer attestations to reach quorum.
@@ -2575,6 +2608,9 @@ impl ConsensusEngine {
         pending.retain(|h, _| *h > current_height);
         let mut atts = self.pending_attestations.write().unwrap();
         atts.retain(|h, _| *h > current_height);
+        // v2 fork-choice candidates + votes at/below the synced height are stale.
+        self.v2_blocks.write().unwrap().retain(|h, _| *h > current_height);
+        self.v2_votes.write().unwrap().retain(|h, _| *h > current_height);
         let cleared = before - pending.len();
         if cleared > 0 {
             info!(cleared, current_height, "cleared stale pending blocks after sync");
@@ -3294,6 +3330,85 @@ mod tests {
         assert_eq!(engine.height(), next_h, "vote-change converged -> block A finalized");
         let finalized = engine.get_block(next_h).unwrap();
         assert_eq!(block_hash(&finalized.header), hash_a, "the converged hash finalized");
+    }
+
+    /// produce_block under v2: our block becomes a candidate + self-vote, and
+    /// finalizes once peers' votes reach 2/3.
+    #[test]
+    fn produce_block_finalizes_under_fork_choice_v2() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let produced = engine.produce_block();
+        assert!(produced.finalized.is_none(), "multi-validator: not finalized on production");
+        assert_eq!(engine.height(), 0);
+        let h = produced.header.height;
+        let bh = block_hash(&produced.header);
+
+        // Our self-vote is queued for the node layer to broadcast.
+        assert!(engine.take_v2_revotes().contains(&(h, bh)), "self-vote enqueued");
+
+        // Peers attest -> 3/3 -> finalize (quorum needs all 3 in a 3-set).
+        engine.accept_attestation(ids[1], h, bh);
+        engine.accept_attestation(ids[2], h, bh);
+        assert_eq!(engine.height(), h, "produced block finalized via peer votes (v2)");
+    }
+
+    /// Safety: under v2 a validator's vote-change REPLACES its prior vote (never
+    /// adds), so it cannot inflate quorum. Uses a non-validator observer engine
+    /// so it doesn't auto-vote and we control all 5 votes.
+    #[test]
+    fn v2_vote_change_replaces_not_adds() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        // Observer: validator_id is NOT in the set, so the engine never self-votes.
+        let config = EngineConfig { validator_id: [99u8; 32], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let empty_root = { engine.store().read().unwrap().state_root() };
+        let next_h = engine.height() + 1;
+        let make_block = |idx: usize| -> BlockHeader {
+            let mut h = BlockHeader {
+                height: next_h, epoch: next_h / crate::epoch::EPOCH_LENGTH,
+                parent_hash: [0u8; 32], state_root: empty_root,
+                transactions_root: [0u8; 32], receipts_root: [0u8; 32],
+                proposer: ids[idx], timestamp_ms: 6000, proposer_signature: vec![],
+            };
+            let bh = block_hash(&h);
+            h.proposer_signature = kps[idx].sign(&bh).to_vec();
+            h
+        };
+        let block_a = make_block(0);
+        let block_b = make_block(1);
+        let hash_a = block_hash(&block_a);
+        let hash_b = block_hash(&block_b);
+        assert!(engine.accept_block(&block_a, &[]));
+        assert!(engine.accept_block(&block_b, &[]));
+
+        // 3 votes for A — quorum is 4, so no finalize.
+        engine.accept_attestation(ids[1], next_h, hash_a);
+        engine.accept_attestation(ids[2], next_h, hash_a);
+        engine.accept_attestation(ids[3], next_h, hash_a);
+        assert_eq!(engine.height(), next_h - 1, "3/5 < quorum");
+        // Duplicate vote from v1 must not inflate to 4.
+        engine.accept_attestation(ids[1], next_h, hash_a);
+        assert_eq!(engine.height(), next_h - 1, "duplicate vote does not inflate quorum");
+        // v1 changes to B: A drops to {v2,v3}=2, still no quorum.
+        engine.accept_attestation(ids[1], next_h, hash_b);
+        assert_eq!(engine.height(), next_h - 1, "vote-change moves, not adds");
+        // v1 back to A + v4 to A -> A has {v1,v2,v3,v4}=4 -> finalize.
+        engine.accept_attestation(ids[1], next_h, hash_a);
+        engine.accept_attestation(ids[4], next_h, hash_a);
+        assert_eq!(engine.height(), next_h, "four distinct votes finalize");
+        assert_eq!(block_hash(&engine.get_block(next_h).unwrap().header), hash_a);
     }
 
     #[test]

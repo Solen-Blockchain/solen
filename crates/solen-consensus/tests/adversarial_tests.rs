@@ -49,6 +49,7 @@ fn setup_engine() -> (ConsensusEngine, Keypair, [u8; 32], [u8; 32]) {
         validator_id,
         chain_id: 1337,
         prune: false,
+        fork_choice_v2_height: u64::MAX,
     };
 
     let mempool = Mempool::new(1000);

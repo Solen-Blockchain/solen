@@ -207,6 +207,17 @@ impl ValidatorSet {
         attested_stake * 3 > total * 2
     }
 
+    /// Total committed stake held by the given validators (each counted once).
+    /// Same committed-set basis as `has_quorum`, so v2 fork choice ranks
+    /// competing blocks by the same stake measure used for finality.
+    pub fn stake_of(&self, ids: &[ValidatorId]) -> u128 {
+        self.validators
+            .iter()
+            .filter(|v| ids.contains(&v.id))
+            .map(|v| v.stake)
+            .sum()
+    }
+
     /// Get a mutable reference to a validator by ID.
     pub fn get_mut(&mut self, id: &ValidatorId) -> Option<&mut ValidatorInfo> {
         self.validators.iter_mut().find(|v| v.id == *id)

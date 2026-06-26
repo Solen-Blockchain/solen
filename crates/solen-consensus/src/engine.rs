@@ -48,6 +48,16 @@ pub struct EngineConfig {
     /// Prune mode: delete blocks older than retention window to save disk.
     /// Default is false (archive mode — keep all history).
     pub prune: bool,
+    /// Activation height for attestation-aware fork choice ("fork choice v2").
+    /// Below this height the engine uses the legacy single-pending, attest-once
+    /// rule. At/above it, the engine tracks competing blocks + per-validator
+    /// votes (vote-change allowed), converges all nodes onto the deterministic
+    /// vote leader, and finalizes whichever block hash reaches 2/3 — fixing the
+    /// 2-down competing-block liveness deadlock (mainnet halt 2026-06-26).
+    /// Defaults to u64::MAX = OFF, so a deployed binary is byte-for-byte
+    /// behaviourally identical to the old one until an activation height is set
+    /// (flag-day: deploy dormant everywhere, then activate at one height).
+    pub fork_choice_v2_height: u64,
 }
 
 impl Default for EngineConfig {
@@ -58,6 +68,7 @@ impl Default for EngineConfig {
             validator_id: [0u8; 32],
             chain_id: 0,
             prune: false,
+            fork_choice_v2_height: u64::MAX,
         }
     }
 }
@@ -218,6 +229,18 @@ pub struct ConsensusEngine {
     resyncing: Arc<std::sync::atomic::AtomicBool>,
     /// Per-block reverse-deltas for in-place shallow-fork rollback.
     rollback_journal: Arc<RwLock<RollbackJournal>>,
+    /// --- Attestation-aware fork choice (v2), gated by config.fork_choice_v2_height ---
+    /// Competing block candidates per height, keyed by block hash. Unlike the
+    /// single `pending_blocks`, v2 keeps EVERY valid candidate so it can finalize
+    /// whichever hash reaches 2/3 even if it isn't the one we locally proposed.
+    v2_blocks: Arc<RwLock<HashMap<u64, HashMap<Hash, PendingBlock>>>>,
+    /// Each validator's CURRENT vote per height (vote-change allowed: a later
+    /// attestation replaces its earlier one, net one vote per validator). The
+    /// source of truth for v2 quorum.
+    v2_votes: Arc<RwLock<HashMap<u64, HashMap<ValidatorId, Hash>>>>,
+    /// Queue of (height, hash) the node layer must broadcast as our (possibly
+    /// changed) attestation, appended when our deterministic vote leader moves.
+    v2_revotes: Arc<std::sync::Mutex<Vec<(u64, Hash)>>>,
     /// Broadcast channel for node events (WebSocket subscriptions, indexers).
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
@@ -313,6 +336,9 @@ impl ConsensusEngine {
             consecutive_sync_reverts: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             resyncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rollback_journal: Arc::new(RwLock::new(RollbackJournal::new(ROLLBACK_JOURNAL_CAP))),
+            v2_blocks: Arc::new(RwLock::new(HashMap::new())),
+            v2_votes: Arc::new(RwLock::new(HashMap::new())),
+            v2_revotes: Arc::new(std::sync::Mutex::new(Vec::new())),
             event_tx: tokio::sync::broadcast::channel(8192).0,
         }
     }
@@ -1406,6 +1432,13 @@ impl ConsensusEngine {
             }
             drop(chain);
 
+            // v2: keep EVERY valid candidate (not a single rank-chosen pending),
+            // so whichever hash the fleet's votes converge on can finalize.
+            if self.fc_v2_active(header.height) {
+                self.v2_record_block(header, operations);
+                return true;
+            }
+
             let pending = self.pending_blocks.read().unwrap();
             if let Some(existing) = pending.get(&header.height) {
                 let existing_hash = block_hash(&existing.header);
@@ -1559,6 +1592,172 @@ impl ConsensusEngine {
         payload
     }
 
+    // ===================== Attestation-aware fork choice (v2) =====================
+    // Gated by `config.fork_choice_v2_height`. Fixes the 2-down competing-block
+    // liveness deadlock: tracks EVERY candidate block + each validator's CURRENT
+    // vote (vote-change allowed), converges all nodes onto the deterministic vote
+    // leader, and finalizes whichever hash reaches 2/3. Safety is unchanged: a
+    // block still needs 2/3 to finalize, so two hashes can only both finalize if
+    // >1/3 of validators equivocate (the standard BFT bound); no block hashes
+    // change, so even a mixed-binary window cannot cause a safety fork.
+
+    /// True iff attestation-aware fork choice is active at this height.
+    pub fn fc_v2_active(&self, height: u64) -> bool {
+        height >= self.config.fork_choice_v2_height
+    }
+
+    /// Drain (height, hash) pairs the node layer must broadcast as our updated
+    /// attestation (our vote moved to the deterministic leader). Empty under v1.
+    pub fn take_v2_revotes(&self) -> Vec<(u64, Hash)> {
+        std::mem::take(&mut *self.v2_revotes.lock().unwrap())
+    }
+
+    /// Record a competing block candidate (v2), then re-evaluate the leader.
+    fn v2_record_block(&self, header: &BlockHeader, operations: &[UserOperation]) {
+        let height = header.height;
+        let bh = block_hash(header);
+        {
+            let mut blocks = self.v2_blocks.write().unwrap();
+            blocks.entry(height).or_default().entry(bh).or_insert_with(|| PendingBlock {
+                header: header.clone(),
+                operations: operations.to_vec(),
+                proposed_at: std::time::Instant::now(),
+                already_executed: false,
+                result: None,
+                revert: None,
+                mismatch_count: 0,
+            });
+        }
+        self.v2_reevaluate(height);
+    }
+
+    /// Record/replace a validator's vote (v2 — vote-change allowed), then
+    /// re-evaluate the leader.
+    fn v2_record_vote(&self, validator_id: ValidatorId, height: u64, hash: Hash) {
+        {
+            let mut votes = self.v2_votes.write().unwrap();
+            votes.entry(height).or_default().insert(validator_id, hash);
+        }
+        self.v2_reevaluate(height);
+    }
+
+    /// Tally current votes for a height into hash -> voters.
+    fn v2_tally(&self, height: u64) -> HashMap<Hash, Vec<ValidatorId>> {
+        let votes = self.v2_votes.read().unwrap();
+        let mut t: HashMap<Hash, Vec<ValidatorId>> = HashMap::new();
+        if let Some(per) = votes.get(&height) {
+            for (vid, h) in per {
+                t.entry(*h).or_default().push(*vid);
+            }
+        }
+        t
+    }
+
+    /// Deterministic vote leader for a height: the hash with the most attesting
+    /// stake, tie-broken by the LOWEST proposer rank (so every honest node picks
+    /// the same leader). Only considers candidate blocks we actually hold.
+    fn v2_leader(&self, height: u64, tally: &HashMap<Hash, Vec<ValidatorId>>) -> Option<Hash> {
+        let seed = self.epoch_seed();
+        let vs = self.validator_set.read().unwrap();
+        let order = vs.proposer_order_for_height(height, &seed);
+        let blocks = self.v2_blocks.read().unwrap();
+        let candidates = blocks.get(&height)?;
+        let mut best: Option<(Hash, u128, usize)> = None; // (hash, stake, rank)
+        for (hash, voters) in tally {
+            // Must hold the block to be a viable leader.
+            let Some(pb) = candidates.get(hash) else { continue };
+            let stake = vs.stake_of(voters);
+            let rank = order.iter().position(|id| *id == pb.header.proposer).unwrap_or(usize::MAX);
+            let better = match best {
+                None => true,
+                Some((_, bstake, brank)) => stake > bstake || (stake == bstake && rank < brank),
+            };
+            if better {
+                best = Some((*hash, stake, rank));
+            }
+        }
+        best.map(|(h, _, _)| h)
+    }
+
+    /// Re-evaluate the next-height vote leader: finalize a 2/3 winner we hold,
+    /// else move our own vote toward the leader (enqueue a revote to broadcast).
+    fn v2_reevaluate(&self, height: u64) {
+        if height != self.height() + 1 {
+            return; // only ever decide the immediate next block
+        }
+        let tally = self.v2_tally(height);
+        if tally.is_empty() {
+            return;
+        }
+
+        // 1) Finalize any hash that has reached 2/3 AND whose block we hold.
+        {
+            let vs = self.validator_set.read().unwrap();
+            let mut winner: Option<Hash> = None;
+            for (h, voters) in &tally {
+                if vs.has_quorum(voters) {
+                    let have = self.v2_blocks.read().unwrap()
+                        .get(&height).map(|m| m.contains_key(h)).unwrap_or(false);
+                    if have {
+                        winner = Some(*h);
+                        break;
+                    }
+                }
+            }
+            drop(vs);
+            if let Some(h) = winner {
+                self.v2_finalize(height, h);
+                return;
+            }
+        }
+
+        // 2) Move our own vote to the deterministic leader if it differs, so the
+        //    fleet converges. Recording our vote may itself complete quorum.
+        let leader = match self.v2_leader(height, &tally) {
+            Some(l) => l,
+            None => return,
+        };
+        let our_id = self.config.validator_id;
+        let we_are_validator = {
+            let vs = self.validator_set.read().unwrap();
+            vs.active().iter().any(|v| v.id == our_id)
+        };
+        if !we_are_validator {
+            return;
+        }
+        let our_vote = self.v2_votes.read().unwrap()
+            .get(&height).and_then(|m| m.get(&our_id)).copied();
+        if our_vote != Some(leader) {
+            self.v2_votes.write().unwrap().entry(height).or_default().insert(our_id, leader);
+            self.v2_revotes.lock().unwrap().push((height, leader));
+            // Our own move may have completed quorum for the leader.
+            let voters = self.v2_tally(height).remove(&leader).unwrap_or_default();
+            let has_q = { self.validator_set.read().unwrap().has_quorum(&voters) };
+            if has_q {
+                self.v2_finalize(height, leader);
+            }
+        }
+    }
+
+    /// Finalize a specific v2 candidate block by hash, reusing the legacy
+    /// finalize path (execution + state-root verification + chain push).
+    fn v2_finalize(&self, height: u64, hash: Hash) {
+        let pb = self.v2_blocks.write().unwrap()
+            .get_mut(&height).and_then(|m| m.remove(&hash));
+        let Some(pb) = pb else { return };
+        let atts: Vec<Attestation> = self.v2_votes.read().unwrap().get(&height)
+            .map(|m| m.iter().filter(|(_, h)| **h == hash)
+                .map(|(vid, _)| Attestation { validator_id: *vid, block_height: height, block_hash: hash })
+                .collect())
+            .unwrap_or_default();
+        self.pending_blocks.write().unwrap().insert(height, pb);
+        self.pending_attestations.write().unwrap().insert(height, atts);
+        self.finalize_pending_block(height);
+        // Drop v2 bookkeeping at/below the finalized height.
+        self.v2_blocks.write().unwrap().retain(|h, _| *h > height);
+        self.v2_votes.write().unwrap().retain(|h, _| *h > height);
+    }
+
     /// Accept an attestation (already verified by caller).
     /// Prefer accept_verified_attestation() for external inputs.
     pub fn accept_attestation(
@@ -1573,6 +1772,15 @@ impl ConsensusEngine {
             if !vs.active().iter().any(|v| v.id == validator_id) {
                 return false;
             }
+        }
+
+        // v2: record the vote (vote-change allowed) and let fork choice converge
+        // + finalize. A vote for a block we don't yet hold is still recorded, so
+        // it counts the moment the block arrives — no early-attestation buffer.
+        if self.fc_v2_active(block_height) {
+            let before = self.height();
+            self.v2_record_vote(validator_id, block_height, attested_hash);
+            return self.height() > before;
         }
 
         // Only accept attestations for blocks we already have in pending.
@@ -2941,6 +3149,151 @@ mod tests {
         // The chain can advance again cleanly after rollback.
         produce_transfer(2, 100);
         assert_eq!(engine.height(), target_h + 1);
+    }
+
+    /// Reproduces the 2-down competing-block liveness deadlock (mainnet halt
+    /// 2026-06-26 at 683764). When the proposer rotation emits competing blocks
+    /// at the same height and the first attestations split across them, the
+    /// fleet CANNOT converge: `accept_attestation` dedups by validator_id (each
+    /// validator votes at most once per height, with no vote-change) and ignores
+    /// attestations whose hash differs from the node's single pending block — so
+    /// minority-block voters can never move to the majority block and neither
+    /// block reaches the 2/3 threshold. The chain wedges.
+    ///
+    /// This pins the CURRENT (buggy) behaviour: a 2/2 split across two competing
+    /// blocks finalizes NOTHING. The attestation-aware fork-choice fix must make
+    /// this converge and finalize a single block.
+    #[test]
+    fn competing_blocks_with_split_attestations_deadlock() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        let config = EngineConfig { validator_id: ids[0], ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let head_h = engine.height();
+        let (parent_hash, parent_ts) = engine
+            .get_block(head_h)
+            .map(|b| (block_hash(&b.header), b.header.timestamp_ms))
+            .unwrap_or(([0u8; 32], 0));
+        let next_h = head_h + 1;
+
+        // A signed empty block at `next_h` from a given proposer.
+        let make_block = |proposer_idx: usize| -> BlockHeader {
+            let mut h = BlockHeader {
+                height: next_h,
+                epoch: next_h / crate::epoch::EPOCH_LENGTH,
+                parent_hash,
+                state_root: [0u8; 32],
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer: ids[proposer_idx],
+                timestamp_ms: parent_ts + 6000,
+                proposer_signature: vec![],
+            };
+            let bh = block_hash(&h);
+            h.proposer_signature = kps[proposer_idx].sign(&bh).to_vec();
+            h
+        };
+
+        // Two competing blocks from different proposers (the backup rotation
+        // under 2-down): same parent + timestamp, different proposer => different
+        // hash.
+        let block_a = make_block(1);
+        let block_b = make_block(2);
+        let hash_a = block_hash(&block_a);
+        let hash_b = block_hash(&block_b);
+        assert_ne!(hash_a, hash_b);
+
+        assert!(engine.accept_block(&block_a, &[]), "block_a accepted");
+        engine.accept_block(&block_b, &[]); // fork-choice keeps one as pending
+
+        // First attestations split 2/2: {v0,v1} -> A, {v2,v3} -> B. Quorum for 5
+        // is 4 (2/3 = 3.33), so neither side can reach it without a voter moving.
+        engine.accept_attestation(ids[0], next_h, hash_a);
+        engine.accept_attestation(ids[1], next_h, hash_a);
+        engine.accept_attestation(ids[2], next_h, hash_b);
+        engine.accept_attestation(ids[3], next_h, hash_b);
+
+        // CURRENT (buggy): the split is unrecoverable — nothing finalizes.
+        assert_eq!(
+            engine.height(),
+            head_h,
+            "split attestations cannot converge -> chain wedged (the bug under repair)"
+        );
+    }
+
+    /// With fork-choice v2 active, the same competing-block split that wedges
+    /// under v1 CONVERGES: vote-changes are honoured, votes aggregate on one
+    /// hash, and the block finalizes at 2/3. This is the fix for the 2-down
+    /// liveness deadlock.
+    #[test]
+    fn competing_blocks_converge_under_fork_choice_v2() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        // v2 active from height 0.
+        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let head_h = engine.height();
+        let (parent_hash, parent_ts) = engine
+            .get_block(head_h)
+            .map(|b| (block_hash(&b.header), b.header.timestamp_ms))
+            .unwrap_or(([0u8; 32], 0));
+        // Empty block leaves state unchanged — use the live empty-store root so
+        // finalization's execution + state-root check passes.
+        let empty_root = { engine.store().read().unwrap().state_root() };
+        let next_h = head_h + 1;
+
+        let make_block = |proposer_idx: usize| -> BlockHeader {
+            let mut h = BlockHeader {
+                height: next_h,
+                epoch: next_h / crate::epoch::EPOCH_LENGTH,
+                parent_hash,
+                state_root: empty_root,
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer: ids[proposer_idx],
+                timestamp_ms: parent_ts + 6000,
+                proposer_signature: vec![],
+            };
+            let bh = block_hash(&h);
+            h.proposer_signature = kps[proposer_idx].sign(&bh).to_vec();
+            h
+        };
+
+        let block_a = make_block(1);
+        let block_b = make_block(2);
+        let hash_a = block_hash(&block_a);
+        let hash_b = block_hash(&block_b);
+        assert_ne!(hash_a, hash_b);
+
+        // Both candidates are tracked (v2 keeps competing blocks).
+        assert!(engine.accept_block(&block_a, &[]));
+        assert!(engine.accept_block(&block_b, &[]));
+
+        // Initial split: {v1,v2} -> A, {v3,v4} -> B. Quorum for 5 is 4; neither
+        // side has it, so nothing finalizes yet.
+        engine.accept_attestation(ids[1], next_h, hash_a);
+        engine.accept_attestation(ids[2], next_h, hash_a);
+        engine.accept_attestation(ids[3], next_h, hash_b);
+        engine.accept_attestation(ids[4], next_h, hash_b);
+        assert_eq!(engine.height(), head_h, "2/2 split must not finalize");
+
+        // v3 and v4 CHANGE their vote to A (as fork choice would converge them).
+        // Under v1 these would be rejected as duplicates; under v2 they replace
+        // the earlier vote, giving A four votes -> quorum -> finalize.
+        engine.accept_attestation(ids[3], next_h, hash_a);
+        engine.accept_attestation(ids[4], next_h, hash_a);
+
+        assert_eq!(engine.height(), next_h, "vote-change converged -> block A finalized");
+        let finalized = engine.get_block(next_h).unwrap();
+        assert_eq!(block_hash(&finalized.header), hash_a, "the converged hash finalized");
     }
 
     #[test]

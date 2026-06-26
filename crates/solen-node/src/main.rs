@@ -168,6 +168,14 @@ struct Cli {
     /// in an isolated cluster — point it at a peer's RPC.
     #[arg(long)]
     resync_url: Vec<String>,
+
+    /// Activation height for attestation-aware fork choice (v2), which fixes the
+    /// competing-block liveness deadlock that can wedge the chain when ≥2
+    /// validators drop. Default u64::MAX = OFF (dormant). To activate: deploy
+    /// this binary to EVERY node first, then restart all with the SAME value
+    /// (a future height) — a flag-day. Differing values across nodes is unsafe.
+    #[arg(long, default_value_t = u64::MAX)]
+    fork_choice_v2_height: u64,
 }
 
 #[tokio::main]
@@ -784,6 +792,11 @@ async fn main() -> anyhow::Result<()> {
         validator_id,
         chain_id: genesis.chain_id,
         prune: cli.prune,
+        // Attestation-aware fork choice (v2). OFF (u64::MAX) so this binary is
+        // behaviourally identical to the previous one — deploy dormant to the
+        // whole fleet first, then activate at a single agreed height (flag-day).
+        // Set via --fork-choice-v2-height once every node is on this binary.
+        fork_choice_v2_height: cli.fork_choice_v2_height,
     };
 
     let mempool = Mempool::new(50_000);

@@ -174,9 +174,20 @@ impl NetworkService {
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-        let behaviour = SolenBehaviour { gossipsub, kademlia, identify, mdns };
-
         let total_limit = config.max_inbound + config.max_outbound;
+
+        // H-06: actually ENFORCE the configured connection caps. Previously these
+        // values were only logged; libp2p accepted unlimited connections. The
+        // connection-limits behaviour refuses inbound/outbound connections past
+        // the cap (surfaced as IncomingConnectionError, already handled below).
+        let connection_limits = libp2p::connection_limits::Behaviour::new(
+            libp2p::connection_limits::ConnectionLimits::default()
+                .with_max_established_incoming(Some(config.max_inbound as u32))
+                .with_max_established_outgoing(Some(config.max_outbound as u32))
+                .with_max_established(Some(total_limit as u32)),
+        );
+
+        let behaviour = SolenBehaviour { gossipsub, kademlia, identify, mdns, connection_limits };
 
         let mut swarm = SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
@@ -194,7 +205,7 @@ impl NetworkService {
             max_inbound = config.max_inbound,
             max_outbound = config.max_outbound,
             total_limit,
-            "P2P connection limits configured"
+            "P2P connection limits enforced"
         );
 
         // Subscribe to network-specific topics (chain_id prevents cross-network interference).
@@ -342,7 +353,14 @@ impl NetworkService {
                             )) => {
                                 // Check if peer is banned.
                                 if peer_reputation.is_banned(&propagation_source) {
-                                    continue; // silently drop all messages from banned peers
+                                    // H-08: a ban now DISCONNECTS the peer (freeing its
+                                    // connection slot) instead of only silently dropping
+                                    // its messages while it keeps relaying and holding a
+                                    // slot. The only ban trigger today is repeated
+                                    // undecodable messages, so this targets genuine
+                                    // garbage-senders.
+                                    let _ = swarm.disconnect_peer_id(propagation_source);
+                                    continue;
                                 }
 
                                 // Global inbound bytes rate limit.

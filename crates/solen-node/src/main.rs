@@ -946,6 +946,14 @@ async fn main() -> anyhow::Result<()> {
             // Track repeated sync requests to rate-limit stuck peers.
             let mut sync_serve_tracker: std::collections::HashMap<u64, (std::time::Instant, u32)> =
                 std::collections::HashMap::new();
+            // H-07: GLOBAL sync-serve throttle (window_start, count). The per-range
+            // limiter is keyed on from_height, so an attacker requesting many
+            // distinct ranges bypasses it — each serve broadcasts up to 100 blocks
+            // to the whole mesh (amplification). This caps total SyncBlocks
+            // broadcasts per second across ALL ranges. Because a serve is a
+            // broadcast (one response reaches every peer needing that range), a
+            // small global budget still covers legitimate fleet-wide catch-up.
+            let mut sync_serve_global: (std::time::Instant, u32) = (std::time::Instant::now(), 0);
             let mut sync_fail_count: u32 = 0;
             let mut fork_mismatch_detected = false;
             let mut bad_state_roots: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
@@ -1210,6 +1218,21 @@ async fn main() -> anyhow::Result<()> {
                         if sync_serve_tracker.len() > 1000 {
                             sync_serve_tracker.retain(|_, (t, _)| now.duration_since(*t) < std::time::Duration::from_secs(60));
                         }
+
+                        // H-07: global cap on sync-serve broadcasts/sec (across all
+                        // ranges) to bound amplification from distinct-range floods.
+                        let should_serve = should_serve && {
+                            const MAX_SYNC_SERVES_PER_SEC: u32 = 8;
+                            if now.duration_since(sync_serve_global.0) >= std::time::Duration::from_secs(1) {
+                                sync_serve_global = (now, 1);
+                                true
+                            } else if sync_serve_global.1 < MAX_SYNC_SERVES_PER_SEC {
+                                sync_serve_global.1 += 1;
+                                true
+                            } else {
+                                false
+                            }
+                        };
 
                         if !should_serve {
                             tracing::debug!(from = from_height, "ignoring repeated sync request (rate limited)");

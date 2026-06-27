@@ -176,6 +176,15 @@ struct Cli {
     /// (a future height) — a flag-day. Differing values across nodes is unsafe.
     #[arg(long, default_value_t = u64::MAX)]
     fork_choice_v2_height: u64,
+
+    /// Activation height for the supply-conserving fee settlement + max_fee cap
+    /// (C-01 / H-01). Below it the legacy settlement runs (byte-for-byte); at/above
+    /// it the treasury is credited only what the sender was actually debited and
+    /// the fee is capped at the signed max_fee. Default u64::MAX = OFF (dormant).
+    /// CONSENSUS-AFFECTING: deploy this binary to EVERY node first, then restart
+    /// all with the SAME value (a flag-day). Differing values across nodes is unsafe.
+    #[arg(long, default_value_t = u64::MAX)]
+    fee_fix_height: u64,
 }
 
 #[tokio::main]
@@ -797,6 +806,8 @@ async fn main() -> anyhow::Result<()> {
         // whole fleet first, then activate at a single agreed height (flag-day).
         // Set via --fork-choice-v2-height once every node is on this binary.
         fork_choice_v2_height: cli.fork_choice_v2_height,
+        // Set via --fee-fix-height once every node is on this binary (flag-day).
+        fee_fix_height: cli.fee_fix_height,
     };
 
     let mempool = Mempool::new(50_000);

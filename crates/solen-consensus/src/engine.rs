@@ -58,6 +58,13 @@ pub struct EngineConfig {
     /// behaviourally identical to the old one until an activation height is set
     /// (flag-day: deploy dormant everywhere, then activate at one height).
     pub fork_choice_v2_height: u64,
+    /// Activation height for the supply-conserving fee settlement + max_fee cap
+    /// (C-01 / H-01). Below it the executor applies the legacy settlement
+    /// byte-for-byte; at/above it the treasury is credited only what the sender
+    /// was actually debited and the fee is capped at the signed max_fee. Like
+    /// fork_choice_v2_height this is CONSENSUS-AFFECTING, so it defaults to
+    /// u64::MAX = OFF (deploy dormant everywhere, then activate at one height).
+    pub fee_fix_height: u64,
 }
 
 impl Default for EngineConfig {
@@ -69,6 +76,7 @@ impl Default for EngineConfig {
             chain_id: 0,
             prune: false,
             fork_choice_v2_height: u64::MAX,
+            fee_fix_height: u64::MAX,
         }
     }
 }
@@ -302,11 +310,14 @@ impl ConsensusEngine {
         epoch_manager.current_epoch = restored_epoch;
 
         let chain_id = config.chain_id;
+        let fee_fix_height = config.fee_fix_height;
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
             mempool,
-            executor: BlockExecutor::new().with_chain_id(chain_id),
+            executor: BlockExecutor::new()
+                .with_chain_id(chain_id)
+                .with_fee_fix_height(fee_fix_height),
             signing_keypair: None, // set via set_signing_keypair() after construction
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),

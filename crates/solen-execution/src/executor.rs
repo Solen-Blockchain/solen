@@ -346,6 +346,12 @@ pub struct BlockExecutor {
     fee_config: FeeConfig,
     vm_runtime: solen_vm::runtime::VmRuntime,
     chain_id: u64,
+    /// Block height at/after which the supply-conserving fee settlement and the
+    /// max_fee cap (C-01 / H-01) take effect. Below it, the legacy settlement is
+    /// applied byte-for-byte. This is a CONSENSUS-AFFECTING activation: every
+    /// node must agree on the height so they compute identical state roots
+    /// across the switch. Default u64::MAX = off (legacy behavior everywhere).
+    fee_fix_height: u64,
 }
 
 impl BlockExecutor {
@@ -354,6 +360,7 @@ impl BlockExecutor {
             fee_config: FeeConfig::default(),
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
             chain_id: 0,
+            fee_fix_height: u64::MAX,
         }
     }
 
@@ -362,11 +369,18 @@ impl BlockExecutor {
             fee_config,
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
             chain_id: 0,
+            fee_fix_height: u64::MAX,
         }
     }
 
     pub fn with_chain_id(mut self, chain_id: u64) -> Self {
         self.chain_id = chain_id;
+        self
+    }
+
+    /// Set the activation height for the C-01/H-01 fee-settlement fix.
+    pub fn with_fee_fix_height(mut self, height: u64) -> Self {
+        self.fee_fix_height = height;
         self
     }
 
@@ -783,8 +797,11 @@ impl BlockExecutor {
                 let mut state = StateManager::new(store);
                 let _ = state.consume_nonce(&op.sender, op.nonce);
             }
-            // H-01: cap the failed-op fee at the signed max_fee as well.
-            let actual_fee = self.fee_config.calculate_fee(gas_used).min(op.max_fee);
+            // H-01: cap the failed-op fee at the signed max_fee as well (gated).
+            let actual_fee = {
+                let f = self.fee_config.calculate_fee(gas_used);
+                if height >= self.fee_fix_height { f.min(op.max_fee) } else { f }
+            };
             if actual_fee > 0 {
                 let mut state = StateManager::new(store);
                 if let Ok(mut acct) = state.require_account(&op.sender) {
@@ -815,35 +832,37 @@ impl BlockExecutor {
                 fee_config.burn_rate_bps = u64::from_le_bytes(buf);
             }
         }
-        // H-01: never charge the sender more than the max_fee they signed. The
-        // signed payload commits to max_fee, so honoring it as a hard cap is the
-        // authorization the sender granted (real clients set 100k–1M; 0 means
-        // "authorize no fee"). This also closes the path that fed C-01: a
-        // computed fee exceeding the reserve.
-        let total_fee = fee_config.calculate_fee(gas_used).min(op.max_fee);
+        // Fee settlement, gated by fee_fix_height (C-01 / H-01). When active:
+        //  * H-01: never charge more than the signed max_fee. The signed payload
+        //    commits to max_fee, so honoring it as a hard cap is the authorization
+        //    the sender granted (real clients set 100k–1M).
+        //  * C-01: split the amount ACTUALLY debited between treasury and burn, so
+        //    credited + burned == debited exactly. The legacy path credited a
+        //    share of the *intended* total_fee even when the saturating debit
+        //    charged the sender less (insufficient balance), minting the shortfall.
+        // Below the gate the legacy arithmetic is reproduced byte-for-byte so the
+        // state root is identical across the activation boundary on every node.
+        let fix_active = height >= self.fee_fix_height;
+        let total_fee = {
+            let f = fee_config.calculate_fee(gas_used);
+            if fix_active { f.min(op.max_fee) } else { f }
+        };
         if max_possible_fee > 0 || total_fee > 0 {
             let mut state = StateManager::new(store);
             if let Ok(Some(mut sender_acct)) = state.get_account(&op.sender) {
-                // Refund the reserved max fee, then charge the actual fee — but
-                // never more than the sender can actually pay. The amount truly
-                // debited (fee_paid) is what we split between treasury and burn,
-                // so credited + burned == debited exactly.
-                //
-                // C-01: previously the treasury was credited a share of the
-                // *intended* total_fee even when the saturating debit charged the
-                // sender less than that (insufficient balance), minting the
-                // shortfall into existence. Splitting the actually-debited amount
-                // makes fee settlement supply-conserving by construction.
+                // Refund the reserved max fee, then charge the fee. When active,
+                // fee_paid is clamped to what the sender can actually pay and is
+                // the basis for the treasury split; legacy uses the intended fee
+                // for both (which is where the mint came from).
                 let available = sender_acct.balance.saturating_add(max_possible_fee);
-                let fee_paid = total_fee.min(available);
-                sender_acct.balance = available - fee_paid;
+                let fee_paid = if fix_active { total_fee.min(available) } else { total_fee };
+                sender_acct.balance = available.saturating_sub(fee_paid);
                 save_or_warn(&mut state, &sender_acct);
 
-                // Credit treasury with the non-burned portion of what was paid.
-                // The burned remainder (fee_paid - treasury_share) is permanently
+                // Credit treasury with the non-burned portion. When active,
+                // treasury_share = fee_paid*(10000-burn_bps)/10000 <= fee_paid, so
+                // the credit can never exceed the debit. The burned remainder is
                 // removed from circulation by not being credited to any account.
-                // treasury_share = fee_paid * (10000 - burn_bps) / 10000 <= fee_paid,
-                // so the credit can never exceed the debit.
                 let treasury_share = fee_config.treasury_amount(fee_paid);
                 if treasury_share > 0 {
                     if let Ok(Some(mut treasury)) =
@@ -1862,7 +1881,8 @@ mod tests {
             base_fee_per_gas: 1_000_000,
             burn_rate_bps: 0, // entire fee -> treasury, so any mint shows there
             treasury_account: treasury_id(),
-        });
+        })
+        .with_fee_fix_height(0); // fix active from genesis
 
         let supply = |store: &mut MemoryStore| -> u128 {
             let mut s = StateManager::new(store);
@@ -1902,6 +1922,63 @@ mod tests {
             treasury_after <= alice_debited,
             "treasury credited {treasury_after} but sender only paid {alice_debited}"
         );
+    }
+
+    /// The fee-fix activation height gates behavior at the exact boundary: a
+    /// block below it uses the legacy (minting) settlement; a block at/after it
+    /// is supply-conserving. This is what makes C-01/H-01 deployable as a
+    /// consensus-affecting, coordinated activation rather than a flag-day.
+    #[test]
+    fn fee_fix_height_gates_settlement_at_boundary() {
+        const GATE: u64 = 100;
+        let fee_cfg = || FeeConfig {
+            base_fee_per_gas: 1_000_000,
+            burn_rate_bps: 0,
+            treasury_account: treasury_id(),
+        };
+        let make_op = |kp: &Keypair, alice: AccountId, bob: AccountId, ex: &BlockExecutor| {
+            let mut op = UserOperation {
+                sender: alice,
+                nonce: 0,
+                actions: vec![Action::Transfer { to: bob, amount: 0 }],
+                max_fee: u128::MAX,
+                signature: vec![],
+            };
+            sign_op(kp, ex, &mut op);
+            op
+        };
+        let supply = |store: &mut MemoryStore, alice: &AccountId, bob: &AccountId| -> u128 {
+            let mut s = StateManager::new(store);
+            s.get_balance(alice).unwrap()
+                + s.get_balance(bob).unwrap()
+                + s.get_balance(&treasury_id()).unwrap()
+        };
+
+        // Below the gate (height GATE-1): legacy path mints (supply grows).
+        {
+            let (mut store, kp, alice, bob) = setup();
+            let ex = BlockExecutor::with_fee_config(fee_cfg()).with_fee_fix_height(GATE);
+            let before = supply(&mut store, &alice, &bob);
+            let op = make_op(&kp, alice, bob, &ex);
+            ex.execute_block_with_height(&mut store, &[op], GATE - 1);
+            assert!(
+                supply(&mut store, &alice, &bob) > before,
+                "below the gate, legacy settlement must mint (proves the gate is off)"
+            );
+        }
+
+        // At the gate (height GATE): fixed path conserves supply (no mint).
+        {
+            let (mut store, kp, alice, bob) = setup();
+            let ex = BlockExecutor::with_fee_config(fee_cfg()).with_fee_fix_height(GATE);
+            let before = supply(&mut store, &alice, &bob);
+            let op = make_op(&kp, alice, bob, &ex);
+            ex.execute_block_with_height(&mut store, &[op], GATE);
+            assert!(
+                supply(&mut store, &alice, &bob) <= before,
+                "at the gate, fixed settlement must not mint"
+            );
+        }
     }
 
     #[test]

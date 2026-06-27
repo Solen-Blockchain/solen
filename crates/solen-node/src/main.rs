@@ -193,6 +193,14 @@ struct Cli {
     /// reversible by restarting without the flag.
     #[arg(long, default_value_t = false)]
     authenticate_sync_blocks: bool,
+
+    /// Activation height for the WASM determinism hardening (C-04 bounded linear
+    /// memory + C-05 deterministic relaxed-SIMD), which closes heterogeneous-host
+    /// state-root forks. Default u64::MAX = OFF (dormant). CONSENSUS-AFFECTING:
+    /// deploy this binary to EVERY node first, then restart all with the SAME
+    /// value (a flag-day). Differing values across nodes is unsafe.
+    #[arg(long, default_value_t = u64::MAX)]
+    determinism_fix_height: u64,
 }
 
 #[tokio::main]
@@ -818,6 +826,8 @@ async fn main() -> anyhow::Result<()> {
         fee_fix_height: cli.fee_fix_height,
         // Set via --authenticate-sync-blocks once every node is on this binary.
         authenticate_sync_blocks: cli.authenticate_sync_blocks,
+        // Set via --determinism-fix-height once every node is on this binary (flag-day).
+        determinism_fix_height: cli.determinism_fix_height,
     };
 
     let mempool = Mempool::new(50_000);

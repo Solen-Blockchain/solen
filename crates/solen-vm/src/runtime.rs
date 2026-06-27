@@ -16,38 +16,87 @@ use crate::VmError;
 /// Store data: the HostContext lives inside the wasmtime Store.
 struct StoreData {
     ctx: HostContext,
+    /// Deterministic resource limits. In strict (post-gate) mode this caps WASM
+    /// linear-memory growth so `memory.grow` succeeds/fails identically on every
+    /// node regardless of host RAM (C-04). Default = no limits (legacy).
+    limits: StoreLimits,
 }
 
-/// Cached WASM runtime with pre-linked instances.
+/// Maximum WASM linear memory per instance in strict mode (C-04). Chosen well
+/// above any legitimate contract's needs but small enough that EVERY validator
+/// can always satisfy it — so `memory.grow` outcomes depend only on this fixed
+/// bound, never on a node's available RAM. 64 MiB = 1024 wasm pages.
+const MAX_WASM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Build the wasmtime config. `strict` enables the determinism hardening
+/// (C-04/C-05) gated by `determinism_fix_height`. NaN canonicalization and fuel
+/// metering are always on; the strict config additionally pins relaxed-SIMD to a
+/// deterministic lowering so heterogeneous CPUs cannot diverge (C-05). Memory
+/// bounding (C-04) is applied per-Store, not here.
+fn build_config(strict: bool) -> Config {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    // Canonicalize NaN values to ensure deterministic float behavior across all
+    // platforms. Without this, different validators could produce different
+    // state roots from the same WASM execution.
+    config.cranelift_nan_canonicalization(true);
+    if strict {
+        // C-05: relaxed-SIMD is enabled-by-default in wasmtime and is permitted
+        // to lower to hardware-dependent results — a heterogeneous-fleet
+        // consensus fork. Force the deterministic lowering (keeps the feature
+        // working, removes the nondeterminism). NaN canonicalization does NOT
+        // cover relaxed-SIMD lane ops, so this is required separately.
+        config.relaxed_simd_deterministic(true);
+    }
+    config
+}
+
+/// Cached WASM runtime with pre-linked instances. Holds two engines: a `legacy`
+/// engine (pre-gate behavior, byte-for-byte) and a `strict` engine (C-04/C-05
+/// determinism hardening). The engine used per execution is chosen by block
+/// height vs `determinism_fix_height`, so the switch is a coordinated,
+/// consensus-affecting activation (all nodes flip at the same height).
 pub struct VmRuntime {
     engine: Engine,
-    /// Cache of pre-linked instances keyed by code hash.
-    /// InstancePre has all host functions linked — instantiation only
-    /// allocates memory and runs start functions.
+    engine_strict: Engine,
+    /// Cache of pre-linked instances keyed by code hash (legacy engine).
     pre_cache: Mutex<HashMap<[u8; 32], InstancePre<StoreData>>>,
-    /// Shared linker with all host functions registered.
+    /// Same, for the strict engine (instances are engine-specific).
+    pre_cache_strict: Mutex<HashMap<[u8; 32], InstancePre<StoreData>>>,
+    /// Linkers with all host functions registered (one per engine).
     linker: Linker<StoreData>,
+    linker_strict: Linker<StoreData>,
+    /// Block height at/after which strict determinism config applies. u64::MAX =
+    /// off (legacy everywhere).
+    determinism_fix_height: u64,
 }
 
 impl VmRuntime {
     pub fn new() -> Result<Self, VmError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        // Canonicalize NaN values to ensure deterministic float behavior
-        // across all platforms. Without this, different validators could
-        // produce different state roots from the same WASM execution.
-        config.cranelift_nan_canonicalization(true);
-        let engine =
-            Engine::new(&config).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+        let engine = Engine::new(&build_config(false))
+            .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+        let engine_strict = Engine::new(&build_config(true))
+            .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
 
         let mut linker = Linker::new(&engine);
         register_host_functions_typed(&mut linker)?;
+        let mut linker_strict = Linker::new(&engine_strict);
+        register_host_functions_typed(&mut linker_strict)?;
 
         Ok(Self {
             engine,
+            engine_strict,
             pre_cache: Mutex::new(HashMap::new()),
+            pre_cache_strict: Mutex::new(HashMap::new()),
             linker,
+            linker_strict,
+            determinism_fix_height: u64::MAX,
         })
+    }
+
+    /// Set the activation height for the C-04/C-05 determinism hardening.
+    pub fn set_determinism_fix_height(&mut self, height: u64) {
+        self.determinism_fix_height = height;
     }
 
     /// Validate WASM bytecode without executing it. Checks that the module
@@ -69,7 +118,8 @@ impl VmRuntime {
         Ok(())
     }
 
-    /// Execute a contract using pre-linked instances.
+    /// Execute a contract using pre-linked instances. Strict determinism config
+    /// (C-04/C-05) applies when the executing block height is at/after the gate.
     pub fn execute(
         &self,
         code_hash: &[u8; 32],
@@ -78,23 +128,34 @@ impl VmRuntime {
         ctx: HostContext,
         fuel_limit: Option<u64>,
     ) -> Result<ExecutionResult, VmError> {
-        let pre = self.get_or_prelink(code_hash, bytecode)?;
-        execute_pre(&self.engine, &pre, input, ctx, fuel_limit)
+        let strict = ctx.block_height >= self.determinism_fix_height;
+        if strict {
+            let pre = Self::get_or_prelink(
+                &self.engine_strict, &self.linker_strict, &self.pre_cache_strict, code_hash, bytecode,
+            )?;
+            execute_pre(&self.engine_strict, &pre, input, ctx, fuel_limit, true)
+        } else {
+            let pre = Self::get_or_prelink(
+                &self.engine, &self.linker, &self.pre_cache, code_hash, bytecode,
+            )?;
+            execute_pre(&self.engine, &pre, input, ctx, fuel_limit, false)
+        }
     }
 
     fn get_or_prelink(
-        &self,
+        engine: &Engine,
+        linker: &Linker<StoreData>,
+        cache: &Mutex<HashMap<[u8; 32], InstancePre<StoreData>>>,
         code_hash: &[u8; 32],
         bytecode: &[u8],
     ) -> Result<InstancePre<StoreData>, VmError> {
-        let mut cache = self.pre_cache.lock().unwrap();
+        let mut cache = cache.lock().unwrap();
         if let Some(pre) = cache.get(code_hash) {
             return Ok(pre.clone());
         }
-        let module = Module::new(&self.engine, bytecode)
+        let module = Module::new(engine, bytecode)
             .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
-        let pre = self
-            .linker
+        let pre = linker
             .instantiate_pre(&module)
             .map_err(|e| VmError::Trap(e.to_string()))?;
         // Evict oldest entries if cache exceeds limit to prevent memory DoS.
@@ -114,17 +175,28 @@ impl VmRuntime {
     }
 }
 
-/// Execute using a pre-linked instance (fast path).
+/// Execute using a pre-linked instance (fast path). In `strict` mode a
+/// deterministic memory limiter is installed (C-04).
 fn execute_pre(
     engine: &Engine,
     pre: &InstancePre<StoreData>,
     input: &[u8],
     ctx: HostContext,
     fuel_limit: Option<u64>,
+    strict: bool,
 ) -> Result<ExecutionResult, VmError> {
     let fuel = fuel_limit.unwrap_or(DEFAULT_FUEL_LIMIT);
 
-    let mut store = Store::new(engine, StoreData { ctx });
+    let limits = if strict {
+        StoreLimitsBuilder::new().memory_size(MAX_WASM_MEMORY_BYTES).build()
+    } else {
+        StoreLimits::default()
+    };
+    let mut store = Store::new(engine, StoreData { ctx, limits });
+    if strict {
+        // Bound linear-memory growth deterministically (C-04).
+        store.limiter(|data| &mut data.limits);
+    }
     store.set_fuel(fuel).unwrap();
 
     let instance = pre
@@ -134,18 +206,17 @@ fn execute_pre(
     run_instance(&mut store, &instance, input, fuel)
 }
 
-/// Execute a WASM contract (standalone, no caching).
+/// Execute a WASM contract (standalone, no caching). Legacy config (no gate);
+/// used by tests/utilities, not the consensus block path (which goes through
+/// `VmRuntime::execute`).
 pub fn execute(
     bytecode: &[u8],
     input: &[u8],
     ctx: HostContext,
     fuel_limit: Option<u64>,
 ) -> Result<ExecutionResult, VmError> {
-    let mut config = Config::new();
-    config.consume_fuel(true);
-    config.cranelift_nan_canonicalization(true);
-
-    let engine = Engine::new(&config).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+    let engine = Engine::new(&build_config(false))
+        .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
     let module =
         Module::new(&engine, bytecode).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
 
@@ -153,7 +224,7 @@ pub fn execute(
     register_host_functions_typed(&mut linker)?;
 
     let fuel = fuel_limit.unwrap_or(DEFAULT_FUEL_LIMIT);
-    let mut store = Store::new(&engine, StoreData { ctx });
+    let mut store = Store::new(&engine, StoreData { ctx, limits: StoreLimits::default() });
     store.set_fuel(fuel).unwrap();
 
     let instance = linker
@@ -657,6 +728,46 @@ mod tests {
             execute(b"not wasm", &[], HostContext::new([0u8; 32], 1), None),
             Err(VmError::InvalidBytecode(_))
         ));
+    }
+
+    // Tries to grow linear memory by 2000 pages (~131 MB) and returns the
+    // memory.grow result: the previous page count on success, or -1 if denied.
+    const MEM_BOMB_CONTRACT: &str = r#"
+    (module
+        (import "env" "set_return_data" (func $srd (param i32 i32)))
+        (memory (export "memory") 1)
+        (func (export "call") (param i32 i32) (result i32)
+            (i32.store (i32.const 0) (memory.grow (i32.const 2000)))
+            (call $srd (i32.const 0) (i32.const 4))
+            (i32.const 4)
+        )
+    )
+    "#;
+
+    /// Security (C-04): with the determinism fix active, WASM linear-memory
+    /// growth is capped deterministically (memory.grow beyond the bound returns
+    /// -1 identically on every node, independent of host RAM); with it off the
+    /// growth is unbounded (legacy).
+    #[test]
+    fn determinism_fix_caps_memory_growth_when_active() {
+        let wasm = wat::parse_str(MEM_BOMB_CONTRACT).expect("WAT parse failed");
+        let code_hash = solen_crypto::blake3_hash(&wasm);
+
+        // Strict (gate at 0): a block at height 5 >= 0 runs strict -> grow denied.
+        let mut strict = VmRuntime::new().unwrap();
+        strict.set_determinism_fix_height(0);
+        let r = strict
+            .execute(&code_hash, &wasm, &[], HostContext::new([0u8; 32], 5), None)
+            .unwrap();
+        assert_eq!(r.return_data, (-1i32).to_le_bytes(), "strict mode must deny the oversized growth");
+
+        // Legacy (gate u64::MAX): height 5 < MAX -> legacy -> grow succeeds
+        // (returns previous size = 1 page).
+        let legacy = VmRuntime::new().unwrap();
+        let r2 = legacy
+            .execute(&code_hash, &wasm, &[], HostContext::new([0u8; 32], 5), None)
+            .unwrap();
+        assert_eq!(r2.return_data, 1i32.to_le_bytes(), "legacy mode allows the growth");
     }
 
     #[test]

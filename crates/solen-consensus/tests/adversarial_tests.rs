@@ -52,6 +52,7 @@ fn setup_engine() -> (ConsensusEngine, Keypair, [u8; 32], [u8; 32]) {
         fork_choice_v2_height: u64::MAX,
         fee_fix_height: u64::MAX,
         authenticate_sync_blocks: false,
+        determinism_fix_height: u64::MAX,
     };
 
     let mempool = Mempool::new(1000);

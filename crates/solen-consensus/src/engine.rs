@@ -74,6 +74,13 @@ pub struct EngineConfig {
     /// false so it deploys dormant and is activated fleet-wide deliberately
     /// (instantly reversible by restarting without the flag).
     pub authenticate_sync_blocks: bool,
+    /// Activation height for the WASM determinism hardening (C-04 bounded linear
+    /// memory + C-05 deterministic relaxed-SIMD). Below it the VM uses the legacy
+    /// config byte-for-byte; at/above it the strict config applies. Like the
+    /// other height gates this is CONSENSUS-AFFECTING (changes execution results
+    /// for memory-growing / relaxed-SIMD contracts), so it defaults to u64::MAX =
+    /// OFF (deploy dormant everywhere, then activate at one height).
+    pub determinism_fix_height: u64,
 }
 
 impl Default for EngineConfig {
@@ -87,6 +94,7 @@ impl Default for EngineConfig {
             fork_choice_v2_height: u64::MAX,
             fee_fix_height: u64::MAX,
             authenticate_sync_blocks: false,
+            determinism_fix_height: u64::MAX,
         }
     }
 }
@@ -321,13 +329,15 @@ impl ConsensusEngine {
 
         let chain_id = config.chain_id;
         let fee_fix_height = config.fee_fix_height;
+        let determinism_fix_height = config.determinism_fix_height;
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
             mempool,
             executor: BlockExecutor::new()
                 .with_chain_id(chain_id)
-                .with_fee_fix_height(fee_fix_height),
+                .with_fee_fix_height(fee_fix_height)
+                .with_determinism_fix_height(determinism_fix_height),
             signing_keypair: None, // set via set_signing_keypair() after construction
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),

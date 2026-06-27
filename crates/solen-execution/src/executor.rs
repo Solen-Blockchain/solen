@@ -384,6 +384,14 @@ impl BlockExecutor {
         self
     }
 
+    /// Set the activation height for the C-04/C-05 WASM determinism hardening
+    /// (deterministic relaxed-SIMD + bounded linear memory). Below it the VM runs
+    /// the legacy config byte-for-byte; at/above it the strict config applies.
+    pub fn with_determinism_fix_height(mut self, height: u64) -> Self {
+        self.vm_runtime.set_determinism_fix_height(height);
+        self
+    }
+
     /// Execute a batch of user operations, returning the block result.
     ///
     /// Each operation is executed independently — a failure in one does not

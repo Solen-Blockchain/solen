@@ -587,6 +587,16 @@ async fn publish_contract_source(
             return Json(serde_json::json!({"success": false, "error": "source too large"}));
         }
 
+        // H-14: only accept source for a contract that ACTUALLY EXISTS on-chain.
+        // The endpoint is unauthenticated and the per-code_hash rate limit is
+        // trivially bypassed with fresh hashes, so without this an attacker could
+        // persist up to 256KB of arbitrary data under any of 2^256 hashes
+        // (durable storage-bloat DoS). Binding to deployed bytecode caps the
+        // total set of storable sources to the real contract population.
+        if !contract_bytecode_exists(&state, &code_hash) {
+            return Json(serde_json::json!({"success": false, "error": "no deployed contract with this code_hash"}));
+        }
+
         // Rate limit: reject if source was published recently (within 1 hour).
         let store = state.store.read().unwrap();
         if let Some(existing) = store.contract_sources.get(&code_hash) {

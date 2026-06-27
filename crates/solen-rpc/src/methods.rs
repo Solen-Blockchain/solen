@@ -1621,9 +1621,18 @@ impl SolenApiServer for SolenRpc {
             });
         }
 
+        // H-10: bound the work this unauthenticated RPC can trigger. Each
+        // paymaster runs WASM, so cap both the number of paymasters checked and
+        // the per-paymaster fuel (a read-only view budget, like call_view), and
+        // build the VM runtime ONCE outside the loop (VmRuntime::new now builds
+        // two wasmtime engines, so per-iteration construction is costly).
+        const SPONSOR_VIEW_FUEL: u64 = 500_000;
+        const MAX_PAYMASTERS_CHECKED: usize = 16;
+        let vm = solen_vm::runtime::VmRuntime::new().map_err(|e| internal_error(e))?;
+
         // Simulate a view call to each paymaster's willSponsor method.
         let op_bytes = serde_json::to_vec(&op).unwrap_or_default();
-        for pm in &paymasters {
+        for pm in paymasters.iter().take(MAX_PAYMASTERS_CHECKED) {
             let state = ReadonlyStateManager::new(store.as_ref());
             let account = match state.get_account(pm) {
                 Ok(Some(a)) if a.code_hash != [0u8; 32] => a,
@@ -1656,12 +1665,7 @@ impl SolenApiServer for SolenRpc {
                 self_balance: 0,
             };
 
-            let vm = match solen_vm::runtime::VmRuntime::new() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if let Ok(result) = vm.execute(&account.code_hash, &bytecode, &input, ctx, None) {
+            if let Ok(result) = vm.execute(&account.code_hash, &bytecode, &input, ctx, Some(SPONSOR_VIEW_FUEL)) {
                 if !result.return_data.is_empty() && result.return_data[0] == 1 {
                     let max_gas = if result.return_data.len() >= 17 {
                         let mut buf = [0u8; 16];

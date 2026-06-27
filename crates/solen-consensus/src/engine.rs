@@ -65,6 +65,15 @@ pub struct EngineConfig {
     /// fork_choice_v2_height this is CONSENSUS-AFFECTING, so it defaults to
     /// u64::MAX = OFF (deploy dormant everywhere, then activate at one height).
     pub fee_fix_height: u64,
+    /// Authenticate blocks received over the sync path (C-02). When true,
+    /// `replay_synced_block` rejects any synced block whose header is not signed
+    /// by an active validator (proposer in the set + valid proposer signature),
+    /// closing the block-forgery / fake-chain-injection / eclipse vector where an
+    /// unsolicited SyncBlocks could inject attacker-crafted blocks. Honest sync
+    /// is unaffected (real blocks carry valid proposer signatures). Defaults to
+    /// false so it deploys dormant and is activated fleet-wide deliberately
+    /// (instantly reversible by restarting without the flag).
+    pub authenticate_sync_blocks: bool,
 }
 
 impl Default for EngineConfig {
@@ -77,6 +86,7 @@ impl Default for EngineConfig {
             prune: false,
             fork_choice_v2_height: u64::MAX,
             fee_fix_height: u64::MAX,
+            authenticate_sync_blocks: false,
         }
     }
 }
@@ -2413,6 +2423,29 @@ impl ConsensusEngine {
             return false;
         }
 
+        // C-02: authenticate the synced block before applying it. The sync path
+        // is otherwise unauthenticated — the only integrity gate is the state-root
+        // match below, which an attacker trivially satisfies by computing the root
+        // of their OWN forged operations. Combined with unsolicited SyncBlocks
+        // broadcasts, that lets a peer inject an attacker-crafted, fully-finalized
+        // fake chain (eclipse / forgery). Requiring the header to be signed by an
+        // active validator (proposer in the set + valid proposer signature over
+        // the block hash) means a forger needs a validator's private key. Honest
+        // sync is unaffected — real blocks carry valid proposer signatures, which
+        // travel in the serialized header. Gated by config so it can be activated
+        // fleet-wide deliberately. (Sync deliberately skips the parent-hash and
+        // quorum checks that accept_block does; proposer-signature authentication
+        // is the forgery defense available without a directed-sync/attestation
+        // protocol — see the remediation notes.)
+        if self.config.authenticate_sync_blocks && !self.header_is_validator_signed(header) {
+            warn!(
+                height,
+                proposer = ?&header.proposer[..4],
+                "unauthenticated synced block (bad/absent proposer signature or non-validator) — rejecting"
+            );
+            return false;
+        }
+
         // Execute on the real store but commit ONLY if the state root matches.
         // On mismatch (different fork) the block is reverted, leaving our state
         // untouched, so a wrong-fork block can't corrupt us — the state
@@ -3546,6 +3579,66 @@ mod tests {
         let bh = block_hash(&wrong);
         wrong.proposer_signature = kps[2].sign(&bh).to_vec();
         assert!(!engine.header_is_validator_signed(&wrong));
+    }
+
+    /// Security (C-02): with authenticate_sync_blocks on, replay_synced_block
+    /// rejects a synced block not signed by an active validator (forgery /
+    /// fake-chain injection) while still applying a legitimately validator-signed
+    /// block. With the flag off, the legacy unauthenticated behavior is preserved
+    /// (which is exactly the vulnerability).
+    #[test]
+    fn replay_synced_block_authenticates_when_enabled() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let make_engine = |auth: bool| {
+            let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+            let store = MemoryStore::new();
+            let mempool = Mempool::new(1000);
+            let config = EngineConfig {
+                validator_id: ids[0],
+                authenticate_sync_blocks: auth,
+                ..Default::default()
+            };
+            ConsensusEngine::with_validators(config, Box::new(store), mempool, vs)
+        };
+        // Empty block at height 1 whose state_root matches the unchanged store, so
+        // the only thing under test is the auth gate (not the root check).
+        let build = |engine: &ConsensusEngine, signer: Option<&Keypair>, proposer: [u8; 32]| -> BlockHeader {
+            let empty_root = engine.store().read().unwrap().state_root();
+            let mut h = BlockHeader {
+                height: 1, epoch: 0, parent_hash: [0u8; 32], state_root: empty_root,
+                transactions_root: [0u8; 32], receipts_root: [0u8; 32],
+                proposer, timestamp_ms: 6000, proposer_signature: vec![],
+            };
+            if let Some(kp) = signer {
+                let bh = block_hash(&h);
+                h.proposer_signature = kp.sign(&bh).to_vec();
+            }
+            h
+        };
+
+        // Flag ON: unsigned forgery rejected (chain does not advance); a
+        // validator-signed block applies.
+        let eng = make_engine(true);
+        let forged = build(&eng, None, ids[1]); // valid proposer id, NO signature
+        assert!(!eng.replay_synced_block(&forged, &[], vec![]), "unsigned synced block must be rejected");
+        assert_eq!(eng.height(), 0, "rejected forgery must not advance the chain");
+        let signed = build(&eng, Some(&kps[1]), ids[1]);
+        assert!(eng.replay_synced_block(&signed, &[], vec![]), "validator-signed synced block must apply");
+        assert_eq!(eng.height(), 1);
+
+        // Flag ON: a block signed by a NON-validator key is rejected.
+        let eng2 = make_engine(true);
+        let outsider = Keypair::generate();
+        let foreign = build(&eng2, Some(&outsider), outsider.public_key());
+        assert!(!eng2.replay_synced_block(&foreign, &[], vec![]), "non-validator-signed synced block must be rejected");
+        assert_eq!(eng2.height(), 0);
+
+        // Flag OFF: legacy behavior — the unsigned block is accepted (the bug).
+        let eng3 = make_engine(false);
+        let forged3 = build(&eng3, None, ids[1]);
+        assert!(eng3.replay_synced_block(&forged3, &[], vec![]), "with flag off, legacy path accepts unauthenticated block");
+        assert_eq!(eng3.height(), 1);
     }
 
     #[test]

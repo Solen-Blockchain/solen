@@ -185,6 +185,14 @@ struct Cli {
     /// all with the SAME value (a flag-day). Differing values across nodes is unsafe.
     #[arg(long, default_value_t = u64::MAX)]
     fee_fix_height: u64,
+
+    /// Authenticate blocks received over the sync path (C-02): reject any synced
+    /// block not signed by an active validator, closing the block-forgery /
+    /// fake-chain-injection / eclipse vector. Honest sync is unaffected. Default
+    /// off (deploy dormant); activate fleet-wide deliberately. Instantly
+    /// reversible by restarting without the flag.
+    #[arg(long, default_value_t = false)]
+    authenticate_sync_blocks: bool,
 }
 
 #[tokio::main]
@@ -808,6 +816,8 @@ async fn main() -> anyhow::Result<()> {
         fork_choice_v2_height: cli.fork_choice_v2_height,
         // Set via --fee-fix-height once every node is on this binary (flag-day).
         fee_fix_height: cli.fee_fix_height,
+        // Set via --authenticate-sync-blocks once every node is on this binary.
+        authenticate_sync_blocks: cli.authenticate_sync_blocks,
     };
 
     let mempool = Mempool::new(50_000);

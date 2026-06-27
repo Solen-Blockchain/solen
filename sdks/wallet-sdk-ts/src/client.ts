@@ -14,6 +14,24 @@ import type {
   JsonRpcResponse,
 } from "./types";
 
+/**
+ * JSON.stringify that emits `bigint` values as full-precision integer literals
+ * (e.g. `"amount":340282366920938463463374607431768211455`) instead of throwing.
+ * The node deserializes u128 amount/max_fee from JSON numbers, and serde parses
+ * arbitrary-precision integer literals into u128 — so this preserves the exact
+ * value where plain `number` would round above 2^53−1 (H-13). The replacer wraps
+ * each bigint in a unique alphanumeric marker (JSON-safe, never escaped); the
+ * surrounding quotes are then stripped. The marker only ever encloses `-?\d+`,
+ * so the unquoting regex cannot match ordinary string data.
+ */
+export function stringifyWithBigInt(value: unknown): string {
+  const MARK = "zZbigIntZz";
+  const json = JSON.stringify(value, (_key, v) =>
+    typeof v === "bigint" ? `${MARK}${v}${MARK}` : v,
+  );
+  return json.replace(new RegExp(`"${MARK}(-?\\d+)${MARK}"`, "g"), "$1");
+}
+
 export class SolenClient {
   private url: string;
   private nextId = 1;
@@ -33,7 +51,8 @@ export class SolenClient {
     const response = await fetch(this.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
+      // H-13: bigint-safe serialization so u128 amounts/fees keep full precision.
+      body: stringifyWithBigInt(request),
     });
 
     if (!response.ok) {

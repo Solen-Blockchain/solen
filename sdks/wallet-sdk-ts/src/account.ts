@@ -38,11 +38,16 @@ export class SmartAccount {
     return info.nonce;
   }
 
-  /** Build a transfer operation (unsigned). */
+  /**
+   * Build a transfer operation (unsigned).
+   *
+   * `amount` and `maxFee` are `bigint` (the on-chain u128) — pass `10n`, not
+   * `10`. Using `number` would lose precision above 2^53−1 (H-13).
+   */
   async buildTransfer(
     toHex: string,
-    amount: number,
-    maxFee: number = 10000
+    amount: bigint,
+    maxFee: bigint = 10000n
   ): Promise<UserOperation> {
     const nonce = await this.getNonce();
     return {
@@ -59,7 +64,7 @@ export class SmartAccount {
     targetHex: string,
     method: string,
     args: number[] = [],
-    maxFee: number = 50000
+    maxFee: bigint = 50000n
   ): Promise<UserOperation> {
     const nonce = await this.getNonce();
     return {
@@ -75,7 +80,7 @@ export class SmartAccount {
   async buildDeploy(
     code: number[],
     salt: number[],
-    maxFee: number = 100000
+    maxFee: bigint = 100000n
   ): Promise<UserOperation> {
     const nonce = await this.getNonce();
     return {

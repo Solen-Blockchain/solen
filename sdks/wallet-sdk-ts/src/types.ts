@@ -6,9 +6,15 @@ export interface SolenConfig {
 /** A 32-byte identifier represented as hex string. */
 export type AccountId = string;
 
-/** A single action within a user operation. */
+/**
+ * A single action within a user operation.
+ *
+ * H-13: `amount` is the on-chain u128 and MUST be `bigint`. Using JS `number`
+ * silently loses precision above 2^53−1, so large transfers would encode the
+ * wrong value. The client serializes bigints as full-precision integer literals.
+ */
 export type Action =
-  | { Transfer: { to: AccountId; amount: number } }
+  | { Transfer: { to: AccountId; amount: bigint } }
   | { Call: { target: AccountId; method: string; args: number[] } }
   | { Deploy: { code: number[]; salt: number[] } };
 
@@ -17,7 +23,8 @@ export interface UserOperation {
   sender: number[];
   nonce: number;
   actions: Action[];
-  max_fee: number;
+  /** On-chain u128 fee cap — `bigint` to avoid precision loss (H-13). */
+  max_fee: bigint;
   signature: number[];
 }
 

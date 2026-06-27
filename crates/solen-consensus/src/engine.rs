@@ -1811,7 +1811,18 @@ impl ConsensusEngine {
         // + finalize. A vote for a block we don't yet hold is still recorded, so
         // it counts the moment the block arrives — no early-attestation buffer.
         if self.fc_v2_active(block_height) {
+            // Bound the height an attestation may target. Without this, a Byzantine
+            // validator can sign votes for arbitrary far-future heights (up to
+            // u64::MAX), each creating a new v2_votes entry that GC never reclaims
+            // (v2_finalize/clear_stale_pending only prune h <= current) — unbounded
+            // memory DoS that OOM-crashes every node. Fork choice only ever decides
+            // height()+1, so a small look-ahead window is all that is ever useful:
+            // tolerate brief gossip lead, reject anything past it or already final.
+            const MAX_V2_VOTE_LOOKAHEAD: u64 = 64;
             let before = self.height();
+            if block_height <= before || block_height > before + MAX_V2_VOTE_LOOKAHEAD {
+                return false;
+            }
             self.v2_record_vote(validator_id, block_height, attested_hash);
             return self.height() > before;
         }
@@ -3409,6 +3420,46 @@ mod tests {
         engine.accept_attestation(ids[4], next_h, hash_a);
         assert_eq!(engine.height(), next_h, "four distinct votes finalize");
         assert_eq!(block_hash(&engine.get_block(next_h).unwrap().header), hash_a);
+    }
+
+    /// Security (H-09): under v2 a (validator-signed) attestation for an
+    /// out-of-window height must be rejected and NEVER stored. Without the
+    /// look-ahead bound, one Byzantine validator can sign votes for arbitrary
+    /// far-future heights, each creating a v2_votes entry that GC never reclaims
+    /// (finalize/clear_stale only prune h <= current) -> unbounded memory DoS.
+    #[test]
+    fn v2_rejects_out_of_window_attestation_heights() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        // Observer engine (validator_id not in set) so it never self-votes and we
+        // control exactly which heights enter v2_votes.
+        let config = EngineConfig { validator_id: [99u8; 32], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let current = engine.height();
+        let some_hash = [7u8; 32];
+
+        // Far-future height (the DoS vector): rejected, nothing recorded.
+        assert!(!engine.accept_attestation(ids[1], u64::MAX, some_hash));
+        // Just past the look-ahead window (64): rejected.
+        assert!(!engine.accept_attestation(ids[1], current + 65, some_hash));
+        // Already-finalized / current height: rejected (no point recording).
+        assert!(!engine.accept_attestation(ids[1], current, some_hash));
+        assert!(
+            engine.v2_votes.read().unwrap().is_empty(),
+            "no out-of-window height may be stored in v2_votes"
+        );
+
+        // In-window heights are still recorded (next height + within the window).
+        engine.accept_attestation(ids[1], current + 1, some_hash);
+        engine.accept_attestation(ids[1], current + 64, some_hash);
+        let votes = engine.v2_votes.read().unwrap();
+        assert!(votes.contains_key(&(current + 1)), "next height recorded");
+        assert!(votes.contains_key(&(current + 64)), "window edge recorded");
+        assert_eq!(votes.len(), 2, "only the two in-window heights stored");
     }
 
     #[test]

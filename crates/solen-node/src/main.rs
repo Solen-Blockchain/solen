@@ -1026,17 +1026,32 @@ async fn main() -> anyhow::Result<()> {
                             // Block not accepted — if it's ahead of us, request sync.
                             let our_h = engine_for_p2p.height();
                             if header.height > our_h + 1 {
-                                tracing::info!(
-                                    our_height = our_h,
-                                    block_height = header.height,
-                                    "live block ahead of us — requesting sync"
-                                );
-                                syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
-                                net_height_for_p2p.fetch_max(header.height, std::sync::atomic::Ordering::Relaxed);
-                                net_for_attest.broadcast(NetworkMessage::SyncRequest {
-                                    from_height: our_h + 1,
-                                    to_height: header.height,
-                                });
+                                // C-03: only trust the claimed height if the header
+                                // is actually signed by an active validator. An
+                                // unauthenticated NewBlock with a far-future height
+                                // would otherwise poison network_height (via
+                                // fetch_max) and lock this node into a permanent
+                                // resync DoS — a single forged packet from any peer.
+                                if !engine_for_p2p.header_is_validator_signed(&header) {
+                                    tracing::warn!(
+                                        our_height = our_h,
+                                        block_height = header.height,
+                                        proposer = %account_to_base58(&header.proposer),
+                                        "unauthenticated future block — ignoring (will not move network height)"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        our_height = our_h,
+                                        block_height = header.height,
+                                        "live block ahead of us — requesting sync"
+                                    );
+                                    syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    net_height_for_p2p.fetch_max(header.height, std::sync::atomic::Ordering::Relaxed);
+                                    net_for_attest.broadcast(NetworkMessage::SyncRequest {
+                                        from_height: our_h + 1,
+                                        to_height: header.height,
+                                    });
+                                }
                             }
                         }
                     }

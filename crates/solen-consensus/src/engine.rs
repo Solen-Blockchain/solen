@@ -777,6 +777,35 @@ impl ConsensusEngine {
         self.validator_set.clone()
     }
 
+    /// Verify only that a header was signed by an active validator: proposer is
+    /// in the active set AND the proposer signature is valid over the block
+    /// hash. This deliberately does NOT check height contiguity, parent linkage,
+    /// proposer rotation, or execute the block — it just proves the header is
+    /// not an anonymous forgery.
+    ///
+    /// Used to gate height-tracking / sync triggers (C-03): a single
+    /// unauthenticated `NewBlock` with a far-future height must not be allowed
+    /// to poison a node's view of the network height and lock it into a
+    /// permanent resync DoS. (Rotation is intentionally omitted: a legitimate
+    /// far-future block can fall in a later epoch whose seed we don't yet know,
+    /// which would false-reject; set membership + signature is the right bar for
+    /// "a real validator produced this".)
+    pub fn header_is_validator_signed(&self, header: &BlockHeader) -> bool {
+        if header.proposer_signature.len() != 64 {
+            return false;
+        }
+        {
+            let vs = self.validator_set.read().unwrap();
+            if !vs.active().iter().any(|v| v.id == header.proposer) {
+                return false;
+            }
+        }
+        let bh = block_hash(header);
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&header.proposer_signature);
+        solen_crypto::verify(&header.proposer, &bh, &sig).is_ok()
+    }
+
     pub fn intent_pool(&self) -> Arc<IntentPool> {
         self.intent_pool.clone()
     }
@@ -3471,6 +3500,52 @@ mod tests {
         assert!(votes.contains_key(&(current + 1)), "next height recorded");
         assert!(votes.contains_key(&(current + 64)), "window edge recorded");
         assert_eq!(votes.len(), 2, "only the two in-window heights stored");
+    }
+
+    /// Security (C-03): header_is_validator_signed must accept a header signed by
+    /// an active validator and reject every forgery class, so an unauthenticated
+    /// far-future NewBlock cannot poison network_height.
+    #[test]
+    fn header_is_validator_signed_distinguishes_real_from_forged() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        let config = EngineConfig { validator_id: ids[0], ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let mk = |proposer: [u8; 32], signer: Option<&Keypair>| -> BlockHeader {
+            let mut h = BlockHeader {
+                height: 999_999, // far-future — the poisoning case
+                epoch: 0,
+                parent_hash: [0u8; 32],
+                state_root: [0u8; 32],
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer,
+                timestamp_ms: 0,
+                proposer_signature: vec![],
+            };
+            if let Some(kp) = signer {
+                let bh = block_hash(&h);
+                h.proposer_signature = kp.sign(&bh).to_vec();
+            }
+            h
+        };
+
+        // Real: signed by an active validator over its own block hash.
+        assert!(engine.header_is_validator_signed(&mk(ids[1], Some(&kps[1]))));
+        // Forged: no signature.
+        assert!(!engine.header_is_validator_signed(&mk(ids[1], None)));
+        // Forged: proposer not in the validator set (even if self-signed).
+        let outsider = Keypair::generate();
+        assert!(!engine.header_is_validator_signed(&mk(outsider.public_key(), Some(&outsider))));
+        // Forged: signed by a different key than the claimed proposer.
+        let mut wrong = mk(ids[1], None);
+        let bh = block_hash(&wrong);
+        wrong.proposer_signature = kps[2].sign(&bh).to_vec();
+        assert!(!engine.header_is_validator_signed(&wrong));
     }
 
     #[test]

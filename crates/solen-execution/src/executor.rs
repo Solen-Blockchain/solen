@@ -783,7 +783,8 @@ impl BlockExecutor {
                 let mut state = StateManager::new(store);
                 let _ = state.consume_nonce(&op.sender, op.nonce);
             }
-            let actual_fee = self.fee_config.calculate_fee(gas_used);
+            // H-01: cap the failed-op fee at the signed max_fee as well.
+            let actual_fee = self.fee_config.calculate_fee(gas_used).min(op.max_fee);
             if actual_fee > 0 {
                 let mut state = StateManager::new(store);
                 if let Ok(mut acct) = state.require_account(&op.sender) {
@@ -814,19 +815,36 @@ impl BlockExecutor {
                 fee_config.burn_rate_bps = u64::from_le_bytes(buf);
             }
         }
-        let total_fee = fee_config.calculate_fee(gas_used);
+        // H-01: never charge the sender more than the max_fee they signed. The
+        // signed payload commits to max_fee, so honoring it as a hard cap is the
+        // authorization the sender granted (real clients set 100k–1M; 0 means
+        // "authorize no fee"). This also closes the path that fed C-01: a
+        // computed fee exceeding the reserve.
+        let total_fee = fee_config.calculate_fee(gas_used).min(op.max_fee);
         if max_possible_fee > 0 || total_fee > 0 {
             let mut state = StateManager::new(store);
             if let Ok(Some(mut sender_acct)) = state.get_account(&op.sender) {
-                // Refund the reserved max fee, then deduct actual fee.
-                sender_acct.balance = sender_acct.balance.saturating_add(max_possible_fee);
-                sender_acct.balance = sender_acct.balance.saturating_sub(total_fee);
+                // Refund the reserved max fee, then charge the actual fee — but
+                // never more than the sender can actually pay. The amount truly
+                // debited (fee_paid) is what we split between treasury and burn,
+                // so credited + burned == debited exactly.
+                //
+                // C-01: previously the treasury was credited a share of the
+                // *intended* total_fee even when the saturating debit charged the
+                // sender less than that (insufficient balance), minting the
+                // shortfall into existence. Splitting the actually-debited amount
+                // makes fee settlement supply-conserving by construction.
+                let available = sender_acct.balance.saturating_add(max_possible_fee);
+                let fee_paid = total_fee.min(available);
+                sender_acct.balance = available - fee_paid;
                 save_or_warn(&mut state, &sender_acct);
 
-                // Credit treasury with the non-burned portion.
-                // The burned portion (total_fee - treasury_share) is permanently
+                // Credit treasury with the non-burned portion of what was paid.
+                // The burned remainder (fee_paid - treasury_share) is permanently
                 // removed from circulation by not being credited to any account.
-                let treasury_share = fee_config.treasury_amount(total_fee);
+                // treasury_share = fee_paid * (10000 - burn_bps) / 10000 <= fee_paid,
+                // so the credit can never exceed the debit.
+                let treasury_share = fee_config.treasury_amount(fee_paid);
                 if treasury_share > 0 {
                     if let Ok(Some(mut treasury)) =
                         state.get_account(&fee_config.treasury_account)
@@ -839,7 +857,7 @@ impl BlockExecutor {
                 events.push(Event {
                     emitter: op.sender,
                     topic: b"fee".to_vec(),
-                    data: total_fee.to_le_bytes().to_vec(),
+                    data: fee_paid.to_le_bytes().to_vec(),
                 });
             }
         }
@@ -1826,6 +1844,64 @@ mod tests {
         assert_eq!(store.state_root(), real_root);
         assert_eq!(StateManager::new(&mut store).get_balance(&alice).unwrap(), alice_before - 200);
         assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 700);
+    }
+
+    /// Security (C-01 / H-01): fee settlement must never mint SOLEN. When the
+    /// computed gas fee exceeds what the sender can actually pay, the treasury
+    /// may only be credited what was truly debited — total supply must not grow.
+    /// Pre-fix, the treasury was credited a share of the *intended* fee while the
+    /// sender's debit was clamped to their balance, minting the shortfall.
+    /// burn_rate_bps = 0 routes the whole fee to the treasury, so any mint is
+    /// maximally visible there. max_fee = u128::MAX exercises the (formerly
+    /// uncapped) fee path.
+    #[test]
+    fn fee_settlement_conserves_supply_when_sender_underpays() {
+        let (mut store, kp, alice, bob) = setup();
+        // Per-gas price high enough that the computed fee dwarfs alice's 10_000.
+        let executor = BlockExecutor::with_fee_config(FeeConfig {
+            base_fee_per_gas: 1_000_000,
+            burn_rate_bps: 0, // entire fee -> treasury, so any mint shows there
+            treasury_account: treasury_id(),
+        });
+
+        let supply = |store: &mut MemoryStore| -> u128 {
+            let mut s = StateManager::new(store);
+            s.get_balance(&alice).unwrap()
+                + s.get_balance(&bob).unwrap()
+                + s.get_balance(&treasury_id()).unwrap()
+        };
+        let supply_before = supply(&mut store);
+        let alice_before = StateManager::new(&mut store).get_balance(&alice).unwrap();
+
+        // A zero-value transfer succeeds even after the full balance is reserved,
+        // so settlement runs the success path with a fee it cannot fully cover.
+        let mut op = UserOperation {
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Transfer { to: bob, amount: 0 }],
+            max_fee: u128::MAX,
+            signature: vec![],
+        };
+        sign_op(&kp, &executor, &mut op);
+
+        let result = executor.execute_block_with_height(&mut store, &[op], 1);
+        assert!(result.receipts[0].success, "the zero-value transfer must succeed");
+
+        let alice_after = StateManager::new(&mut store).get_balance(&alice).unwrap();
+        let treasury_after = StateManager::new(&mut store).get_balance(&treasury_id()).unwrap();
+        let supply_after = supply(&mut store);
+
+        // No mint: total supply must never increase.
+        assert!(
+            supply_after <= supply_before,
+            "fee settlement minted: supply {supply_before} -> {supply_after}"
+        );
+        // The treasury credit may not exceed what the sender was actually debited.
+        let alice_debited = alice_before - alice_after;
+        assert!(
+            treasury_after <= alice_debited,
+            "treasury credited {treasury_after} but sender only paid {alice_debited}"
+        );
     }
 
     #[test]

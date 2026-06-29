@@ -2076,6 +2076,60 @@ mod tests {
         assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 0);
     }
 
+    /// End-to-end quantum upgrade: an Ed25519 account rotates itself to ML-DSA
+    /// via SetAuth (signed by the current key), then transacts with the new
+    /// post-quantum key — and the rotated-out Ed25519 key stops working. This is
+    /// the exact flow behind `solen key quantum-upgrade`.
+    #[test]
+    fn quantum_upgrade_rotates_ed25519_to_ml_dsa_end_to_end() {
+        use solen_crypto::{Keypair, MlDsaKeypair};
+        let ed = Keypair::from_seed(&[3u8; 32]);
+        let alice = ed.public_key();
+        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let pq = MlDsaKeypair::generate();
+
+        let mut store = MemoryStore::new();
+        apply_genesis(&mut store, vec![
+            GenesisAccount { id: alice, balance: 10_000,
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }] },
+            GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
+            GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
+        ]).unwrap();
+        let exec = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
+            .with_pq_auth_height(0);
+
+        // Block 1: SetAuth -> ML-DSA, signed by the CURRENT Ed25519 key.
+        let mut setauth = UserOperation {
+            sender: alice, nonce: 0,
+            actions: vec![Action::SetAuth { auth_methods: vec![AuthMethod::MlDsa { public_key: pq.public_key() }] }],
+            max_fee: 1000, signature: vec![],
+        };
+        setauth.signature = ed.sign(&exec.operation_signing_message(&setauth)).to_vec();
+        assert!(exec.execute_block_with_height(&mut store, &[setauth], 1).receipts[0].success,
+            "SetAuth signed by the current Ed25519 key must succeed");
+
+        // Block 2: transfer now signed with the post-quantum key -> authorized.
+        let mut xfer = UserOperation {
+            sender: alice, nonce: 1,
+            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            max_fee: 1000, signature: vec![],
+        };
+        xfer.signature = pq.sign(&exec.operation_signing_message(&xfer));
+        assert!(exec.execute_block_with_height(&mut store, &[xfer], 2).receipts[0].success,
+            "post-upgrade ML-DSA-signed op must authorize");
+        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 100);
+
+        // The rotated-out Ed25519 key no longer authorizes anything.
+        let mut stale = UserOperation {
+            sender: alice, nonce: 2,
+            actions: vec![Action::Transfer { to: bob, amount: 50 }],
+            max_fee: 1000, signature: vec![],
+        };
+        stale.signature = ed.sign(&exec.operation_signing_message(&stale)).to_vec();
+        assert!(!exec.execute_block_with_height(&mut store, &[stale], 3).receipts[0].success,
+            "the rotated-out Ed25519 key must be rejected");
+    }
+
     #[test]
     fn simple_transfer() {
         let (mut store, kp, alice, bob) = setup();

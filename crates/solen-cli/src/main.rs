@@ -375,6 +375,13 @@ enum KeyAction {
     Unlock,
     /// Change the wallet password
     ChangePassword,
+    /// Upgrade an account from Ed25519 to post-quantum ML-DSA-65 auth.
+    /// Rotates the account's auth on-chain and rewrites the local key; the
+    /// address is unchanged. Requires post-quantum auth active on the network.
+    QuantumUpgrade {
+        /// Name of the Ed25519 key / account to upgrade
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -506,6 +513,9 @@ async fn main() -> anyhow::Result<()> {
             KeyAction::Lock => commands::cmd_key_lock()?,
             KeyAction::Unlock => commands::cmd_key_unlock()?,
             KeyAction::ChangePassword => commands::cmd_key_change_password()?,
+            KeyAction::QuantumUpgrade { name } => {
+                commands::cmd_key_quantum_upgrade(&rpc, &name, chain_id).await?
+            }
         },
     }
 

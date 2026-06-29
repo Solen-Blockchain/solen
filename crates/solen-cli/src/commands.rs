@@ -1,7 +1,7 @@
 //! CLI command implementations.
 
 use anyhow::Result;
-use solen_crypto::{blake3_hash, Keypair};
+use solen_crypto::blake3_hash;
 use solen_types::transaction::{Action, UserOperation};
 
 use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
@@ -1345,8 +1345,68 @@ fn resolve_account_id(input: &str) -> Result<[u8; 32]> {
     Ok(wallet::name_to_account_id(input))
 }
 
-fn sign_op(op: &mut UserOperation, kp: &Keypair, chain_id: u64) {
-    op.signature = kp.sign(&op.signing_message(chain_id)).to_vec();
+fn sign_op(op: &mut UserOperation, signer: &wallet::Signer, chain_id: u64) {
+    op.signature = signer.sign(&op.signing_message(chain_id));
+}
+
+/// Rotate an account from classical (Ed25519) to post-quantum (ML-DSA-65) auth.
+///
+/// Generates a fresh ML-DSA-65 key, submits a `SetAuth` signed by the account's
+/// CURRENT (Ed25519) key, and — only after the network accepts it — rewrites the
+/// local key so the same name signs with ML-DSA for the SAME account address.
+///
+/// The new auth is ML-DSA-ONLY (a true quantum upgrade, removing the classical
+/// key). It therefore requires the network to have post-quantum auth ACTIVE
+/// (`--pq-auth-height`); otherwise the account cannot transact until activation.
+pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, chain_id: u64) -> Result<()> {
+    use solen_types::account::AuthMethod;
+
+    let mut ks = wallet::load_keystore()?;
+    let (signer, sender_id) = wallet::load_keypair(&ks, name)?;
+    if signer.scheme() != "ed25519" {
+        anyhow::bail!("key '{}' is already post-quantum ({})", name, signer.scheme());
+    }
+
+    // Fresh ML-DSA-65 keypair (held locally; not persisted until success).
+    let (pq_seed, pq_pubkey) = wallet::new_ml_dsa();
+
+    let sender_hex = account_to_base58(&sender_id);
+    let mut op = UserOperation {
+        sender: sender_id,
+        nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
+        actions: vec![Action::SetAuth {
+            auth_methods: vec![AuthMethod::MlDsa { public_key: pq_pubkey.clone() }],
+        }],
+        max_fee: 1_000_000,
+        signature: vec![],
+    };
+    // Signed by the CURRENT Ed25519 key — the account still authorizes it.
+    sign_op(&mut op, &signer, chain_id);
+
+    let op_json = serde_json::to_value(&op)?;
+    let sim = rpc.simulate_operation(op_json.clone()).await?;
+    if !sim.success {
+        anyhow::bail!("simulation failed: {}", sim.error.unwrap_or_default());
+    }
+    let result = rpc.submit_operation(op_json).await?;
+    if !result.accepted {
+        anyhow::bail!("rejected: {}", result.error.unwrap_or_default());
+    }
+
+    // On-chain rotation accepted — now rewrite the local key (same address).
+    wallet::persist_ml_dsa(&mut ks, name, &pq_seed, &pq_pubkey)?;
+    wallet::save_keystore(&ks)?;
+
+    println!("Account upgraded to post-quantum (ML-DSA-65) authentication.");
+    println!("  Account:  {}", sender_hex);
+    println!("  Scheme:   Ed25519  ->  ML-DSA-65 (FIPS 204)");
+    println!("  Key '{}' now signs with ML-DSA; the address is unchanged.", name);
+    println!(
+        "\n  NOTE: post-quantum auth must be ACTIVE on the network (--pq-auth-height)\n  \
+         for this account to transact. On a chain where it is still dormant, the\n  \
+         account cannot sign until activation."
+    );
+    Ok(())
 }
 
 // ── Multi-sig ──────────────────────────────────────────────────

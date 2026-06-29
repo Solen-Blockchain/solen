@@ -11,7 +11,8 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{bail, Result};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
-use solen_crypto::Keypair;
+use solen_crypto::{Keypair, MlDsaKeypair};
+use solen_types::account::AuthMethod;
 use solen_types::encoding::account_to_base58;
 
 /// Salt length for Argon2.
@@ -50,6 +51,43 @@ pub struct StoredKey {
     /// Encrypted seed — present only when locked. Hex-encoded (nonce ++ ciphertext).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_seed_hex: Option<String>,
+    /// Signature scheme: absent or "ed25519" = classical (default), "ml-dsa" =
+    /// post-quantum ML-DSA-65. The seed format is the same 32 bytes either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+/// A loaded signer — classical or post-quantum — built from a stored key's seed
+/// and scheme. Used everywhere an operation is signed.
+pub enum Signer {
+    Ed25519(Keypair),
+    MlDsa(MlDsaKeypair),
+}
+
+impl Signer {
+    /// Sign a message with the appropriate scheme. Ed25519 → 64 bytes,
+    /// ML-DSA-65 → 3309 bytes.
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        match self {
+            Signer::Ed25519(kp) => kp.sign(message).to_vec(),
+            Signer::MlDsa(kp) => kp.sign(message),
+        }
+    }
+
+    /// The on-chain auth method this signer corresponds to (for SetAuth).
+    pub fn auth_method(&self) -> AuthMethod {
+        match self {
+            Signer::Ed25519(kp) => AuthMethod::Ed25519 { public_key: kp.public_key() },
+            Signer::MlDsa(kp) => AuthMethod::MlDsa { public_key: kp.public_key() },
+        }
+    }
+
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Signer::Ed25519(_) => "ed25519",
+            Signer::MlDsa(_) => "ml-dsa",
+        }
+    }
 }
 
 // Backwards compatibility: accept old format where seed_hex is a bare string.
@@ -112,6 +150,7 @@ pub fn generate_key(name: &str) -> Result<StoredKey> {
         public_key_hex: account_to_base58(&public_key),
         account_id_hex: account_to_base58(&public_key),
         encrypted_seed_hex: None,
+        scheme: None,
     })
 }
 
@@ -132,12 +171,13 @@ pub fn import_key(name: &str, seed_hex: &str) -> Result<StoredKey> {
         public_key_hex: account_to_base58(&public_key),
         account_id_hex: account_to_base58(&public_key),
         encrypted_seed_hex: None,
+        scheme: None,
     })
 }
 
 // ── Load keypair (handles locked state) ────────────────────────
 
-pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Keypair, [u8; 32])> {
+pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Signer, [u8; 32])> {
     let key = ks
         .keys
         .get(name)
@@ -160,14 +200,47 @@ pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Keypair, [u8; 32])> {
     };
 
     let seed_bytes = hex_decode(&seed_hex)?;
+    if seed_bytes.len() != 32 {
+        bail!("seed must be exactly 32 bytes");
+    }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&seed_bytes);
-    let kp = Keypair::from_seed(&seed);
+
+    // Build the right signer for the key's scheme. The 32-byte seed format is
+    // shared, so a key can be ed25519 (default) or post-quantum ML-DSA-65.
+    let signer = match key.scheme.as_deref() {
+        Some("ml-dsa") => Signer::MlDsa(MlDsaKeypair::from_seed(&seed)),
+        _ => Signer::Ed25519(Keypair::from_seed(&seed)),
+    };
 
     let account_id = solen_types::encoding::parse_address(&key.account_id_hex)
         .map_err(|e| anyhow::anyhow!("invalid account_id: {}", e))?;
 
-    Ok((kp, account_id))
+    Ok((signer, account_id))
+}
+
+/// Generate a fresh ML-DSA-65 (post-quantum) keypair, returning its 32-byte seed
+/// and serialized public key. The caller submits a SetAuth carrying this public
+/// key, then calls [`persist_ml_dsa`] ONLY after the on-chain rotation succeeds.
+pub fn new_ml_dsa() -> ([u8; 32], Vec<u8>) {
+    let mut seed = [0u8; 32];
+    solen_crypto::random_bytes(&mut seed);
+    let pubkey = MlDsaKeypair::from_seed(&seed).public_key();
+    (seed, pubkey)
+}
+
+/// Persist a rotated ML-DSA-65 key under `name`, keeping the same `account_id`.
+/// Called after the SetAuth confirming the rotation has been accepted on-chain.
+pub fn persist_ml_dsa(ks: &mut Keystore, name: &str, seed: &[u8; 32], pubkey: &[u8]) -> Result<()> {
+    let key = ks
+        .keys
+        .get_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("key '{}' not found", name))?;
+    key.seed_hex = Some(hex_encode(seed));
+    key.encrypted_seed_hex = None;
+    key.scheme = Some("ml-dsa".to_string());
+    key.public_key_hex = hex_encode(pubkey);
+    Ok(())
 }
 
 // ── Lock / Unlock ──────────────────────────────────────────────

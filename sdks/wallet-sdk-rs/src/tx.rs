@@ -1,6 +1,6 @@
 //! Transaction building and signing helpers.
 
-use solen_crypto::Keypair;
+use solen_crypto::{Keypair, MlDsaKeypair};
 use solen_types::transaction::{Action, UserOperation};
 use solen_types::AccountId;
 
@@ -59,11 +59,44 @@ pub fn signing_message(op: &UserOperation, chain_id: u64) -> Vec<u8> {
     op.signing_message(chain_id)
 }
 
-/// Sign a user operation in place.
+/// Sign a user operation in place (classical Ed25519).
 pub fn sign_operation(op: &mut UserOperation, keypair: &Keypair, chain_id: u64) {
     let msg = signing_message(op, chain_id);
     let sig = keypair.sign(&msg);
     op.signature = sig.to_vec();
+}
+
+/// Sign a user operation in place with a post-quantum ML-DSA-65 key.
+///
+/// The account must be authorized by an `AuthMethod::MlDsa` whose public key
+/// matches `keypair`, and the network must have post-quantum auth active
+/// (`pq_auth_height`). Produces a ~3.3 KB signature.
+pub fn sign_operation_ml_dsa(op: &mut UserOperation, keypair: &MlDsaKeypair, chain_id: u64) {
+    let msg = signing_message(op, chain_id);
+    op.signature = keypair.sign(&msg);
+}
+
+/// Build an unsigned `SetAuth` that rotates an account to post-quantum
+/// (ML-DSA-65) authentication. Submit it signed by the account's CURRENT key
+/// (e.g. via [`sign_operation`]); afterwards the account is authorized only by
+/// the given ML-DSA public key. The account address is unchanged.
+pub fn build_quantum_upgrade(
+    sender: AccountId,
+    nonce: u64,
+    ml_dsa_public_key: Vec<u8>,
+) -> UserOperation {
+    use solen_types::account::AuthMethod;
+    UserOperation {
+        sender,
+        nonce,
+        actions: vec![Action::SetAuth {
+            auth_methods: vec![AuthMethod::MlDsa {
+                public_key: ml_dsa_public_key,
+            }],
+        }],
+        max_fee: 1_000_000,
+        signature: vec![],
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +122,25 @@ mod tests {
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&op.signature);
         assert!(solen_crypto::verify(&kp.public_key(), &msg, &sig).is_ok());
+    }
+
+    #[test]
+    fn build_and_sign_transfer_ml_dsa() {
+        let kp = MlDsaKeypair::generate();
+        let mut op = build_transfer(aid(1), 0, aid(2), 500);
+        sign_operation_ml_dsa(&mut op, &kp, 1337);
+
+        assert_eq!(op.signature.len(), solen_crypto::ML_DSA_SIG_LEN);
+        let msg = signing_message(&op, 1337);
+        assert!(solen_crypto::verify_ml_dsa(&kp.public_key(), &msg, &op.signature).is_ok());
+    }
+
+    #[test]
+    fn quantum_upgrade_builds_setauth() {
+        use solen_types::transaction::Action;
+        let kp = MlDsaKeypair::generate();
+        let op = build_quantum_upgrade(aid(1), 3, kp.public_key());
+        assert!(matches!(op.actions[0], Action::SetAuth { .. }));
     }
 
     #[test]

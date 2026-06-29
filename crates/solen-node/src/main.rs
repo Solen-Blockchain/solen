@@ -201,6 +201,13 @@ struct Cli {
     /// value (a flag-day). Differing values across nodes is unsafe.
     #[arg(long, default_value_t = u64::MAX)]
     determinism_fix_height: u64,
+
+    /// Activation height for post-quantum (ML-DSA-65) account authentication
+    /// (opt-in AuthMethod::MlDsa). Default u64::MAX = OFF (dormant). CONSENSUS-
+    /// AFFECTING: deploy to EVERY node first, then restart all with the SAME
+    /// value (a flag-day). Differing values across nodes is unsafe.
+    #[arg(long, default_value_t = u64::MAX)]
+    pq_auth_height: u64,
 }
 
 #[tokio::main]
@@ -828,6 +835,8 @@ async fn main() -> anyhow::Result<()> {
         authenticate_sync_blocks: cli.authenticate_sync_blocks,
         // Set via --determinism-fix-height once every node is on this binary (flag-day).
         determinism_fix_height: cli.determinism_fix_height,
+        // Set via --pq-auth-height once every node is on this binary (flag-day).
+        pq_auth_height: cli.pq_auth_height,
     };
 
     let mempool = Mempool::new(50_000);

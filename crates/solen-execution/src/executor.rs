@@ -40,7 +40,7 @@ fn save_or_warn(state: &mut StateManager<'_>, account: &solen_types::account::Ac
 /// For `Ed25519`: expects a 64-byte signature.
 /// For `Threshold`: expects concatenated (pubkey[32] + sig[64]) pairs.
 /// At least `threshold` valid signatures from the signers list are required.
-fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'static str> {
+fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bool) -> Option<&'static str> {
     match method {
         AuthMethod::Ed25519 { public_key } => {
             if signature.len() != 64 {
@@ -97,6 +97,19 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8]) -> Option<&'st
             solen_crypto::verify(session_key, msg, &sig).ok().map(|_| "session")
         }
         AuthMethod::Guardian { .. } => None, // Guardians don't sign transactions.
+        AuthMethod::MlDsa { public_key } => {
+            // Post-quantum (ML-DSA-65) auth, gated by pq_auth_height: only
+            // honored once activated fleet-wide. Until then it returns None (no
+            // valid method), so the binary ships dormant and a not-yet-upgraded
+            // node never disagrees about an op's validity. Verification is a
+            // deterministic pure function — consensus-safe.
+            if !pq_enabled {
+                return None;
+            }
+            solen_crypto::verify_ml_dsa(public_key, msg, signature)
+                .ok()
+                .map(|_| "ml-dsa")
+        }
     }
 }
 
@@ -352,6 +365,12 @@ pub struct BlockExecutor {
     /// node must agree on the height so they compute identical state roots
     /// across the switch. Default u64::MAX = off (legacy behavior everywhere).
     fee_fix_height: u64,
+    /// Block height at/after which post-quantum `AuthMethod::MlDsa` (ML-DSA-65)
+    /// signatures are honored. CONSENSUS-AFFECTING (it changes which operations
+    /// are valid), so it ships dormant at u64::MAX = off; below it an MlDsa auth
+    /// method verifies as no-valid-method, exactly like a node that lacks the
+    /// code, so nodes never disagree before a coordinated activation.
+    pq_auth_height: u64,
 }
 
 impl BlockExecutor {
@@ -361,6 +380,7 @@ impl BlockExecutor {
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
             chain_id: 0,
             fee_fix_height: u64::MAX,
+            pq_auth_height: u64::MAX,
         }
     }
 
@@ -370,6 +390,7 @@ impl BlockExecutor {
             vm_runtime: solen_vm::runtime::VmRuntime::new().expect("failed to create VM runtime"),
             chain_id: 0,
             fee_fix_height: u64::MAX,
+            pq_auth_height: u64::MAX,
         }
     }
 
@@ -381,6 +402,13 @@ impl BlockExecutor {
     /// Set the activation height for the C-01/H-01 fee-settlement fix.
     pub fn with_fee_fix_height(mut self, height: u64) -> Self {
         self.fee_fix_height = height;
+        self
+    }
+
+    /// Set the activation height for post-quantum (ML-DSA-65) account auth.
+    /// Below it, `AuthMethod::MlDsa` is not honored (ships dormant; not default).
+    pub fn with_pq_auth_height(mut self, height: u64) -> Self {
+        self.pq_auth_height = height;
         self
     }
 
@@ -589,8 +617,9 @@ impl BlockExecutor {
             })
             .collect();
 
-        // Phase 2: parallel signature verification (Ed25519 + Threshold).
+        // Phase 2: parallel signature verification (Ed25519 + Threshold + ML-DSA).
         // Returns the auth method name if valid, or None if invalid.
+        let pq_enabled = height >= self.pq_auth_height;
         let validations: Vec<Option<&'static str>> = operations
             .par_iter()
             .zip(pre.par_iter())
@@ -606,7 +635,7 @@ impl BlockExecutor {
                 if auth_methods.is_empty() {
                     return None; // no auth methods = reject (accounts must have auth)
                 }
-                auth_methods.iter().find_map(|method| verify_auth(method, msg, &op.signature))
+                auth_methods.iter().find_map(|method| verify_auth(method, msg, &op.signature, pq_enabled))
             })
             .collect();
 
@@ -703,7 +732,7 @@ impl BlockExecutor {
         // Validate signature against the account's auth methods.
         let (session_charge, subcall_policy) = {
             let mut state = StateManager::new(store);
-            match self.validate_and_prepare(&mut state, op) {
+            match self.validate_and_prepare(&mut state, op, height) {
                 Ok(p) => (p.session_charge, p.subcall_policy),
                 Err(e) => {
                     warn!(sender = ?op.sender[..4], error = %e, "operation validation failed");
@@ -919,6 +948,7 @@ impl BlockExecutor {
         &self,
         state: &mut StateManager<'_>,
         op: &UserOperation,
+        height: u64,
     ) -> Result<PreparedOp, ExecutionError> {
         let mut session_charge: Option<(Vec<u8>, u128)> = None;
         let mut subcall_policy: Option<SubcallPolicy> = None;
@@ -936,8 +966,9 @@ impl BlockExecutor {
         } else {
             // Verify signature against one of the account's auth methods.
             let msg = self.operation_signing_message(op);
+            let pq_enabled = height >= self.pq_auth_height;
             let sig_valid = account.auth_methods.iter().any(|method| {
-                verify_auth(method, &msg, &op.signature).is_some()
+                verify_auth(method, &msg, &op.signature, pq_enabled).is_some()
             });
 
             if !sig_valid {
@@ -1987,6 +2018,62 @@ mod tests {
                 "at the gate, fixed settlement must not mint"
             );
         }
+    }
+
+    /// Post-quantum auth (ML-DSA-65) is opt-in AND gated: an account authorized
+    /// only by an MlDsa key works when pq_auth_height is active, and is rejected
+    /// when dormant (so the binary ships safely before a coordinated activation).
+    #[test]
+    fn ml_dsa_pq_auth_is_gated_by_height() {
+        use solen_crypto::MlDsaKeypair;
+        let pq = MlDsaKeypair::generate();
+        let alice = { let mut id = [0u8; 32]; id[..4].copy_from_slice(b"pqal"); id };
+        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let mk_store = || {
+            let mut store = MemoryStore::new();
+            apply_genesis(&mut store, vec![
+                GenesisAccount { id: alice, balance: 10_000,
+                    auth_methods: vec![AuthMethod::MlDsa { public_key: pq.public_key() }] },
+                GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
+                GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
+            ]).unwrap();
+            store
+        };
+
+        // Build + ML-DSA-sign the operation (signing message is identical across
+        // executors with the same chain_id).
+        let mut op = UserOperation {
+            sender: alice, nonce: 0,
+            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            max_fee: 1000, signature: vec![],
+        };
+        let probe = zero_fee_executor();
+        let msg = probe.operation_signing_message(&op);
+        op.signature = pq.sign(&msg);
+        assert_eq!(op.signature.len(), solen_crypto::ML_DSA_SIG_LEN);
+
+        // DORMANT (gate off, default u64::MAX): ML-DSA not honored -> op rejected.
+        let mut store = mk_store();
+        let dormant = zero_fee_executor();
+        let r = dormant.execute_block_with_height(&mut store, &[op.clone()], 1);
+        assert!(!r.receipts[0].success, "ML-DSA op must be rejected while gate is dormant");
+        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 0);
+
+        // ACTIVE (gate at height 0): same op now authorizes the transfer.
+        let mut store = mk_store();
+        let active = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
+            .with_pq_auth_height(0);
+        let r = active.execute_block_with_height(&mut store, &[op.clone()], 1);
+        assert!(r.receipts[0].success, "ML-DSA op must authorize once the gate is active");
+        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 100);
+
+        // ACTIVE but a signature from a DIFFERENT pq key is rejected.
+        let mut store = mk_store();
+        let mut forged = op.clone();
+        forged.signature = MlDsaKeypair::generate().sign(&msg);
+        let r = active.execute_block_with_height(&mut store, &[forged], 1);
+        assert!(!r.receipts[0].success, "wrong ML-DSA key must be rejected");
+        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 0);
     }
 
     #[test]

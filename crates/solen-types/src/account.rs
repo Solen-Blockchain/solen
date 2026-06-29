@@ -55,6 +55,13 @@ pub enum AuthMethod {
         /// never transitively trigger a non-allowlisted contract.
         restrict_subcalls: bool,
     },
+    /// Post-quantum signature: ML-DSA-65 (FIPS 204). An opt-in, quantum-resistant
+    /// account key — Shor's algorithm breaks Ed25519/passkey keys, ML-DSA does
+    /// not. The `public_key` is the 1952-byte ML-DSA-65 encoding; the operation's
+    /// `signature` carries the 3309-byte ML-DSA signature. Appended last so the
+    /// Borsh variant indices of the classical methods above stay stable.
+    /// Acceptance is gated by `pq_auth_height` (ships dormant; not the default).
+    MlDsa { public_key: Vec<u8> },
 }
 
 /// A smart account (no EOAs in Solen).

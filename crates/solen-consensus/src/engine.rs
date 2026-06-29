@@ -81,6 +81,10 @@ pub struct EngineConfig {
     /// for memory-growing / relaxed-SIMD contracts), so it defaults to u64::MAX =
     /// OFF (deploy dormant everywhere, then activate at one height).
     pub determinism_fix_height: u64,
+    /// Activation height for post-quantum (ML-DSA-65) account auth
+    /// (`AuthMethod::MlDsa`). CONSENSUS-AFFECTING (changes which ops are valid),
+    /// so defaults to u64::MAX = OFF — ships dormant, activate at one height.
+    pub pq_auth_height: u64,
 }
 
 impl Default for EngineConfig {
@@ -95,6 +99,7 @@ impl Default for EngineConfig {
             fee_fix_height: u64::MAX,
             authenticate_sync_blocks: false,
             determinism_fix_height: u64::MAX,
+            pq_auth_height: u64::MAX,
         }
     }
 }
@@ -330,6 +335,7 @@ impl ConsensusEngine {
         let chain_id = config.chain_id;
         let fee_fix_height = config.fee_fix_height;
         let determinism_fix_height = config.determinism_fix_height;
+        let pq_auth_height = config.pq_auth_height;
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
@@ -337,7 +343,8 @@ impl ConsensusEngine {
             executor: BlockExecutor::new()
                 .with_chain_id(chain_id)
                 .with_fee_fix_height(fee_fix_height)
-                .with_determinism_fix_height(determinism_fix_height),
+                .with_determinism_fix_height(determinism_fix_height)
+                .with_pq_auth_height(pq_auth_height),
             signing_keypair: None, // set via set_signing_keypair() after construction
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),

@@ -13,8 +13,12 @@
  * by the cross-implementation vectors in `test/pq_vectors.json`.
  */
 import { blake3 } from "@noble/hashes/blake3";
+import { sha512 } from "@noble/hashes/sha512";
 import { ml_dsa65 } from "@noble/post-quantum/ml-dsa";
 import * as ed25519 from "@noble/ed25519";
+
+// @noble/ed25519 v2 needs a synchronous SHA-512 hook wired in once.
+ed25519.etc.sha512Sync = (...m: Uint8Array[]) => sha512(ed25519.etc.concatBytes(...m));
 
 import { stringifyWithBigInt } from "./client";
 import type { Action, UserOperation } from "./types";
@@ -108,4 +112,43 @@ export function signOperationEd25519(op: UserOperation, secretSeed: Uint8Array, 
 /** The Ed25519 public key for a 32-byte secret seed. */
 export function ed25519PublicKey(secretSeed: Uint8Array): Uint8Array {
   return ed25519.getPublicKey(secretSeed);
+}
+
+// ── AND-hybrid (Ed25519 + ML-DSA-65) ──────────────────────────────────────
+
+/**
+ * Sign an operation in place with an AND-hybrid key (both Ed25519 and ML-DSA-65,
+ * typically derived from the same 32-byte seed). Signature layout, matching the
+ * node's `Hybrid` auth method: `ed25519[64] ‖ ml_dsa[3309]`. Both halves must
+ * verify for the network to authorize.
+ */
+export function signOperationHybrid(
+  op: UserOperation,
+  edSecretSeed: Uint8Array,
+  mlSecretKey: Uint8Array,
+  chainId: number | bigint,
+): void {
+  const msg = signingMessage(op, chainId);
+  const ed = ed25519.sign(msg, edSecretSeed);
+  const ml = ml_dsa65.sign(mlSecretKey, msg);
+  const sig = new Uint8Array(ed.length + ml.length);
+  sig.set(ed, 0);
+  sig.set(ml, ed.length);
+  op.signature = Array.from(sig);
+}
+
+/** Verify a hybrid signature: BOTH the Ed25519 and ML-DSA-65 halves must pass. */
+export function verifyHybrid(
+  op: UserOperation,
+  edPublicKey: Uint8Array,
+  mlPublicKey: Uint8Array,
+  chainId: number | bigint,
+): boolean {
+  const sig = Uint8Array.from(op.signature);
+  if (sig.length !== 64 + 3309) return false;
+  const msg = signingMessage(op, chainId);
+  return (
+    ed25519.verify(sig.slice(0, 64), msg, edPublicKey) &&
+    ml_dsa65.verify(mlPublicKey, msg, sig.slice(64))
+  );
 }

@@ -1358,7 +1358,7 @@ fn sign_op(op: &mut UserOperation, signer: &wallet::Signer, chain_id: u64) {
 /// The new auth is ML-DSA-ONLY (a true quantum upgrade, removing the classical
 /// key). It therefore requires the network to have post-quantum auth ACTIVE
 /// (`--pq-auth-height`); otherwise the account cannot transact until activation.
-pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, chain_id: u64) -> Result<()> {
+pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, hybrid: bool, chain_id: u64) -> Result<()> {
     use solen_types::account::AuthMethod;
 
     let mut ks = wallet::load_keystore()?;
@@ -1367,16 +1367,28 @@ pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, chain_id: u64)
         anyhow::bail!("key '{}' is already post-quantum ({})", name, signer.scheme());
     }
 
-    // Fresh ML-DSA-65 keypair (held locally; not persisted until success).
-    let (pq_seed, pq_pubkey) = wallet::new_ml_dsa();
+    // New key material + the target auth method (held locally; persisted only on
+    // success). Hybrid derives both keys from one seed.
+    enum Pending {
+        MlDsa([u8; 32], Vec<u8>),
+        Hybrid([u8; 32], [u8; 32]),
+    }
+    let (target_auth, pending) = if hybrid {
+        let (seed, ed_pub, ml_pub) = wallet::new_hybrid();
+        (
+            AuthMethod::Hybrid { ed25519_public_key: ed_pub, ml_dsa_public_key: ml_pub },
+            Pending::Hybrid(seed, ed_pub),
+        )
+    } else {
+        let (seed, ml_pub) = wallet::new_ml_dsa();
+        (AuthMethod::MlDsa { public_key: ml_pub.clone() }, Pending::MlDsa(seed, ml_pub))
+    };
 
     let sender_hex = account_to_base58(&sender_id);
     let mut op = UserOperation {
         sender: sender_id,
         nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
-        actions: vec![Action::SetAuth {
-            auth_methods: vec![AuthMethod::MlDsa { public_key: pq_pubkey.clone() }],
-        }],
+        actions: vec![Action::SetAuth { auth_methods: vec![target_auth] }],
         max_fee: 1_000_000,
         signature: vec![],
     };
@@ -1394,13 +1406,21 @@ pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, chain_id: u64)
     }
 
     // On-chain rotation accepted — now rewrite the local key (same address).
-    wallet::persist_ml_dsa(&mut ks, name, &pq_seed, &pq_pubkey)?;
+    match pending {
+        Pending::MlDsa(seed, pk) => wallet::persist_ml_dsa(&mut ks, name, &seed, &pk)?,
+        Pending::Hybrid(seed, ed_pub) => wallet::persist_hybrid(&mut ks, name, &seed, &ed_pub)?,
+    }
     wallet::save_keystore(&ks)?;
 
-    println!("Account upgraded to post-quantum (ML-DSA-65) authentication.");
+    let scheme = if hybrid { "Hybrid (Ed25519 + ML-DSA-65)" } else { "ML-DSA-65 (FIPS 204)" };
+    println!("Account upgraded to post-quantum authentication.");
     println!("  Account:  {}", sender_hex);
-    println!("  Scheme:   Ed25519  ->  ML-DSA-65 (FIPS 204)");
-    println!("  Key '{}' now signs with ML-DSA; the address is unchanged.", name);
+    println!("  Scheme:   Ed25519  ->  {}", scheme);
+    println!(
+        "  Key '{}' now signs with {}; the address is unchanged.",
+        name,
+        if hybrid { "BOTH schemes (a signature needs both to verify)" } else { "ML-DSA" }
+    );
     println!(
         "\n  NOTE: post-quantum auth must be ACTIVE on the network (--pq-auth-height)\n  \
          for this account to transact. On a chain where it is still dormant, the\n  \

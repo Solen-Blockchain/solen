@@ -381,6 +381,10 @@ enum KeyAction {
     QuantumUpgrade {
         /// Name of the Ed25519 key / account to upgrade
         name: String,
+        /// Use AND-hybrid (Ed25519 + ML-DSA-65, both required) instead of
+        /// ML-DSA-only — defense-in-depth for the transition period.
+        #[arg(long)]
+        hybrid: bool,
     },
 }
 
@@ -513,8 +517,8 @@ async fn main() -> anyhow::Result<()> {
             KeyAction::Lock => commands::cmd_key_lock()?,
             KeyAction::Unlock => commands::cmd_key_unlock()?,
             KeyAction::ChangePassword => commands::cmd_key_change_password()?,
-            KeyAction::QuantumUpgrade { name } => {
-                commands::cmd_key_quantum_upgrade(&rpc, &name, chain_id).await?
+            KeyAction::QuantumUpgrade { name, hybrid } => {
+                commands::cmd_key_quantum_upgrade(&rpc, &name, hybrid, chain_id).await?
             }
         },
     }

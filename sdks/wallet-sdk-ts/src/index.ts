@@ -15,6 +15,8 @@ export {
   signOperationMlDsa,
   verifyMlDsa,
   mlDsaKeygenFromSeed,
+  signOperationHybrid,
+  verifyHybrid,
 } from "./signing";
 export type {
   SolenConfig,

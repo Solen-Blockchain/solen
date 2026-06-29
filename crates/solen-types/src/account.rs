@@ -62,6 +62,16 @@ pub enum AuthMethod {
     /// Borsh variant indices of the classical methods above stay stable.
     /// Acceptance is gated by `pq_auth_height` (ships dormant; not the default).
     MlDsa { public_key: Vec<u8> },
+    /// True AND-hybrid: an operation must carry BOTH a valid Ed25519 signature
+    /// AND a valid ML-DSA-65 signature to authorize. Defense-in-depth for the
+    /// post-quantum transition — the account stays secure unless BOTH schemes
+    /// are broken. The operation `signature` is `ed25519_sig[64] ‖ ml_dsa_sig`.
+    /// Gated by `pq_auth_height` (it relies on ML-DSA verification). Appended
+    /// last to keep earlier Borsh variant indices stable.
+    Hybrid {
+        ed25519_public_key: [u8; 32],
+        ml_dsa_public_key: Vec<u8>,
+    },
 }
 
 /// A smart account (no EOAs in Solen).

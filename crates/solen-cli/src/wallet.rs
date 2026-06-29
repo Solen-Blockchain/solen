@@ -62,15 +62,23 @@ pub struct StoredKey {
 pub enum Signer {
     Ed25519(Keypair),
     MlDsa(MlDsaKeypair),
+    /// AND-hybrid: both keys derived from the same 32-byte seed. Breaking
+    /// Ed25519 (revealing its scalar, not the seed) leaves the ML-DSA key safe.
+    Hybrid(Keypair, MlDsaKeypair),
 }
 
 impl Signer {
     /// Sign a message with the appropriate scheme. Ed25519 → 64 bytes,
-    /// ML-DSA-65 → 3309 bytes.
+    /// ML-DSA-65 → 3309 bytes, Hybrid → ed25519[64] ‖ ml_dsa[3309].
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         match self {
             Signer::Ed25519(kp) => kp.sign(message).to_vec(),
             Signer::MlDsa(kp) => kp.sign(message),
+            Signer::Hybrid(ed, ml) => {
+                let mut sig = ed.sign(message).to_vec();
+                sig.extend_from_slice(&ml.sign(message));
+                sig
+            }
         }
     }
 
@@ -79,6 +87,10 @@ impl Signer {
         match self {
             Signer::Ed25519(kp) => AuthMethod::Ed25519 { public_key: kp.public_key() },
             Signer::MlDsa(kp) => AuthMethod::MlDsa { public_key: kp.public_key() },
+            Signer::Hybrid(ed, ml) => AuthMethod::Hybrid {
+                ed25519_public_key: ed.public_key(),
+                ml_dsa_public_key: ml.public_key(),
+            },
         }
     }
 
@@ -86,6 +98,7 @@ impl Signer {
         match self {
             Signer::Ed25519(_) => "ed25519",
             Signer::MlDsa(_) => "ml-dsa",
+            Signer::Hybrid(..) => "hybrid",
         }
     }
 }
@@ -210,6 +223,7 @@ pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Signer, [u8; 32])> {
     // shared, so a key can be ed25519 (default) or post-quantum ML-DSA-65.
     let signer = match key.scheme.as_deref() {
         Some("ml-dsa") => Signer::MlDsa(MlDsaKeypair::from_seed(&seed)),
+        Some("hybrid") => Signer::Hybrid(Keypair::from_seed(&seed), MlDsaKeypair::from_seed(&seed)),
         _ => Signer::Ed25519(Keypair::from_seed(&seed)),
     };
 
@@ -240,6 +254,30 @@ pub fn persist_ml_dsa(ks: &mut Keystore, name: &str, seed: &[u8; 32], pubkey: &[
     key.encrypted_seed_hex = None;
     key.scheme = Some("ml-dsa".to_string());
     key.public_key_hex = hex_encode(pubkey);
+    Ok(())
+}
+
+/// Generate a fresh AND-hybrid keypair: ONE 32-byte seed deriving both an
+/// Ed25519 and an ML-DSA-65 key. Returns (seed, ed25519_public_key,
+/// ml_dsa_public_key). Persisted via [`persist_hybrid`] after on-chain SetAuth.
+pub fn new_hybrid() -> ([u8; 32], [u8; 32], Vec<u8>) {
+    let mut seed = [0u8; 32];
+    solen_crypto::random_bytes(&mut seed);
+    let ed = Keypair::from_seed(&seed).public_key();
+    let ml = MlDsaKeypair::from_seed(&seed).public_key();
+    (seed, ed, ml)
+}
+
+/// Persist a rotated hybrid key under `name` (same `account_id`).
+pub fn persist_hybrid(ks: &mut Keystore, name: &str, seed: &[u8; 32], ed_pubkey: &[u8; 32]) -> Result<()> {
+    let key = ks
+        .keys
+        .get_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("key '{}' not found", name))?;
+    key.seed_hex = Some(hex_encode(seed));
+    key.encrypted_seed_hex = None;
+    key.scheme = Some("hybrid".to_string());
+    key.public_key_hex = account_to_base58(ed_pubkey);
     Ok(())
 }
 

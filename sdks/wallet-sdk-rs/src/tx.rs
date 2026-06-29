@@ -99,6 +99,44 @@ pub fn build_quantum_upgrade(
     }
 }
 
+/// Sign an operation in place with an AND-hybrid keypair (Ed25519 + ML-DSA-65).
+/// Both keys typically derive from the same 32-byte seed. The signature is
+/// `ed25519[64] ‖ ml_dsa` — the layout the node's `Hybrid` auth method expects.
+pub fn sign_operation_hybrid(
+    op: &mut UserOperation,
+    ed: &Keypair,
+    ml: &MlDsaKeypair,
+    chain_id: u64,
+) {
+    let msg = signing_message(op, chain_id);
+    let mut sig = ed.sign(&msg).to_vec();
+    sig.extend_from_slice(&ml.sign(&msg));
+    op.signature = sig;
+}
+
+/// Build an unsigned `SetAuth` rotating an account to AND-hybrid auth (a
+/// signature must then carry BOTH a valid Ed25519 and ML-DSA-65 signature).
+pub fn build_hybrid_upgrade(
+    sender: AccountId,
+    nonce: u64,
+    ed25519_public_key: [u8; 32],
+    ml_dsa_public_key: Vec<u8>,
+) -> UserOperation {
+    use solen_types::account::AuthMethod;
+    UserOperation {
+        sender,
+        nonce,
+        actions: vec![Action::SetAuth {
+            auth_methods: vec![AuthMethod::Hybrid {
+                ed25519_public_key,
+                ml_dsa_public_key,
+            }],
+        }],
+        max_fee: 1_000_000,
+        signature: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +179,23 @@ mod tests {
         let kp = MlDsaKeypair::generate();
         let op = build_quantum_upgrade(aid(1), 3, kp.public_key());
         assert!(matches!(op.actions[0], Action::SetAuth { .. }));
+    }
+
+    #[test]
+    fn hybrid_sign_produces_both_signatures_in_order() {
+        // One seed derives both keys; the signature is ed25519[64] ‖ ml_dsa, and
+        // each half verifies (exactly what the node's Hybrid auth method checks).
+        let seed = [4u8; 32];
+        let ed = Keypair::from_seed(&seed);
+        let ml = MlDsaKeypair::from_seed(&seed);
+        let mut op = build_transfer(aid(1), 0, aid(2), 7);
+        sign_operation_hybrid(&mut op, &ed, &ml, 1337);
+        assert_eq!(op.signature.len(), 64 + solen_crypto::ML_DSA_SIG_LEN);
+        let msg = signing_message(&op, 1337);
+        let mut ed_sig = [0u8; 64];
+        ed_sig.copy_from_slice(&op.signature[..64]);
+        assert!(solen_crypto::verify(&ed.public_key(), &msg, &ed_sig).is_ok());
+        assert!(solen_crypto::verify_ml_dsa(&ml.public_key(), &msg, &op.signature[64..]).is_ok());
     }
 
     #[test]

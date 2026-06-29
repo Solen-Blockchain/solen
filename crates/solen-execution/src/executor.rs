@@ -110,6 +110,28 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bo
                 .ok()
                 .map(|_| "ml-dsa")
         }
+        AuthMethod::Hybrid { ed25519_public_key, ml_dsa_public_key } => {
+            // True AND-hybrid: BOTH signatures must verify. Secure unless both
+            // Ed25519 and ML-DSA are broken. Gated with the rest of PQ (it relies
+            // on ML-DSA verification). Signature layout: ed25519[64] ‖ ml_dsa.
+            if !pq_enabled {
+                return None;
+            }
+            const ED_LEN: usize = 64;
+            if signature.len() != ED_LEN + solen_crypto::ML_DSA_SIG_LEN {
+                return None;
+            }
+            let (ed_sig, ml_sig) = signature.split_at(ED_LEN);
+            let mut ed = [0u8; ED_LEN];
+            ed.copy_from_slice(ed_sig);
+            if solen_crypto::verify(ed25519_public_key, msg, &ed).is_err() {
+                return None;
+            }
+            if solen_crypto::verify_ml_dsa(ml_dsa_public_key, msg, ml_sig).is_err() {
+                return None;
+            }
+            Some("hybrid")
+        }
     }
 }
 
@@ -2128,6 +2150,52 @@ mod tests {
         stale.signature = ed.sign(&exec.operation_signing_message(&stale)).to_vec();
         assert!(!exec.execute_block_with_height(&mut store, &[stale], 3).receipts[0].success,
             "the rotated-out Ed25519 key must be rejected");
+    }
+
+    /// AND-hybrid (Ed25519 + ML-DSA-65): an op authorizes only with BOTH valid
+    /// signatures; either alone, a wrong one, or a dormant gate is rejected.
+    #[test]
+    fn hybrid_auth_requires_both_signatures() {
+        use solen_crypto::{Keypair, MlDsaKeypair};
+        let ed = Keypair::from_seed(&[5u8; 32]);
+        let pq = MlDsaKeypair::from_seed(&[6u8; 32]);
+        let alice = { let mut id = [0u8; 32]; id[..4].copy_from_slice(b"hyb_"); id };
+        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let mk = || {
+            let mut s = MemoryStore::new();
+            apply_genesis(&mut s, vec![
+                GenesisAccount { id: alice, balance: 10_000, auth_methods: vec![AuthMethod::Hybrid {
+                    ed25519_public_key: ed.public_key(), ml_dsa_public_key: pq.public_key() }] },
+                GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
+                GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
+            ]).unwrap();
+            s
+        };
+        let exec = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
+            .with_pq_auth_height(0);
+        let base = UserOperation { sender: alice, nonce: 0,
+            actions: vec![Action::Transfer { to: bob, amount: 100 }], max_fee: 1000, signature: vec![] };
+        let msg = exec.operation_signing_message(&base);
+        let ed_sig = ed.sign(&msg).to_vec();
+        let ml_sig = pq.sign(&msg);
+        let run = |exec: &BlockExecutor, sig: Vec<u8>| {
+            let mut s = mk();
+            let mut op = base.clone(); op.signature = sig;
+            let ok = exec.execute_block_with_height(&mut s, &[op], 1).receipts[0].success;
+            (ok, StateManager::new(&mut s).get_balance(&bob).unwrap())
+        };
+
+        // Both signatures -> authorized.
+        let (ok, bal) = run(&exec, [ed_sig.clone(), ml_sig.clone()].concat());
+        assert!(ok && bal == 100, "both signatures must authorize");
+        // Either signature alone -> rejected.
+        assert!(!run(&exec, ed_sig.clone()).0, "ed25519 alone must be rejected");
+        assert!(!run(&exec, ml_sig.clone()).0, "ml-dsa alone must be rejected");
+        // Wrong ed25519 sig (good ml-dsa) -> rejected.
+        let bad_ed = Keypair::from_seed(&[9u8; 32]).sign(&msg).to_vec();
+        assert!(!run(&exec, [bad_ed, ml_sig.clone()].concat()).0, "wrong ed25519 sig must be rejected");
+        // Both, but gate dormant -> rejected.
+        assert!(!run(&zero_fee_executor(), [ed_sig, ml_sig].concat()).0, "hybrid rejected while gate is dormant");
     }
 
     #[test]

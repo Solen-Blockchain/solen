@@ -175,14 +175,25 @@ impl IntentPool {
         count
     }
 
-    /// Get all pending intents.
+    /// Get all pending intents, in a DETERMINISTIC order (ascending intent id).
+    ///
+    /// The backing store is a `HashMap`, whose iteration order is randomized per
+    /// process. The block proposer injects one fulfill op per pending intent into
+    /// the block in this order, so an unsorted iteration makes block assembly
+    /// proposer-process-dependent: a backup re-proposing the same height would
+    /// order the fulfill ops differently, yielding a different transactions_root /
+    /// block hash and splitting attestations — and it breaks the deterministic
+    /// re-proposal invariant that idempotent block production relies on. Sorting
+    /// by the monotonic intent id makes production reproducible across nodes.
     pub fn pending_intents(&self) -> Vec<Intent> {
         let intents = self.intents.lock().unwrap();
-        intents
+        let mut pending: Vec<Intent> = intents
             .values()
             .filter(|(_, s)| *s == IntentStatus::Pending)
             .map(|(i, _)| i.clone())
-            .collect()
+            .collect();
+        pending.sort_by_key(|i| i.id);
+        pending
     }
 
     /// Number of pending intents.
@@ -256,6 +267,23 @@ mod tests {
 
         pool.fulfill(id).unwrap();
         assert_eq!(pool.pending_count(), 0);
+    }
+
+    #[test]
+    fn pending_intents_are_deterministically_ordered() {
+        // The pool is backed by a HashMap (randomized iteration order). The block
+        // proposer injects fulfill ops in pending_intents() order, so that order
+        // MUST be deterministic across nodes/processes or re-proposal forks.
+        let pool = IntentPool::new(1000);
+        // Submit in id order 0..32; a HashMap would return these shuffled.
+        for _ in 0..32 {
+            pool.submit(test_intent()).unwrap();
+        }
+        let ids: Vec<u64> = pool.pending_intents().iter().map(|i| i.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "pending_intents must be sorted by intent id");
+        assert_eq!(ids, (0..32).collect::<Vec<_>>());
     }
 
     #[test]

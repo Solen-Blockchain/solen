@@ -7,8 +7,10 @@
 //! APY model: stSOLEN's exchange rate appreciates as the pool earns
 //! validator rewards. So
 //!
-//!     rate(t)       = pool(t) / supply(t)
-//!     apy_window    = (rate_now / rate_then) ^ (year / window) − 1
+//! ```text
+//! rate(t)       = pool(t) / supply(t)
+//! apy_window    = (rate_now / rate_then) ^ (year / window) - 1
+//! ```
 //!
 //! No staking-specific math here — this is purely the price-per-stSOLEN
 //! growth observed via the contract's own bookkeeping. Same pattern Lido /

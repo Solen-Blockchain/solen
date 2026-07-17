@@ -272,6 +272,17 @@ pub struct ConsensusEngine {
     /// Queue of (height, hash) the node layer must broadcast as our (possibly
     /// changed) attestation, appended when our deterministic vote leader moves.
     v2_revotes: Arc<std::sync::Mutex<Vec<(u64, Hash)>>>,
+    /// Block hashes proven EXECUTION-INVALID at a height: we executed the block
+    /// on our (parent-verified, canonical) tip and its state root did not match
+    /// the proposer's claim. Such a block is objectively bad — it must never be
+    /// re-accepted, re-voted, or chosen as the v2 leader; the backup proposer
+    /// produces a valid block at this height that the fleet converges on instead.
+    /// This is what lets the honest majority reject a bad proposer block and keep
+    /// producing, rather than every node latching into a resync halt when they all
+    /// blind-attest a bad header then reject it on execution (mainnet 2026-07-16).
+    /// Gated on `fc_v2_active` (convergence on the backup needs v2 vote-change).
+    /// GC'd as the height is passed.
+    v2_invalid: Arc<RwLock<HashMap<u64, std::collections::HashSet<Hash>>>>,
     /// Broadcast channel for node events (WebSocket subscriptions, indexers).
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
@@ -377,6 +388,7 @@ impl ConsensusEngine {
             v2_blocks: Arc::new(RwLock::new(HashMap::new())),
             v2_votes: Arc::new(RwLock::new(HashMap::new())),
             v2_revotes: Arc::new(std::sync::Mutex::new(Vec::new())),
+            v2_invalid: Arc::new(RwLock::new(HashMap::new())),
             event_tx: tokio::sync::broadcast::channel(8192).0,
         }
     }
@@ -624,6 +636,7 @@ impl ConsensusEngine {
         self.v2_blocks.write().unwrap().clear();
         self.v2_votes.write().unwrap().clear();
         self.v2_revotes.lock().unwrap().clear();
+        self.v2_invalid.write().unwrap().clear();
         self.mempool.clear();
         self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
         self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -858,6 +871,90 @@ impl ConsensusEngine {
         chain.last().map(|b| b.header.height).unwrap_or(0)
     }
 
+    /// Ensure our store reflects exactly the finalized tip before we produce.
+    ///
+    /// The produce path (`execute_block_journaled`) commits to the live store
+    /// EAGERLY, before finalization, stashing an undo-delta in the pending block.
+    /// That delta is only replayed into the rollback journal when the block
+    /// FINALIZES. If a produce attempt is superseded first — by re-proposal, the
+    /// backup proposer, the partition prober, or a competing block winning — its
+    /// eager writes stay in the store with nothing to undo them. On a normal
+    /// (empty / non-boundary) block that is harmless because production is
+    /// idempotent, but at an EPOCH BOUNDARY the eager writes include the epoch
+    /// reward distribution (`stage_block`, height % 100 == 0), so the next produce
+    /// runs on a DOUBLE-rewarded store and computes a state root no other validator
+    /// reproduces — the block the whole fleet rejects on execution, halting it
+    /// (mainnet 2026-07-16, block 1028501: an empty block that diverged on the
+    /// proposer alone). Restoring the store to the finalized tip here makes
+    /// production start from clean, canonical state regardless of any superseded
+    /// attempt. No-op in the common case (store already == tip), so it does not
+    /// change the state root of any correctly-produced block.
+    fn restore_store_to_finalized_tip(&self) {
+        let tip_root = match self.chain.read().unwrap().last() {
+            Some(b) => b.result.state_root,
+            None => return,
+        };
+        if self.store.read().unwrap().state_root() == tip_root {
+            return; // clean — the overwhelmingly common path
+        }
+        // Drift detected. Undo our own executed-but-unfinalized blocks using the
+        // reverts stashed at produce time (newest height first). Applying a
+        // reverse-delta is idempotent, so this is safe even if partially undone.
+        let mut reverts: Vec<(u64, solen_execution::executor::BlockRevert)> = Vec::new();
+        {
+            let mut v2 = self.v2_blocks.write().unwrap();
+            for (h, cands) in v2.iter_mut() {
+                let ours: Vec<Hash> = cands
+                    .iter()
+                    .filter(|(_, pb)| pb.already_executed && pb.revert.is_some())
+                    .map(|(hash, _)| *hash)
+                    .collect();
+                for hash in ours {
+                    if let Some(pb) = cands.remove(&hash) {
+                        if let Some(r) = pb.revert {
+                            reverts.push((*h, r));
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let mut pend = self.pending_blocks.write().unwrap();
+            let ours: Vec<u64> = pend
+                .iter()
+                .filter(|(_, pb)| pb.already_executed && pb.revert.is_some())
+                .map(|(h, _)| *h)
+                .collect();
+            for h in ours {
+                if let Some(pb) = pend.remove(&h) {
+                    if let Some(r) = pb.revert {
+                        reverts.push((h, r));
+                    }
+                }
+            }
+        }
+        reverts.sort_by(|a, b| b.0.cmp(&a.0)); // newest height first
+        {
+            let mut store = self.store.write().unwrap();
+            for (h, revert) in &reverts {
+                if let Err(e) = store.apply_batch_atomic(revert, true) {
+                    warn!(height = *h, error = %e, "failed to undo leaked eager-commit before produce");
+                }
+            }
+            store.commit_root();
+        }
+        let now_root = self.store.read().unwrap().state_root();
+        if now_root == tip_root {
+            warn!("store had drifted from the finalized tip — undid a leaked eager-commit before producing");
+        } else {
+            // A deeper drift we can't undo locally (e.g. reverts already GC'd).
+            // Resync is the safe fallback; with the finalize-mismatch fix a single
+            // resyncing node no longer halts the fleet.
+            warn!("store still drifted from finalized tip after undo — requesting resync to avoid proposing a divergent block");
+            self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub fn get_block(&self, height: BlockHeight) -> Option<FinalizedBlock> {
         let chain = self.chain.read().unwrap();
         chain.iter().find(|b| b.header.height == height).cloned()
@@ -871,6 +968,11 @@ impl ConsensusEngine {
     /// Produce a single block. Returns the block, its operations, and
     /// whether it was immediately finalized (single-validator mode).
     pub fn produce_block(&self) -> ProducedBlock {
+        // The produce path commits eagerly; guarantee we build on the finalized
+        // tip's state, not on writes left behind by a superseded earlier attempt
+        // (which at an epoch boundary would double-apply the reward and diverge).
+        self.restore_store_to_finalized_tip();
+
         let mut ops = self.mempool.drain(self.config.max_ops_per_block);
 
         // Filter out operations with stale nonces (already finalized by peer blocks).
@@ -1365,8 +1467,26 @@ impl ConsensusEngine {
             return false;
         }
 
-        // Validate against trusted checkpoints (long-range attack protection).
         let bh = block_hash(header);
+
+        // Never re-accept a block we already proved execution-invalid at this
+        // height. The forked proposer keeps re-gossiping it, and (being the
+        // designated rank-0 proposer) v2 would otherwise keep re-selecting it as
+        // leader — livelocking against the backup's valid block. Ignoring it here
+        // lets the backup take the slot. (Empty in the common case.)
+        if self
+            .v2_invalid
+            .read()
+            .unwrap()
+            .get(&header.height)
+            .is_some_and(|s| s.contains(&bh))
+        {
+            debug!(height = header.height, hash = ?&bh[..4],
+                   "ignoring known execution-invalid block");
+            return false;
+        }
+
+        // Validate against trusted checkpoints (long-range attack protection).
         if let Some(expected) = self.trusted_checkpoints.validate(header.height, &bh) {
             warn!(
                 height = header.height,
@@ -1762,8 +1882,15 @@ impl ConsensusEngine {
         let order = vs.proposer_order_for_height(height, &seed);
         let blocks = self.v2_blocks.read().unwrap();
         let candidates = blocks.get(&height)?;
+        let invalid = self.v2_invalid.read().unwrap();
+        let invalid_at = invalid.get(&height);
         let mut best: Option<(Hash, u128, usize)> = None; // (hash, stake, rank)
         for (hash, voters) in tally {
+            // Never elect a block we've proven execution-invalid, even if stray
+            // votes for it linger before they're retracted/GC'd.
+            if invalid_at.is_some_and(|s| s.contains(hash)) {
+                continue;
+            }
             // Must hold the block to be a viable leader.
             let Some(pb) = candidates.get(hash) else { continue };
             let stake = vs.stake_of(voters);
@@ -1793,8 +1920,15 @@ impl ConsensusEngine {
         // 1) Finalize any hash that has reached 2/3 AND whose block we hold.
         {
             let vs = self.validator_set.read().unwrap();
+            let invalid = self.v2_invalid.read().unwrap();
+            let invalid_at = invalid.get(&height);
             let mut winner: Option<Hash> = None;
             for (h, voters) in &tally {
+                // Never finalize a block we've proven execution-invalid, even if
+                // stray votes for it still show quorum before they're retracted.
+                if invalid_at.is_some_and(|s| s.contains(h)) {
+                    continue;
+                }
                 if vs.has_quorum(voters) {
                     let have = self.v2_blocks.read().unwrap()
                         .get(&height).map(|m| m.contains_key(h)).unwrap_or(false);
@@ -1804,6 +1938,7 @@ impl ConsensusEngine {
                     }
                 }
             }
+            drop(invalid);
             drop(vs);
             if let Some(h) = winner {
                 self.v2_finalize(height, h);
@@ -2012,11 +2147,43 @@ impl ConsensusEngine {
                 )
             };
 
-            // A mismatch here is against a block we're finalizing (it carries a
-            // quorum of attestations), so the canonical chain genuinely diverges
-            // from our state — we must resync. The revert above means we do so
-            // from a clean prior-height state rather than a corrupted one.
+            // Mismatch handling. `accept_block` already verified this block chains
+            // to our tip, so OUR height-1 state is canonical; executing the block's
+            // ops on it yields the correct root, and a mismatch means the PROPOSER's
+            // claimed root is objectively wrong — the block is bad, we are NOT
+            // diverged. The block is reverted above, leaving our state clean at the
+            // prior height.
             let Some((exec_result, revert)) = exec_result else {
+                let bad = block_hash(&pb.header);
+                if self.fc_v2_active(height) {
+                    // v2 path: reject the bad block and let the backup proposer
+                    // produce a valid one at this height, which v2 vote-change
+                    // converges on. Do NOT resync — that would latch us (and, when
+                    // the whole honest majority blind-attests a bad header then
+                    // rejects it on execution, EVERY node at once) out of consensus
+                    // via the `is_resyncing` gate in accept_block, halting the chain
+                    // until an operator intervenes (mainnet 2026-07-16). A genuinely
+                    // behind/forked node is still recovered by the sync path's
+                    // `consecutive_sync_reverts` resync instead.
+                    warn!(
+                        height,
+                        proposer = ?&pb.header.proposer[..4],
+                        theirs = ?&pb.header.state_root[..4],
+                        "state root mismatch on finalization — rejected invalid block, awaiting backup proposer"
+                    );
+                    self.v2_invalid.write().unwrap().entry(height).or_default().insert(bad);
+                    // Retract our own vote for the bad hash so it loses our quorum
+                    // weight; every honest node does the same, so it can never be
+                    // re-selected as the v2 leader.
+                    if let Some(m) = self.v2_votes.write().unwrap().get_mut(&height) {
+                        if m.get(&self.config.validator_id) == Some(&bad) {
+                            m.remove(&self.config.validator_id);
+                        }
+                    }
+                    return;
+                }
+                // Pre-v2: without vote-change the fleet cannot converge on a backup
+                // block, so keep the historical resync behaviour.
                 warn!(
                     height,
                     proposer = ?&pb.header.proposer[..4],
@@ -2041,6 +2208,10 @@ impl ConsensusEngine {
         self.rollback_journal.write().unwrap().record(height, block_revert);
         self.persist_block_and_meta(&block);
         self.emit_block_events(&block);
+        // We advanced past `height`; execution-invalid markers at/below it are now
+        // obsolete. (Only reached on a SUCCESSFUL finalize — the mismatch branch
+        // returns early, so the marker it just set survives while we stay put.)
+        self.v2_invalid.write().unwrap().retain(|h, _| *h > height);
 
         // Remove finalized operations from our mempool to prevent
         // re-including already-executed transactions in future blocks.
@@ -2712,6 +2883,7 @@ impl ConsensusEngine {
         // v2 fork-choice candidates + votes at/below the synced height are stale.
         self.v2_blocks.write().unwrap().retain(|h, _| *h > current_height);
         self.v2_votes.write().unwrap().retain(|h, _| *h > current_height);
+        self.v2_invalid.write().unwrap().retain(|h, _| *h > current_height);
         let cleared = before - pending.len();
         if cleared > 0 {
             info!(cleared, current_height, "cleared stale pending blocks after sync");
@@ -3431,6 +3603,165 @@ mod tests {
         assert_eq!(engine.height(), next_h, "vote-change converged -> block A finalized");
         let finalized = engine.get_block(next_h).unwrap();
         assert_eq!(block_hash(&finalized.header), hash_a, "the converged hash finalized");
+    }
+
+    /// Regression for the 2026-07-16 mainnet halt. A proposer emits a block whose
+    /// state root the honest majority does NOT reproduce on execution (a
+    /// non-deterministic divergence). The majority blind-attests the header
+    /// (execution happens only at finalize), reaches quorum, then every node
+    /// rejects the block on execution. It must NOT latch into a resync halt —
+    /// instead the block is marked execution-invalid and dropped, and the backup
+    /// proposer's valid block at the same height finalizes so the chain advances.
+    #[test]
+    fn bad_root_block_rejected_without_resync_then_backup_finalizes() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        // We are ids[0], an honest validator; v2 active from height 0.
+        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        let head_h = engine.height();
+        let (parent_hash, parent_ts) = engine
+            .get_block(head_h)
+            .map(|b| (block_hash(&b.header), b.header.timestamp_ms))
+            .unwrap_or(([0u8; 32], 0));
+        let empty_root = { engine.store().read().unwrap().state_root() };
+        let next_h = head_h + 1;
+
+        let make_block = |proposer_idx: usize, state_root: [u8; 32]| -> BlockHeader {
+            let mut h = BlockHeader {
+                height: next_h,
+                epoch: next_h / crate::epoch::EPOCH_LENGTH,
+                parent_hash,
+                state_root,
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer: ids[proposer_idx],
+                timestamp_ms: parent_ts + 6000,
+                proposer_signature: vec![],
+            };
+            let bh = block_hash(&h);
+            h.proposer_signature = kps[proposer_idx].sign(&bh).to_vec();
+            h
+        };
+
+        // Proposer ids[1] emits a block claiming a root nobody else reproduces:
+        // it's an empty block (real root == empty_root) but the header lies [7;32].
+        let bad_block = make_block(1, [7u8; 32]);
+        let bad_hash = block_hash(&bad_block);
+        assert!(engine.accept_block(&bad_block, &[]), "bad block accepted as candidate (header valid)");
+
+        // The honest majority BLIND-attests the header — incl. us — to quorum (4/5).
+        engine.accept_attestation(ids[0], next_h, bad_hash);
+        engine.accept_attestation(ids[1], next_h, bad_hash);
+        engine.accept_attestation(ids[2], next_h, bad_hash);
+        engine.accept_attestation(ids[3], next_h, bad_hash);
+
+        // On finalize we execute, find the root mismatch, and REJECT — no resync.
+        assert_eq!(engine.height(), head_h, "bad block must NOT finalize");
+        assert!(
+            !engine.resync_requested(),
+            "must NOT latch into resync — that is what halted mainnet 2026-07-16"
+        );
+        assert!(
+            !engine.accept_block(&bad_block, &[]),
+            "known execution-invalid block must not be re-accepted (else it re-wins as rank-0 proposer)"
+        );
+
+        // The backup proposer ids[2] produces a VALID block at the same height.
+        let good_block = make_block(2, empty_root);
+        let good_hash = block_hash(&good_block);
+        assert_ne!(bad_hash, good_hash);
+        assert!(engine.accept_block(&good_block, &[]), "valid backup block accepted");
+        engine.accept_attestation(ids[0], next_h, good_hash);
+        engine.accept_attestation(ids[1], next_h, good_hash);
+        engine.accept_attestation(ids[2], next_h, good_hash);
+        engine.accept_attestation(ids[3], next_h, good_hash);
+
+        assert_eq!(engine.height(), next_h, "backup's valid block finalized — chain advanced, no halt");
+        assert_eq!(block_hash(&engine.get_block(next_h).unwrap().header), good_hash);
+    }
+
+    /// Root-cause regression for the 2026-07-16 divergence: the produce path
+    /// commits eagerly, so a superseded produce attempt can leave writes in the
+    /// store with nothing to undo them; the next produce then builds on corrupted
+    /// state (at an epoch boundary, a double-applied reward) → a root the fleet
+    /// rejects. produce_block must first restore the store to the finalized tip.
+    #[test]
+    fn produce_restores_store_after_leaked_eager_commit() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let store = MemoryStore::new();
+        let mempool = Mempool::new(1000);
+        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
+
+        // Establish a real finalized tip: produce an empty block 1 and finalize it
+        // with a 2/3 quorum (2 of 3).
+        let p1 = engine.produce_block();
+        let hash1 = block_hash(&p1.header);
+        engine.accept_attestation(ids[1], 1, hash1);
+        engine.accept_attestation(ids[2], 1, hash1);
+        assert_eq!(engine.height(), 1, "block 1 finalized — we have a finalized tip");
+        let tip_root = engine.store().read().unwrap().state_root();
+
+        // Simulate a superseded produce attempt at height 2 that eager-committed a
+        // write and was never finalized or reverted (the leak).
+        let leaked_key = b"acc/leaked-phantom".to_vec();
+        {
+            let store_arc = engine.store();
+            let mut store = store_arc.write().unwrap();
+            store.put(&leaked_key, b"phantom").unwrap();
+            store.commit_root();
+        }
+        let drifted_root = engine.store().read().unwrap().state_root();
+        assert_ne!(drifted_root, tip_root, "store drifted from finalized tip (leaked eager-commit)");
+
+        // Stash the matching pending block with its reverse-delta, as produce would.
+        let mut header = BlockHeader {
+            height: 2,
+            epoch: 0,
+            parent_hash: hash1,
+            state_root: drifted_root,
+            transactions_root: [0u8; 32],
+            receipts_root: [0u8; 32],
+            proposer: ids[0],
+            timestamp_ms: 12000,
+            proposer_signature: vec![],
+        };
+        let bh = block_hash(&header);
+        header.proposer_signature = kps[0].sign(&bh).to_vec();
+        let mut revert: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        revert.insert(leaked_key.clone(), None); // undo = delete (no prior value)
+        engine.v2_blocks.write().unwrap().entry(2).or_default().insert(
+            bh,
+            PendingBlock {
+                header,
+                operations: vec![],
+                proposed_at: std::time::Instant::now(),
+                already_executed: true,
+                result: None,
+                revert: Some(revert),
+                mismatch_count: 0,
+            },
+        );
+
+        // Producing must first restore the store to the finalized tip.
+        let _ = engine.produce_block();
+        assert_eq!(
+            engine.store().read().unwrap().state_root(),
+            tip_root,
+            "produce restored the store to the finalized tip before building the next block"
+        );
+        assert!(
+            engine.store().read().unwrap().get(&leaked_key).unwrap().is_none(),
+            "the leaked eager-commit write was undone"
+        );
     }
 
     /// produce_block under v2: our block becomes a candidate + self-vote, and

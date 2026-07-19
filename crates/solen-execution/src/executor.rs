@@ -429,6 +429,13 @@ impl BlockExecutor {
 
     /// Set the activation height for post-quantum (ML-DSA-65) account auth.
     /// Below it, `AuthMethod::MlDsa` is not honored (ships dormant; not default).
+    /// The height at/after which post-quantum (ML-DSA / Hybrid) auth is honored.
+    /// `u64::MAX` means dormant (never active). Surfaced via RPC so clients (e.g.
+    /// the wallet) can tell whether a PQ account upgrade is safe yet.
+    pub fn pq_auth_height(&self) -> u64 {
+        self.pq_auth_height
+    }
+
     pub fn with_pq_auth_height(mut self, height: u64) -> Self {
         self.pq_auth_height = height;
         self

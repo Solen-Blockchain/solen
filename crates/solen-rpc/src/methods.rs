@@ -118,6 +118,12 @@ pub struct ChainConfig {
     pub epoch_length: u64,
     pub base_fee_per_gas: String,
     pub burn_rate_bps: u64,
+    /// Height at/after which post-quantum (ML-DSA / Hybrid) account auth is
+    /// honored. `"18446744073709551615"` (u64::MAX) = dormant/not activated.
+    /// String to avoid JS number-precision loss. Clients gate PQ upgrades on
+    /// `height >= pq_auth_height` — upgrading while dormant bricks the account.
+    #[serde(default)]
+    pub pq_auth_height: String,
 }
 
 /// Validator info returned by the RPC.
@@ -1383,6 +1389,7 @@ impl SolenApiServer for SolenRpc {
                 epoch_length: 100,
                 base_fee_per_gas: config_base_fee.to_string(),
                 burn_rate_bps: config_burn_rate,
+                pq_auth_height: self.engine.executor().pq_auth_height().to_string(),
             },
         })
     }

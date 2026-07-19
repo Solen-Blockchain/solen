@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 default = ["rocksdb"]
 rocksdb = ["solen-storage/rocksdb"]
+# Heap profiling: build with `--features dhat-heap` to write dhat-heap.json on
+# clean shutdown (SIGINT). Never in the default/production build. Diagnostic only.
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 solen-types = { workspace = true }
@@ -31,3 +34,4 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+dhat = { version = "0.3", optional = true }

@@ -210,8 +210,16 @@ struct Cli {
     pq_auth_height: u64,
 }
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Heap profiler guard (diagnostic builds only). Writes dhat-heap.json when it
+    // drops at the end of main() — i.e. on the clean ctrl_c() shutdown below.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat_profiler = dhat::Profiler::new_heap();
     let cli = Cli::parse();
 
     // Resolve defaults from network.

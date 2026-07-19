@@ -1829,21 +1829,23 @@ async fn main() -> anyhow::Result<()> {
                 // the blocking client (and its runtime drop) run without panicking
                 // — required now that mainnet has resync URLs.
                 tokio::task::block_in_place(|| {
-                // If our current tip is already canonical we are not forked —
-                // only behind/sync-starved — and the backward recovery tiers
-                // below would merely REGRESS us to an earlier canonical height,
-                // from which the same starved block-sync path re-strands us (an
-                // endless resync loop). Those tiers are correct only for a FORKED
-                // tip; when our tip is canonical, skip straight to the
-                // forward-pulling remote snapshot. (state_root collides across
-                // heights on an idle chain, but it is compared at the SAME height
-                // here, so the check is sound.)
-                let tip_canonical = {
+                // The backward recovery tiers below REGRESS us to an earlier
+                // height, so they are correct ONLY for a DEFINITIVELY forked tip.
+                // If our tip is canonical we are merely behind/sync-starved, and
+                // regressing would re-strand us in an endless resync loop. Just as
+                // important: if the probe is INCONCLUSIVE (canonical source timed
+                // out — common when the whole fleet is restarting), we must NOT
+                // treat that as a fork and regress; fail open and fall through to
+                // the forward-pulling remote snapshot instead. Gating on `!canonical`
+                // (fail-closed) is exactly what wedged validator8 on 2026-07-19.
+                // (state_root collides across heights on an idle chain, but it is
+                // compared at the SAME height here, so the check is sound.)
+                let tip_forked = {
                     let h = engine_clone.height();
                     let root = engine_clone.store().read().unwrap().state_root();
-                    h > 0 && checkpoint_is_canonical(&resync_urls, h, &root)
+                    h > 0 && matches!(check_canonicity(&resync_urls, h, &root), Canonicity::Forked)
                 };
-                if !tip_canonical {
+                if tip_forked {
                 // --- Phase 2: in-place rollback to the common ancestor. If the
                 // fork is shallow enough to sit within the rollback journal, find
                 // the deepest height where our state root still matches the
@@ -2304,34 +2306,95 @@ fn find_common_ancestor(
 /// seed that answers (reachable + root matches → true; reachable + root differs
 /// → false). If no seed answers we can't confirm, so return false and let the
 /// caller fall back to the remote download path.
-fn checkpoint_is_canonical(urls: &[String], height: u64, expected_root: &[u8; 32]) -> bool {
+/// Three-way verdict from probing canonical peers about a block's state root.
+/// Distinguishes a DEFINITIVE fork (a peer returned a different root) from an
+/// INCONCLUSIVE probe (no peer answered — timeout/error). Conflating the two
+/// (the old fail-closed `bool`) let a transient RPC hiccup masquerade as a fork,
+/// sending a healthy-but-behind node into destructive backward recovery that
+/// re-strands in an endless resync loop (2026-07-19 validator8 wedge).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Canonicity {
+    /// A peer confirmed our root at this height — we are on the canonical chain.
+    Canonical,
+    /// A peer returned a DIFFERENT root at this height — we are forked.
+    Forked,
+    /// No peer gave a definitive answer (all timed out / errored). Unknown.
+    Inconclusive,
+}
+
+/// Classify one peer's reported root (`None` = it didn't answer) against what we
+/// expect. `None` => inconclusive from THIS source (caller tries the next).
+fn classify_root(reported: Option<&str>, want_hex: &str) -> Option<Canonicity> {
+    match reported {
+        Some(root) if root.eq_ignore_ascii_case(want_hex) => Some(Canonicity::Canonical),
+        Some(_) => Some(Canonicity::Forked),
+        None => None,
+    }
+}
+
+/// Fold per-source answers into a verdict: the first source that answers
+/// definitively decides; if none do, the probe is Inconclusive (NOT Forked).
+fn decide_canonicity<'a>(
+    answers: impl IntoIterator<Item = Option<&'a str>>,
+    want_hex: &str,
+) -> Canonicity {
+    for a in answers {
+        if let Some(v) = classify_root(a, want_hex) {
+            return v;
+        }
+    }
+    Canonicity::Inconclusive
+}
+
+/// Ask canonical peers whether the block at `height` has `expected_root`,
+/// retrying across all `urls` with backoff before concluding. Returns
+/// `Inconclusive` (NOT `Forked`) when no source answers, so callers can
+/// fail-open on transient unavailability instead of destructively regressing.
+fn check_canonicity(urls: &[String], height: u64, expected_root: &[u8; 32]) -> Canonicity {
+    if urls.is_empty() {
+        return Canonicity::Inconclusive;
+    }
     let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return Canonicity::Inconclusive,
     };
     let want = hex(expected_root);
     let body = format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{height}]}}"#
     );
-    for url in urls {
-        if let Ok(resp) = client.post(url.as_str())
-            .header("Content-Type", "application/json")
-            .body(body.clone())
-            .send()
-        {
-            if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(root) = json["result"]["state_root"].as_str() {
-                    // First seed with a definitive answer decides.
-                    return root.eq_ignore_ascii_case(&want);
-                }
-            }
+    // Up to 3 rounds over all sources; return on the first definitive answer.
+    // A transient timeout on one round must not read as a fork — retry first.
+    const ROUNDS: u64 = 3;
+    for round in 0..ROUNDS {
+        let answers: Vec<Option<String>> = urls.iter().map(|url| {
+            let resp = client.post(url.as_str())
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send().ok()?;
+            let json = resp.json::<serde_json::Value>().ok()?;
+            json["result"]["state_root"].as_str().map(|s| s.to_string())
+        }).collect();
+        let verdict = decide_canonicity(answers.iter().map(|o| o.as_deref()), &want);
+        if verdict != Canonicity::Inconclusive {
+            return verdict;
         }
-        // This seed didn't answer — try the next.
+        if round + 1 < ROUNDS {
+            std::thread::sleep(std::time::Duration::from_millis(500 * (round + 1)));
+        }
     }
-    false
+    Canonicity::Inconclusive
+}
+
+/// True only when a canonical peer DEFINITIVELY confirms `expected_root` at
+/// `height` — gates a checkpoint RESTORE, where we must never restore state we
+/// couldn't confirm (so Inconclusive is treated as not-canonical here). Unlike
+/// the old raw check it now retries first, so a transient hiccup no longer makes
+/// a node reject its own valid checkpoints while walking the recovery tiers.
+fn checkpoint_is_canonical(urls: &[String], height: u64, expected_root: &[u8; 32]) -> bool {
+    matches!(check_canonicity(urls, height, expected_root), Canonicity::Canonical)
 }
 
 /// Build the deterministic payload for attestation signing/verification.
@@ -2406,4 +2469,59 @@ fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod canonicity_tests {
+    use super::{classify_root, decide_canonicity, checkpoint_is_canonical, Canonicity};
+
+    #[test]
+    fn classify_matching_root_is_canonical() {
+        // Case-insensitive hex comparison.
+        assert_eq!(classify_root(Some("abCD"), "ABcd"), Some(Canonicity::Canonical));
+    }
+
+    #[test]
+    fn classify_differing_root_is_forked() {
+        assert_eq!(classify_root(Some("dead"), "beef"), Some(Canonicity::Forked));
+    }
+
+    #[test]
+    fn classify_no_answer_is_inconclusive_from_source() {
+        assert_eq!(classify_root(None, "beef"), None);
+    }
+
+    #[test]
+    fn all_sources_silent_is_inconclusive_not_forked() {
+        // THE WEDGE TRIGGER: every canonical source timed out. Must be
+        // Inconclusive, never Forked — else the node destructively regresses.
+        let answers: Vec<Option<&str>> = vec![None, None, None];
+        assert_eq!(decide_canonicity(answers, "beef"), Canonicity::Inconclusive);
+    }
+
+    #[test]
+    fn empty_source_list_is_inconclusive() {
+        let answers: Vec<Option<&str>> = vec![];
+        assert_eq!(decide_canonicity(answers, "beef"), Canonicity::Inconclusive);
+    }
+
+    #[test]
+    fn first_definitive_answer_wins_over_silence() {
+        // A slow first source must not mask a healthy second one.
+        let answers: Vec<Option<&str>> = vec![None, Some("beef"), None];
+        assert_eq!(decide_canonicity(answers, "beef"), Canonicity::Canonical);
+    }
+
+    #[test]
+    fn definitive_fork_is_reported() {
+        let answers: Vec<Option<&str>> = vec![Some("dead")];
+        assert_eq!(decide_canonicity(answers, "beef"), Canonicity::Forked);
+    }
+
+    #[test]
+    fn checkpoint_is_canonical_requires_positive_confirmation() {
+        // No sources → Inconclusive → NOT a positive canonical confirmation, so
+        // a checkpoint RESTORE stays gated (we never restore unconfirmed state).
+        assert!(!checkpoint_is_canonical(&[], 100, &[0u8; 32]));
+    }
 }

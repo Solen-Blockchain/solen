@@ -34,6 +34,30 @@ pub const QUORUM_BPS: u64 = 3000; // 30%
 /// Supermajority threshold for passing (basis points).
 pub const PASS_THRESHOLD_BPS: u64 = 6667; // 66.67%
 
+/// Activation epoch for the EMERGENCY-action fast-track. A circuit breaker that
+/// still needs the full ~2016-epoch voting period + timelock isn't a circuit
+/// breaker, so once active, an EmergencyPause/EmergencyResume proposal can be
+/// finalized the moment it reaches quorum + supermajority (no voting-window wait)
+/// and executed with NO timelock. Normal proposals are unaffected — deliberate
+/// governance keeps its window. The 66.67% supermajority still applies to the
+/// fast-track (raise the threshold check for emergencies if you want a higher bar).
+///
+/// CONSENSUS-AFFECTING: it changes WHEN a proposal executes, which is in the state
+/// root. Dormant by default (`u64::MAX`); to activate, set a chosen future epoch,
+/// rebuild, and roll to ALL nodes before that epoch (coordinated flag-day, like
+/// `fork_choice_v2_height`). Until then behaviour is unchanged.
+pub const EMERGENCY_FASTTRACK_ACTIVATION_EPOCH: u64 = u64::MAX;
+
+/// Whether the emergency fast-track is active at `epoch`.
+pub fn emergency_fasttrack_active(epoch: u64) -> bool {
+    epoch >= EMERGENCY_FASTTRACK_ACTIVATION_EPOCH
+}
+
+/// Emergency actions (circuit breaker) eligible for the fast-track.
+fn is_emergency(action: &ProposalAction) -> bool {
+    matches!(action, ProposalAction::EmergencyPause | ProposalAction::EmergencyResume)
+}
+
 /// Minimum deposit to create a proposal (in base units).
 /// Returned if proposal passes, sent to treasury if rejected.
 /// 1,000 SOLEN = 100,000,000,000 base units.
@@ -252,6 +276,7 @@ impl GovernanceContract {
         proposal_id: u64,
         total_stake: u128,
         current_epoch: u64,
+        emergency_fasttrack: bool,
     ) -> Result<ProposalStatus, GovernanceError> {
         let proposal = self
             .proposals
@@ -259,7 +284,11 @@ impl GovernanceContract {
             .find(|p| p.id == proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
-        if current_epoch <= proposal.voting_end_epoch {
+        // Emergency circuit-breaker actions may finalize the instant they reach
+        // quorum + supermajority — no voting-window wait. Every other proposal
+        // must run its full voting period first.
+        let emergency = emergency_fasttrack && is_emergency(&proposal.action);
+        if !emergency && current_epoch <= proposal.voting_end_epoch {
             return Err(GovernanceError::VotingNotEnded);
         }
 
@@ -278,11 +307,15 @@ impl GovernanceContract {
         let threshold_met = total_voted > 0
             && proposal.total_for.saturating_mul(10_000) >= total_voted.saturating_mul(PASS_THRESHOLD_BPS as u128);
 
-        proposal.status = if quorum_met && threshold_met {
-            ProposalStatus::Passed
+        if quorum_met && threshold_met {
+            proposal.status = ProposalStatus::Passed;
+        } else if emergency && current_epoch <= proposal.voting_end_epoch {
+            // Emergency finalized early but not enough stake has voted yet — keep
+            // it Active (retriable as votes arrive) rather than rejecting it.
+            return Ok(ProposalStatus::Active);
         } else {
-            ProposalStatus::Rejected
-        };
+            proposal.status = ProposalStatus::Rejected;
+        }
 
         Ok(proposal.status.clone())
     }
@@ -292,6 +325,7 @@ impl GovernanceContract {
         &mut self,
         proposal_id: u64,
         current_epoch: u64,
+        emergency_fasttrack: bool,
     ) -> Result<ProposalAction, GovernanceError> {
         let proposal = self
             .proposals
@@ -302,7 +336,11 @@ impl GovernanceContract {
         if proposal.status != ProposalStatus::Passed {
             return Err(GovernanceError::ProposalNotPassed);
         }
-        if current_epoch < proposal.execute_after_epoch {
+        // Emergency actions execute immediately once Passed — no timelock. The
+        // timelock exists to give the network a window to react to a controversial
+        // change; a circuit breaker is the opposite of something you want delayed.
+        let emergency = emergency_fasttrack && is_emergency(&proposal.action);
+        if !emergency && current_epoch < proposal.execute_after_epoch {
             return Err(GovernanceError::TimelockNotExpired);
         }
 
@@ -366,17 +404,17 @@ mod tests {
         gov.vote(pid, aid(11), false, 300, 12).unwrap();
 
         // Can't finalize during voting period.
-        assert!(gov.finalize(pid, 1000, 20).is_err());
+        assert!(gov.finalize(pid, 1000, 20, false).is_err());
 
         // Finalize after voting period (10 + 14 = 24).
-        let status = gov.finalize(pid, 1000, 25).unwrap();
+        let status = gov.finalize(pid, 1000, 25, false).unwrap();
         assert_eq!(status, ProposalStatus::Passed);
 
         // Can't execute before timelock (24 + 3 = 27).
-        assert!(gov.execute(pid, 26).is_err());
+        assert!(gov.execute(pid, 26, false).is_err());
 
         // Execute after timelock.
-        let action = gov.execute(pid, 28).unwrap();
+        let action = gov.execute(pid, 28, false).unwrap();
         match action {
             ProposalAction::SetBaseFee { new_fee } => assert_eq!(new_fee, 5),
             _ => panic!("wrong action"),
@@ -422,7 +460,7 @@ mod tests {
         // Only 20% participation (below 30% quorum).
         gov.vote(pid, aid(10), true, 200, 5).unwrap();
 
-        let status = gov.finalize(pid, 1000, 15).unwrap();
+        let status = gov.finalize(pid, 1000, 15, false).unwrap();
         assert_eq!(status, ProposalStatus::Rejected);
     }
 
@@ -440,7 +478,7 @@ mod tests {
         gov.vote(pid, aid(10), true, 500, 5).unwrap();
         gov.vote(pid, aid(11), false, 500, 5).unwrap();
 
-        let status = gov.finalize(pid, 1000, 15).unwrap();
+        let status = gov.finalize(pid, 1000, 15, false).unwrap();
         assert_eq!(status, ProposalStatus::Rejected);
     }
 
@@ -470,9 +508,81 @@ mod tests {
         );
 
         gov.vote(pid, aid(10), true, 1000, 5).unwrap();
-        gov.finalize(pid, 1000, 15).unwrap();
-        gov.execute(pid, 20).unwrap();
+        gov.finalize(pid, 1000, 15, false).unwrap();
+        gov.execute(pid, 20, false).unwrap();
 
         assert!(gov.is_paused);
+    }
+
+    // ── emergency fast-track (execute as soon as enough votes) ──────────────
+
+    /// With the fast-track active, an emergency proposal finalizes + executes the
+    /// instant it hits quorum + supermajority — no voting-window wait, no timelock.
+    #[test]
+    fn emergency_fasttrack_executes_immediately_on_quorum() {
+        let mut gov = GovernanceContract::new();
+        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyPause, "halt now".into(), 100);
+        let voting_end = gov.get_proposal(pid).unwrap().voting_end_epoch; // 100 + 14
+        assert!(voting_end > 101);
+
+        // Enough stake votes yes (100% of 1000 = quorum + supermajority).
+        gov.vote(pid, aid(10), true, 1000, 101).unwrap();
+
+        // Finalize at epoch 101 — DEEP inside the voting window — succeeds only
+        // because it's an emergency and the fast-track is active.
+        let status = gov.finalize(pid, 1000, 101, true).unwrap();
+        assert_eq!(status, ProposalStatus::Passed, "emergency passes early on quorum");
+
+        // Execute immediately — no timelock wait.
+        let action = gov.execute(pid, 101, true).unwrap();
+        assert!(matches!(action, ProposalAction::EmergencyPause));
+        assert!(gov.is_paused, "circuit breaker fired immediately");
+    }
+
+    /// An emergency finalized early with insufficient votes stays Active (does NOT
+    /// reject) so it can pass as more stake votes.
+    #[test]
+    fn emergency_fasttrack_stays_active_until_enough_votes() {
+        let mut gov = GovernanceContract::new();
+        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyResume, "resume".into(), 100);
+
+        // Only 20% votes — below the 30% quorum.
+        gov.vote(pid, aid(10), true, 200, 101).unwrap();
+        let status = gov.finalize(pid, 1000, 101, true).unwrap();
+        assert_eq!(status, ProposalStatus::Active, "not enough yet — stays open, not rejected");
+
+        // More stake votes → now over quorum + threshold → passes.
+        gov.vote(pid, aid(11), true, 600, 102).unwrap();
+        let status = gov.finalize(pid, 1000, 102, true).unwrap();
+        assert_eq!(status, ProposalStatus::Passed);
+        gov.execute(pid, 102, true).unwrap();
+        assert!(!gov.is_paused);
+    }
+
+    /// The fast-track must NOT touch normal proposals — they still serve their
+    /// full voting window even when the fast-track is active.
+    #[test]
+    fn fasttrack_does_not_affect_normal_proposals() {
+        let mut gov = GovernanceContract::new();
+        let pid = gov.create_proposal(aid(1), ProposalAction::SetBaseFee { new_fee: 5 }, "fee".into(), 100);
+        gov.vote(pid, aid(10), true, 1000, 101).unwrap();
+        // Even with emergency_fasttrack=true, a non-emergency can't finalize early.
+        assert!(matches!(
+            gov.finalize(pid, 1000, 101, true),
+            Err(GovernanceError::VotingNotEnded)
+        ));
+    }
+
+    /// While the gate is dormant (fast-track=false), an emergency proposal behaves
+    /// like any other — full voting window + timelock.
+    #[test]
+    fn emergency_normal_when_fasttrack_dormant() {
+        let mut gov = GovernanceContract::new();
+        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyPause, "halt".into(), 100);
+        gov.vote(pid, aid(10), true, 1000, 101).unwrap();
+        assert!(matches!(
+            gov.finalize(pid, 1000, 101, false),
+            Err(GovernanceError::VotingNotEnded)
+        ));
     }
 }

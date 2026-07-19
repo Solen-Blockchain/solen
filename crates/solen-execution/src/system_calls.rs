@@ -771,7 +771,8 @@ fn execute_governance_call(
                 .map(|p| (p.proposer, p.deposit))
                 .unwrap_or(([0u8; 32], 0));
 
-            match gov.finalize(proposal_id, total_stake, epoch) {
+            let emergency_ft = solen_system_contracts::governance::emergency_fasttrack_active(epoch);
+            match gov.finalize(proposal_id, total_stake, epoch, emergency_ft) {
                 Ok(status) => {
                     let status_str = format!("{:?}", status);
 
@@ -816,7 +817,8 @@ fn execute_governance_call(
             };
             let epoch = read_current_epoch(store);
 
-            match gov.execute(proposal_id, epoch) {
+            let emergency_ft = solen_system_contracts::governance::emergency_fasttrack_active(epoch);
+            match gov.execute(proposal_id, epoch, emergency_ft) {
                 Ok(action) => {
                     // Apply the action to chain state.
                     let action_desc = match &action {

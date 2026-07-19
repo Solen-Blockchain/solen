@@ -128,16 +128,46 @@ done
 # Before H, after §1: EVERY node must read "pq_auth_height":"1110000".
 ```
 
-## Appendix C — canary at H (solen-cli, isolated keystore)
+## Appendix C — canary account (solen-cli, isolated keystore)
+1 SOLEN = 100_000_000 base units. Fees are ~0.01 SOLEN (`max_fee` 1_000_000 base,
+`base_fee_per_gas` 1), so ~5 SOLEN covers the SetAuth + a hybrid transfer + the
+1-SOLEN test amount with wide margin. `--network mainnet` targets
+`https://rpc.solenchain.io`, chain_id 1.
+
+### C.1 — prep + fund (do any time before H; §1 should be converged first)
 ```bash
-export HOME=/root/pq-canary   # isolate the cli keystore
-solen --network mainnet key import canary <throwaway-seed-hex>
-# ... fund `canary` with a few SOLEN beforehand ...
-# AFTER H:
-solen --network mainnet key quantum-upgrade canary --hybrid
-solen --network mainnet account canary          # auth_methods should show Hybrid
-solen --network mainnet transfer canary <dest> 1 # hybrid-signed; confirm it lands
+cargo build --release -p solen-cli          # ensure the CLI has `quantum-upgrade`
+SOLEN=~/solen/target/release/solen
+export CANARY_HOME=/tmp/pq-canary            # isolated keystore — never touches ~/.solen
+
+# 1) Generate a fresh THROWAWAY seed yourself (never share/reuse; small funds only):
+SEED=$(openssl rand -hex 32); echo "canary seed (save until done): $SEED"
+
+# 2) Import + read the address:
+HOME=$CANARY_HOME $SOLEN --network mainnet key import canary "$SEED"
+HOME=$CANARY_HOME $SOLEN --network mainnet account canary     # note the ID (base58) = CANARY_ADDR
+
+# 3) Fund ~5 SOLEN to CANARY_ADDR — from the wallet (send 5 SOLEN to CANARY_ADDR),
+#    or via CLI from a funded key:
+#    $SOLEN --network mainnet transfer <your-funded-key> <CANARY_ADDR> 5
+
+# 4) Verify:
+HOME=$CANARY_HOME $SOLEN --network mainnet balance canary     # ~5 SOLEN
+```
+
+### C.2 — exercise the PQ path (AFTER H, a few blocks past 1_110_000)
+```bash
+HOME=$CANARY_HOME $SOLEN --network mainnet key quantum-upgrade canary --hybrid
+HOME=$CANARY_HOME $SOLEN --network mainnet account canary      # auth_methods should show Hybrid
+# hybrid-signed transfer (send 1 SOLEN back to your funding address as <dest>):
+HOME=$CANARY_HOME $SOLEN --network mainnet transfer canary <dest> 1   # confirm it lands
 ```
 Note: the cli's `quantum-upgrade` mints a NEW hybrid seed (account_id preserved,
 auth ed-key differs from id). The WALLET path is phrase-preserving (auth ed-key
 == id). Both are valid on-chain; the node only checks signatures verify.
+
+### C.3 — wallet end-to-end (optional, at H)
+Have a spare **recovery-phrase** wallet account with a small balance (~1 SOLEN for
+fees). After H the Security tab shows PQ "active" and enables "Upgrade to
+quantum-safe (hybrid)"; run it once and confirm the SetAuth lands (address +
+phrase unchanged).

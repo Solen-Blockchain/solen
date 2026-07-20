@@ -1,0 +1,39 @@
+{
+  "ssh_user": "root",
+  "ssh_opts": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=12", "-o", "StrictHostKeyChecking=accept-new"],
+  "ssh_cmd_timeout": 30,
+  "alert_prefix": "[Solen fleet]",
+  "rpc_port": 9944,
+  "p2p_port": 30333,
+  "data_dir": "/opt/solen/data/mainnet",
+  "service": "solen-node",
+
+  "nodes": [
+    "validator1", "validator2", "validator3", "validator4", "validator5", "validator6",
+    "validator7", "validator8", "validator9", "validator10", "validator11"
+  ],
+  "_nodes_pending_access": ["rpc1", "rpc2", "rpc3", "rpc4"],
+  "_nodes_note": "rpc1-4 await rpc1's monitor key in their authorized_keys; move them into 'nodes' once reachable.",
+
+  "thresholds": {
+    "behind_blocks": 15,
+    "fleet_stall_secs": 90,
+    "peers_min": 3,
+    "partition_logs_per_window": 5,
+    "partition_window_secs": 70,
+    "bandwidth_mbps": 80,
+    "disk_pct": 85,
+    "remind_secs": 1800,
+    "remind_secs_critical": 300,
+    "rpc_timeout_secs": 10,
+    "down_min_secs": 90,
+
+    "mem_rss_mb_warn": 7000,
+    "mem_rss_mb_restart": 8500,
+    "mem_restart_cooldown_secs": 1200,
+    "mem_auto_restart": false,
+
+    "behind_overrides": { "validator9": 1500 },
+    "down_overrides": { "validator9": 600 }
+  }
+}

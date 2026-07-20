@@ -4,6 +4,13 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+/// Cap on in-memory indexed blocks (~1.4 days at 6s blocks). The explorer serves
+/// recent blocks; deeper history is in the chain/RocksDB. Bounds the indexer heap.
+const MAX_INDEXED_BLOCKS: usize = 20_000;
+/// Cap on in-memory indexed events. Higher than blocks because epoch-reward
+/// events fan out to every delegator, so events accumulate fastest.
+const MAX_INDEXED_EVENTS: usize = 200_000;
+
 /// An indexed block summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedBlock {
@@ -139,6 +146,15 @@ impl IndexStore {
     pub fn add_block(&mut self, block: IndexedBlock) {
         self.latest_height = block.height;
         self.blocks.push(block);
+        // Bound in-memory retention: the explorer only serves recent blocks, and
+        // full history lives in the chain/RocksDB. Unbounded growth here was a
+        // secondary heap leak (dhat 2026-07-19: solen_indexer::index_block). Both
+        // `blocks` and `events` are scan-queried (by height / block_height), never
+        // by Vec position, so draining the oldest is safe.
+        if self.blocks.len() > MAX_INDEXED_BLOCKS {
+            let excess = self.blocks.len() - MAX_INDEXED_BLOCKS;
+            self.blocks.drain(0..excess);
+        }
     }
 
     pub fn add_tx(&mut self, tx: IndexedTx, related_accounts: &[String]) {
@@ -163,6 +179,13 @@ impl IndexStore {
 
     pub fn add_event(&mut self, event: IndexedEvent) {
         self.events.push(event);
+        // Reward events fan out to every delegator at epoch boundaries, so this
+        // grows fastest; cap it (scan-queried by block_height/emitter, no
+        // positional deps). See add_block.
+        if self.events.len() > MAX_INDEXED_EVENTS {
+            let excess = self.events.len() - MAX_INDEXED_EVENTS;
+            self.events.drain(0..excess);
+        }
     }
 
     pub fn get_block(&self, height: u64) -> Option<&IndexedBlock> {
@@ -354,5 +377,43 @@ impl IndexStore {
 
     pub fn get_rollup_batch_count(&self, rollup_id: u64) -> usize {
         self.rollup_batches.get(&rollup_id).map(|b| b.len()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    fn blk(h: u64) -> IndexedBlock {
+        IndexedBlock { height: h, epoch: h / 100, parent_hash: String::new(),
+            state_root: String::new(), proposer: String::new(), timestamp_ms: 0,
+            tx_count: 0, gas_used: 0, attestation_count: 0 }
+    }
+    fn evt(h: u64) -> IndexedEvent {
+        IndexedEvent { block_height: h, tx_index: 0, emitter: String::new(),
+            topic: String::new(), data: String::new() }
+    }
+
+    #[test]
+    fn blocks_are_capped_keeping_the_most_recent() {
+        let mut s = IndexStore::new();
+        for h in 0..(MAX_INDEXED_BLOCKS as u64 + 500) { s.add_block(blk(h)); }
+        assert_eq!(s.blocks.len(), MAX_INDEXED_BLOCKS, "bounded");
+        // Oldest evicted, newest retained.
+        assert_eq!(s.blocks.first().unwrap().height, 500);
+        assert_eq!(s.blocks.last().unwrap().height, MAX_INDEXED_BLOCKS as u64 + 499);
+        // latest_height still tracks the true tip after eviction.
+        assert_eq!(s.latest_height, MAX_INDEXED_BLOCKS as u64 + 499);
+        // Recent-block query still works.
+        assert_eq!(s.get_recent_blocks(1)[0].height, MAX_INDEXED_BLOCKS as u64 + 499);
+    }
+
+    #[test]
+    fn events_are_capped_keeping_the_most_recent() {
+        let mut s = IndexStore::new();
+        for h in 0..(MAX_INDEXED_EVENTS as u64 + 300) { s.add_event(evt(h)); }
+        assert_eq!(s.events.len(), MAX_INDEXED_EVENTS, "bounded");
+        assert_eq!(s.events.first().unwrap().block_height, 300);
+        assert_eq!(s.events.last().unwrap().block_height, MAX_INDEXED_EVENTS as u64 + 299);
     }
 }

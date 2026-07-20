@@ -157,10 +157,18 @@ impl NetworkService {
             .with_peer_score(peer_score_params, peer_score_thresholds)
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
-        // Kademlia DHT for peer discovery across the internet.
+        // Kademlia DHT for peer discovery. CLIENT mode, not Server: Solen has a
+        // fixed validator fleet with every peer in the explicit bootstrap list
+        // (plus mdns + identify), and uses the DHT only for discovery — never
+        // get_record/put_record. Serving inbound DHT queries (Server mode) was
+        // pure overhead that LEAKED: each inbound Kad substream allocates a
+        // ~497KB read buffer that accumulated unfreed (dhat 2026-07-19: 448 live
+        // buffers = ~226MB, the fleet's dominant post-2026-07-17 heap leak).
+        // Client mode still lets us query for peers but stops advertising as a
+        // server, so peers no longer open inbound query substreams to us.
         let kad_store = libp2p::kad::store::MemoryStore::new(local_peer_id);
         let mut kademlia = libp2p::kad::Behaviour::new(local_peer_id, kad_store);
-        kademlia.set_mode(Some(libp2p::kad::Mode::Server));
+        kademlia.set_mode(Some(libp2p::kad::Mode::Client));
 
         // Identify protocol — exchanges peer info and keeps connections alive.
         let identify = libp2p::identify::Behaviour::new(

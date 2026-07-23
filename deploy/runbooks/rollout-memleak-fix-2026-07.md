@@ -80,13 +80,50 @@ agrees with the fleet, no checkpoint loop. (Same mechanics as the canonicity rol
 - [ ] All 15 on NEW_SHA, one state_root, advancing.
 - [ ] **RSS stays bounded** — over the next 24–48h, fleet RSS should plateau (no
   climb toward the 8.5GB watchdog line), and the watchdog should stop auto-restarting
-  nodes. Watch validator6 especially (was the fastest leaker).
+  nodes. Watch validator6 especially (was the fastest leaker). **NOTE (2026-07-23):
+  the code fix alone did NOT plateau — residual glibc arena retention kept the crawl
+  going; see §5 for the jemalloc supplement that actually flattened the fleet.**
 - [ ] Once RSS is confirmed flat for ~48h, **relax the mem watchdog**: on rpc1
   `/opt/solen-monitor/config.json`, restore `mem_rss_mb_warn` (was bumped 7000→8000
   as interim relief) and consider raising `mem_rss_mb_restart` / setting
   `mem_auto_restart:false` — the stopgap is no longer needed. Keep a modest warn as
   a safety net.
 - [ ] Clean up after ~24h stable: remove `solen-node.memfix-2026-07`; keep `solen-node.pre-memfix` until confident.
+
+## 5. jemalloc supplement — the clincher (deployed 2026-07-23)
+The code fix (Kad Client + indexer caps) removed the two *Rust* leaks but the fleet
+still crept to 2–6.5GB and tripped the watchdog. A local devnet repro under dhat
+proved the residual was NOT a Rust code path: +285MB RSS vs only ~14.6MB live in the
+Rust allocator. Root cause = **glibc `malloc` arena retention** (freed RocksDB/C++
+allocations held in per-thread arenas, never returned to the OS) under bursty
+serve/resync — anonymous heap, invisible to dhat (which only hooks the Rust global
+allocator). Fix = swap the allocator to **jemalloc**, which releases freed pages
+back to the OS.
+
+**Mechanism — LD_PRELOAD via a systemd drop-in (config-only, no rebuild, mixed-safe):**
+```bash
+for h in validator{1..11} rpc{1..4}; do
+  ssh root@$h '
+    apt-get install -y libjemalloc2
+    install -d /etc/systemd/system/solen-node.service.d
+    printf "[Service]\nEnvironment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2\n" \
+      > /etc/systemd/system/solen-node.service.d/jemalloc.conf
+    systemctl daemon-reload'
+  ssh root@$h 'systemctl restart solen-node'    # STANDALONE restart — do not fold into the compound cmd
+done
+```
+Roll one node at a time. The restart also clears that node's accumulated arena bloat.
+
+**Verify per node:** `PID=$(pgrep -x solen-node); grep -c jemalloc /proc/$PID/maps`
+must be non-zero (expect `5`), node active + finalizing with quorum, state_root
+agrees with the fleet.
+
+**Result (2026-07-23):** all 15 loaded (`jemalloc=5`), unanimous root, fleet RSS
+dropped from the 2–6.5GB spread to **~0.6–1.2GB** and stayed flat. v3 pre-roll test:
+45min dead-flat ~1.05GB while glibc peers sat pinned at 4.5/5.9GB — proves it's the
+allocator, not the restart. Memory saga resolved.
+
+**Rollback:** `rm /etc/systemd/system/solen-node.service.d/jemalloc.conf && systemctl daemon-reload && systemctl restart solen-node` (reverts to glibc; behaviour otherwise identical).
 
 ---
 

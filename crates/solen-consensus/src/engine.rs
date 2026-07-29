@@ -2854,12 +2854,17 @@ impl ConsensusEngine {
             }
 
             // Update epoch seed for randomized proposer selection.
-            // Seed = blake3(last block hash of the epoch that just ended).
-            // This is unpredictable until the epoch boundary block is finalized.
+            // Seed = blake3(state_root of the epoch's last block). MUST use an
+            // agreed, canonical on-chain value: block_hash() includes proposer +
+            // timestamp_ms, which legitimately differ across state-equivalent
+            // re-proposals / force-finalizations (slashing.rs "same logical block"
+            // rule), so a block_hash-derived seed diverges across nodes at the
+            // boundary → different proposer schedules → chain halts. state_root is
+            // identical on every honest node.
             let chain = self.chain.read().unwrap();
             if let Some(last_block) = chain.last() {
                 let new_seed = solen_crypto::blake3_hash(
-                    &block_hash(&last_block.header)
+                    &last_block.header.state_root
                 );
                 *self.epoch_seed.write().unwrap() = new_seed;
                 tracing::info!(

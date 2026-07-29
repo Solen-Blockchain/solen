@@ -124,6 +124,11 @@ pub struct ChainConfig {
     /// `height >= pq_auth_height` — upgrading while dormant bricks the account.
     #[serde(default)]
     pub pq_auth_height: String,
+    /// Height at/after which the grind-resistant epoch-randomness seed (variant
+    /// B) is active. `"18446744073709551615"` (u64::MAX) = dormant. String to
+    /// avoid JS number-precision loss; makes flag-day convergence verifiable.
+    #[serde(default)]
+    pub epoch_randomness_height: String,
 }
 
 /// Validator info returned by the RPC.
@@ -1390,6 +1395,7 @@ impl SolenApiServer for SolenRpc {
                 base_fee_per_gas: config_base_fee.to_string(),
                 burn_rate_bps: config_burn_rate,
                 pq_auth_height: self.engine.executor().pq_auth_height().to_string(),
+                epoch_randomness_height: self.engine.executor().epoch_randomness_height().to_string(),
             },
         })
     }

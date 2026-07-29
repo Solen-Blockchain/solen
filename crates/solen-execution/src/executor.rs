@@ -393,6 +393,13 @@ pub struct BlockExecutor {
     /// method verifies as no-valid-method, exactly like a node that lacks the
     /// code, so nodes never disagree before a coordinated activation.
     pq_auth_height: u64,
+    /// Block height at/after which the epoch-randomness accumulator is written to
+    /// state each block (grind-resistant proposer seed, variant B). Below it the
+    /// accumulator is never touched, so state roots are byte-for-byte identical
+    /// to a node without the feature. CONSENSUS-AFFECTING (it adds a state write
+    /// and changes the proposer schedule at activation) — ships dormant at
+    /// u64::MAX = off, activate fleet-wide at one height (flag-day).
+    epoch_randomness_height: u64,
 }
 
 impl BlockExecutor {
@@ -403,6 +410,7 @@ impl BlockExecutor {
             chain_id: 0,
             fee_fix_height: u64::MAX,
             pq_auth_height: u64::MAX,
+            epoch_randomness_height: u64::MAX,
         }
     }
 
@@ -413,6 +421,7 @@ impl BlockExecutor {
             chain_id: 0,
             fee_fix_height: u64::MAX,
             pq_auth_height: u64::MAX,
+            epoch_randomness_height: u64::MAX,
         }
     }
 
@@ -446,6 +455,21 @@ impl BlockExecutor {
     /// the legacy config byte-for-byte; at/above it the strict config applies.
     pub fn with_determinism_fix_height(mut self, height: u64) -> Self {
         self.vm_runtime.set_determinism_fix_height(height);
+        self
+    }
+
+    /// The height at/after which the epoch-randomness accumulator (variant B) is
+    /// active. `u64::MAX` = dormant. Surfaced via RPC so flag-day convergence is
+    /// verifiable across the fleet.
+    pub fn epoch_randomness_height(&self) -> u64 {
+        self.epoch_randomness_height
+    }
+
+    /// Set the activation height for the grind-resistant epoch-randomness seed.
+    /// Below it the accumulator is never written and consensus keeps the legacy
+    /// `blake3(state_root)` seed, so a dormant binary is byte-for-byte identical.
+    pub fn with_epoch_randomness_height(mut self, height: u64) -> Self {
+        self.epoch_randomness_height = height;
         self
     }
 
@@ -511,6 +535,19 @@ impl BlockExecutor {
         if height > 0 && height % 100 == 0 {
             let reward_receipts = distribute_epoch_rewards_in_executor(&mut overlay, height);
             result.receipts.extend(reward_receipts);
+        }
+
+        // Grind-resistant epoch-randomness accumulator (variant B), gated dormant.
+        // Mix this block's AGREED contribution — the parent (pre-block) state_root,
+        // identical on every node — into the in-state accumulator, snapshotting the
+        // seed at epoch boundaries. Never mix proposer/timestamp (the block_hash
+        // trap that halted mainnet 2026-07-28). The write lands in `overlay`, so it
+        // commits atomically with the block and is part of this block's state_root.
+        if height >= self.epoch_randomness_height {
+            let parent_state_root = store.state_root();
+            let mut er = solen_system_contracts::epoch_randomness::EpochRandomness::load(&overlay);
+            er.mix_block(&parent_state_root, height);
+            er.save(&mut overlay);
         }
 
         (result, overlay.into_changes())

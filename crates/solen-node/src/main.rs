@@ -208,6 +208,14 @@ struct Cli {
     /// value (a flag-day). Differing values across nodes is unsafe.
     #[arg(long, default_value_t = u64::MAX)]
     pq_auth_height: u64,
+
+    /// Activation height for the grind-resistant epoch-randomness seed (variant
+    /// B): the proposer seed is accumulated in state instead of derived from the
+    /// boundary block's state_root. Default u64::MAX = OFF (dormant). CONSENSUS-
+    /// AFFECTING: deploy to EVERY node first, then restart all with the SAME
+    /// value (a flag-day). Differing values across nodes is unsafe.
+    #[arg(long, default_value_t = u64::MAX)]
+    epoch_randomness_height: u64,
 }
 
 #[cfg(feature = "dhat-heap")]
@@ -845,6 +853,8 @@ async fn main() -> anyhow::Result<()> {
         determinism_fix_height: cli.determinism_fix_height,
         // Set via --pq-auth-height once every node is on this binary (flag-day).
         pq_auth_height: cli.pq_auth_height,
+        // Set via --epoch-randomness-height once every node is on this binary (flag-day).
+        epoch_randomness_height: cli.epoch_randomness_height,
     };
 
     let mempool = Mempool::new(50_000);

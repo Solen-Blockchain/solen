@@ -85,6 +85,14 @@ pub struct EngineConfig {
     /// (`AuthMethod::MlDsa`). CONSENSUS-AFFECTING (changes which ops are valid),
     /// so defaults to u64::MAX = OFF — ships dormant, activate at one height.
     pub pq_auth_height: u64,
+    /// Activation height for the grind-resistant epoch-randomness accumulator
+    /// (variant B). Below it the proposer seed is `blake3(state_root)` of the
+    /// boundary block (the shipped fix); at/above it consensus reads the seed the
+    /// accumulator committed to state, and the executor writes the accumulator
+    /// each block. CONSENSUS-AFFECTING (adds a state write + changes the proposer
+    /// schedule at activation), so defaults to u64::MAX = OFF — ships dormant,
+    /// activate at one height (flag-day).
+    pub epoch_randomness_height: u64,
 }
 
 impl Default for EngineConfig {
@@ -100,6 +108,7 @@ impl Default for EngineConfig {
             authenticate_sync_blocks: false,
             determinism_fix_height: u64::MAX,
             pq_auth_height: u64::MAX,
+            epoch_randomness_height: u64::MAX,
         }
     }
 }
@@ -347,6 +356,7 @@ impl ConsensusEngine {
         let fee_fix_height = config.fee_fix_height;
         let determinism_fix_height = config.determinism_fix_height;
         let pq_auth_height = config.pq_auth_height;
+        let epoch_randomness_height = config.epoch_randomness_height;
         Self {
             config,
             store: Arc::new(RwLock::new(store)),
@@ -355,7 +365,8 @@ impl ConsensusEngine {
                 .with_chain_id(chain_id)
                 .with_fee_fix_height(fee_fix_height)
                 .with_determinism_fix_height(determinism_fix_height)
-                .with_pq_auth_height(pq_auth_height),
+                .with_pq_auth_height(pq_auth_height)
+                .with_epoch_randomness_height(epoch_randomness_height),
             signing_keypair: None, // set via set_signing_keypair() after construction
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(validator_set)),
@@ -2863,9 +2874,17 @@ impl ConsensusEngine {
             // identical on every honest node.
             let chain = self.chain.read().unwrap();
             if let Some(last_block) = chain.last() {
-                let new_seed = solen_crypto::blake3_hash(
-                    &last_block.header.state_root
-                );
+                let new_seed = if last_block.header.height >= self.config.epoch_randomness_height {
+                    // Grind-resistant path (variant B): read the seed the
+                    // accumulator committed to state this block. Sourced from
+                    // agreed on-chain state → identical on every node and
+                    // restart-safe (no in-memory reset, no history lookback).
+                    let store = self.store.read().unwrap();
+                    solen_system_contracts::epoch_randomness::EpochRandomness::load(store.as_ref()).seed
+                } else {
+                    // Legacy path: blake3 of the boundary block's agreed state_root.
+                    solen_crypto::blake3_hash(&last_block.header.state_root)
+                };
                 *self.epoch_seed.write().unwrap() = new_seed;
                 tracing::info!(
                     epoch = em.current_epoch,

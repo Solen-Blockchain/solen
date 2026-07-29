@@ -5,6 +5,7 @@
 //! and treasury.
 
 pub mod bridge;
+pub mod epoch_randomness;
 pub mod governance;
 pub mod proof_registry;
 pub mod staking;

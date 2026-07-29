@@ -54,6 +54,7 @@ fn setup_engine() -> (ConsensusEngine, Keypair, [u8; 32], [u8; 32]) {
         authenticate_sync_blocks: false,
         determinism_fix_height: u64::MAX,
         pq_auth_height: u64::MAX,
+        epoch_randomness_height: u64::MAX,
     };
 
     let mempool = Mempool::new(1000);

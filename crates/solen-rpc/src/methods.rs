@@ -1382,7 +1382,13 @@ impl SolenApiServer for SolenRpc {
 
         Ok(ChainStatus {
             height: self.engine.height(),
-            state_root: hex_encode(&store.state_root()),
+            // Return the finalized tip's committed state_root (O(1)) instead of
+            // store.state_root(), which re-iterates the whole DB and rebuilds the
+            // merkle root every call (O(state)) — that recompute made chainStatus
+            // 2-12s and tripped "node behind" false alarms. Identical value.
+            state_root: hex_encode(
+                &self.engine.latest_block().map(|b| b.header.state_root).unwrap_or_default(),
+            ),
             pending_ops: self.engine.mempool().len(),
             total_allocation: total_allocation.to_string(),
             total_staked: total_staked.to_string(),

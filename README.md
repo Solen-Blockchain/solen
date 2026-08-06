@@ -107,7 +107,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-135 tests covering storage, crypto, execution, consensus, VM, system contracts, rollup kit, intents, wallet SDK, and 4 property-based invariant tests.
+Over 200 tests covering storage, crypto, execution, consensus, VM, system contracts, rollup kit, intents, and the wallet SDK, including property-based invariant tests. Run `cargo test --workspace` for the current count.
 
 ### Start a Node
 
@@ -320,7 +320,7 @@ Each block has a configurable base fee per gas unit. After an operation executes
 
 ### Testing
 
-- **Unit tests:** 155 tests across all crates (including 6 rollup e2e tests)
+- **Unit & integration tests:** 200+ across all crates (run `cargo test --workspace`; includes rollup e2e tests)
 - **Property-based tests:** Supply conservation, nonce monotonicity, state root determinism, no negative balances (via proptest)
 - **Fuzz targets:** Executor, WASM VM, and transaction deserialization
 

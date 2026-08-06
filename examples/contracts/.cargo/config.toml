@@ -1,0 +1,14 @@
+# Solen example contracts compile to wasm and call VM host functions
+# (storage_write, emit_event, get_caller, …) that are provided as wasm imports
+# from module "env" at execution time — see crates/solen-vm/src/runtime.rs.
+#
+# Current stable's default wasm linker (rust-lld) errors on these undefined
+# symbols at link time. `--allow-undefined` tells it to keep them as imports
+# (resolved by the VM at runtime) instead of failing the build. Older linkers
+# tolerated this implicitly, which is why fresh CI builds broke while local
+# (cached / older-toolchain) builds passed.
+#
+# Scoped to examples/contracts/ only; the main workspace lives one level up and
+# does not inherit this file.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

@@ -49,7 +49,15 @@ pub const PASS_THRESHOLD_BPS: u64 = 6667; // 66.67%
 pub const EMERGENCY_FASTTRACK_ACTIVATION_EPOCH: u64 = u64::MAX;
 
 /// Whether the emergency fast-track is active at `epoch`.
+// `EMERGENCY_FASTTRACK_ACTIVATION_EPOCH` is the dormant sentinel `u64::MAX` until a
+// flag-day sets a real future epoch; the explicit dormant check keeps the gate off
+// while the const is the sentinel, and avoids the compile-time `>= u64::MAX`
+// comparison that `clippy::absurd_extreme_comparisons` (deny) would otherwise flag.
+#[allow(clippy::absurd_extreme_comparisons)]
 pub fn emergency_fasttrack_active(epoch: u64) -> bool {
+    if EMERGENCY_FASTTRACK_ACTIVATION_EPOCH == u64::MAX {
+        return false; // dormant
+    }
     epoch >= EMERGENCY_FASTTRACK_ACTIVATION_EPOCH
 }
 

@@ -1,0 +1,45 @@
+name: Release
+
+# Tag-driven release: builds the node binary, publishes it with its SHA-256, so
+# operators can verify that a running mainnet binary matches a signed, tagged,
+# CI-built artifact (closes the "deploy runs uncommitted/untagged code" gap).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: build + publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p solen-node
+
+      - name: Compute checksums
+        id: sums
+        run: |
+          cd target/release
+          sha256sum solen-node > solen-node.sha256
+          echo "sha256=$(cut -d' ' -f1 solen-node.sha256)" >> "$GITHUB_OUTPUT"
+          echo "Release ${GITHUB_REF_NAME} — solen-node sha256: $(cut -d' ' -f1 solen-node.sha256)"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## solen-node ${{ github.ref_name }}
+            `sha256(solen-node) = ${{ steps.sums.outputs.sha256 }}`
+
+            Verify a deployed binary matches this release:
+            `sha256sum /opt/solen/bin/solen-node`
+          files: |
+            target/release/solen-node
+            target/release/solen-node.sha256

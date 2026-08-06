@@ -134,7 +134,12 @@ fn execute_staking_call(
 
             staking = StakingContract::load(store);
             let current_epoch = read_current_epoch(store);
-            match staking.register_validator_at_epoch_with_config(*sender, amount, current_epoch, min_stake) {
+            match staking.register_validator_at_epoch_with_config(
+                *sender,
+                amount,
+                current_epoch,
+                min_stake,
+            ) {
                 Ok(()) => {
                     let mut data = Vec::with_capacity(48);
                     data.extend_from_slice(sender);
@@ -311,14 +316,14 @@ fn execute_staking_call(
             // Prevents malicious proposers from fabricating slash operations.
             let offender_hex: String = offender.iter().map(|b| format!("{b:02x}")).collect();
             let evidence_prefix = format!("slash/{}", offender_hex);
-            let has_evidence = store.scan_prefix(evidence_prefix.as_bytes())
+            let has_evidence = store
+                .scan_prefix(evidence_prefix.as_bytes())
                 .map(|entries| !entries.is_empty())
                 .unwrap_or(false);
             if !has_evidence {
                 // Also check if there's pending downtime evidence (missed blocks).
                 let downtime_key = format!("downtime/{}", offender_hex);
-                let has_downtime = store.get(downtime_key.as_bytes())
-                    .ok().flatten().is_some();
+                let has_downtime = store.get(downtime_key.as_bytes()).ok().flatten().is_some();
                 if !has_downtime {
                     return err("no slashing evidence found for validator");
                 }
@@ -352,7 +357,11 @@ fn execute_staking_call(
             // economically toothless. Each active delegation to this validator
             // and the validator's total_delegated are reduced by the same bps.
             let mut delegated_penalty: u128 = 0;
-            for d in staking.delegations.iter_mut().filter(|d| d.validator == offender) {
+            for d in staking
+                .delegations
+                .iter_mut()
+                .filter(|d| d.validator == offender)
+            {
                 let p = d.amount.saturating_mul(penalty_bps as u128) / 10_000;
                 d.amount = d.amount.saturating_sub(p);
                 delegated_penalty = delegated_penalty.saturating_add(p);
@@ -463,7 +472,9 @@ fn execute_governance_call(
     method: &str,
     args: &[u8],
 ) -> SystemCallResult {
-    use solen_system_contracts::governance::{GovernanceContract, ProposalAction, PROPOSAL_DEPOSIT};
+    use solen_system_contracts::governance::{
+        GovernanceContract, ProposalAction, PROPOSAL_DEPOSIT,
+    };
 
     let mut gov = GovernanceContract::load(store);
     let mut events = Vec::new();
@@ -499,12 +510,8 @@ fn execute_governance_call(
             };
             let desc = String::from_utf8_lossy(&args[16..]).to_string();
             let epoch = read_current_epoch(store);
-            let id = gov.create_proposal(
-                *sender,
-                ProposalAction::SetBaseFee { new_fee },
-                desc,
-                epoch,
-            );
+            let id =
+                gov.create_proposal(*sender, ProposalAction::SetBaseFee { new_fee }, desc, epoch);
             events.push(Event {
                 emitter: GOVERNANCE_ADDRESS,
                 topic: b"proposal_created".to_vec(),
@@ -521,7 +528,9 @@ fn execute_governance_call(
             let epoch = read_current_epoch(store);
             let id = gov.create_proposal(
                 *sender,
-                ProposalAction::SetBlockTime { new_block_time_ms: new_block_time },
+                ProposalAction::SetBlockTime {
+                    new_block_time_ms: new_block_time,
+                },
                 desc,
                 epoch,
             );
@@ -723,12 +732,16 @@ fn execute_governance_call(
                 // stake, letting a validator + its delegators exceed the true
                 // network stake (the finalize denominator sums total_stake()
                 // once), so a minority could clear quorum/supermajority.
-                let validator_stake: u128 = staking.validators.iter()
+                let validator_stake: u128 = staking
+                    .validators
+                    .iter()
                     .filter(|v| v.id == *sender && v.is_active)
                     .filter(|v| v.eligible_from_epoch <= epoch)
                     .map(|v| v.self_stake)
                     .sum();
-                let delegated_stake: u128 = staking.delegations.iter()
+                let delegated_stake: u128 = staking
+                    .delegations
+                    .iter()
                     .filter(|d| d.delegator == *sender)
                     .filter(|d| d.eligible_from_epoch <= epoch)
                     .map(|d| d.amount)
@@ -761,17 +774,21 @@ fn execute_governance_call(
 
             // Read total stake from staking contract for quorum calculation.
             let staking = solen_system_contracts::staking::StakingContract::load(store);
-            let total_stake: u128 = staking.validators.iter()
+            let total_stake: u128 = staking
+                .validators
+                .iter()
                 .filter(|v| v.is_active)
                 .map(|v| v.total_stake())
                 .sum();
 
             // Get proposer and deposit before finalizing.
-            let (proposer, deposit) = gov.get_proposal(proposal_id)
+            let (proposer, deposit) = gov
+                .get_proposal(proposal_id)
                 .map(|p| (p.proposer, p.deposit))
                 .unwrap_or(([0u8; 32], 0));
 
-            let emergency_ft = solen_system_contracts::governance::emergency_fasttrack_active(epoch);
+            let emergency_ft =
+                solen_system_contracts::governance::emergency_fasttrack_active(epoch);
             match gov.finalize(proposal_id, total_stake, epoch, emergency_ft) {
                 Ok(status) => {
                     let status_str = format!("{:?}", status);
@@ -817,7 +834,8 @@ fn execute_governance_call(
             };
             let epoch = read_current_epoch(store);
 
-            let emergency_ft = solen_system_contracts::governance::emergency_fasttrack_active(epoch);
+            let emergency_ft =
+                solen_system_contracts::governance::emergency_fasttrack_active(epoch);
             match gov.execute(proposal_id, epoch, emergency_ft) {
                 Ok(action) => {
                     // Apply the action to chain state.
@@ -828,28 +846,37 @@ fn execute_governance_call(
                             format!("base_fee={}", new_fee)
                         }
                         ProposalAction::SetBlockTime { new_block_time_ms } => {
-                            let _ = store.put(b"__config_block_time__", &new_block_time_ms.to_le_bytes());
+                            let _ = store
+                                .put(b"__config_block_time__", &new_block_time_ms.to_le_bytes());
                             format!("block_time={}ms", new_block_time_ms)
                         }
                         ProposalAction::SetBurnRate { new_burn_rate_bps } => {
-                            let _ = store.put(b"__config_burn_rate__", &new_burn_rate_bps.to_le_bytes());
+                            let _ = store
+                                .put(b"__config_burn_rate__", &new_burn_rate_bps.to_le_bytes());
                             format!("burn_rate={}bps", new_burn_rate_bps)
                         }
                         ProposalAction::SetEpochReward { new_reward } => {
-                            let _ = store.put(b"__config_epoch_reward__", &new_reward.to_le_bytes());
+                            let _ =
+                                store.put(b"__config_epoch_reward__", &new_reward.to_le_bytes());
                             format!("epoch_reward={}", new_reward)
                         }
                         ProposalAction::SetMinValidatorStake { new_min_stake } => {
-                            let _ = store.put(b"__config_min_validator_stake__", &new_min_stake.to_le_bytes());
+                            let _ = store.put(
+                                b"__config_min_validator_stake__",
+                                &new_min_stake.to_le_bytes(),
+                            );
                             // Also update the staking contract's config.
-                            let mut staking_cfg = solen_system_contracts::staking::StakingContract::load(store);
+                            let mut staking_cfg =
+                                solen_system_contracts::staking::StakingContract::load(store);
                             staking_cfg.min_validator_stake = Some(*new_min_stake);
                             staking_cfg.save(store);
                             format!("min_validator_stake={}", new_min_stake)
                         }
                         ProposalAction::SetUnbondingPeriod { new_period } => {
-                            let _ = store.put(b"__config_unbonding_period__", &new_period.to_le_bytes());
-                            let mut staking_cfg = solen_system_contracts::staking::StakingContract::load(store);
+                            let _ = store
+                                .put(b"__config_unbonding_period__", &new_period.to_le_bytes());
+                            let mut staking_cfg =
+                                solen_system_contracts::staking::StakingContract::load(store);
                             staking_cfg.unbonding_period = Some(*new_period);
                             staking_cfg.save(store);
                             format!("unbonding_period={}", new_period)
@@ -882,8 +909,10 @@ fn execute_governance_call(
                                     if amount > 0 {
                                         team_pool.balance = 0;
                                         let _ = state.save_account(&team_pool);
-                                        let mut vault = state.get_account(&VESTING_ADDRESS)
-                                            .ok().flatten()
+                                        let mut vault = state
+                                            .get_account(&VESTING_ADDRESS)
+                                            .ok()
+                                            .flatten()
                                             .unwrap_or_else(|| solen_types::account::Account {
                                                 id: VESTING_ADDRESS,
                                                 code_hash: [0u8; 32],
@@ -928,7 +957,11 @@ fn execute_governance_call(
     gov.save(store);
 
     match result {
-        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
+        Ok(()) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: None,
+        },
         Err(e) => {
             // Refund proposal deposit on failure.
             if is_proposal {
@@ -938,7 +971,11 @@ fn execute_governance_call(
                     let _ = state.save_account(&acct);
                 }
             }
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: Some(e),
+            }
         }
     }
 }
@@ -1031,7 +1068,8 @@ fn execute_bridge_call(
                 Err(e) => return err(&e.to_string()),
             }
             // Credit bridge contract balance (vault). Create account if it doesn't exist.
-            let mut bridge_acct = state.get_account(&BRIDGE_ADDRESS)
+            let mut bridge_acct = state
+                .get_account(&BRIDGE_ADDRESS)
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| solen_types::account::Account {
@@ -1073,7 +1111,11 @@ fn execute_bridge_call(
                         return err("bridge_from_base: caller is not the authorized relayer");
                     }
                 }
-                _ => return err("bridge_from_base: no bridge relayer configured — releases disabled"),
+                _ => {
+                    return err(
+                        "bridge_from_base: no bridge relayer configured — releases disabled",
+                    )
+                }
             }
             if args.len() < 80 {
                 return err("invalid args: need recipient[32] + amount[16] + base_tx_hash[32]");
@@ -1113,16 +1155,18 @@ fn execute_bridge_call(
             }
 
             // Credit recipient (create account if needed).
-            let mut recipient_acct = state.get_account(&recipient)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| solen_types::account::Account {
-                    id: recipient,
-                    code_hash: [0u8; 32],
-                    auth_methods: vec![],
-                    nonce: 0,
-                    balance: 0,
-                });
+            let mut recipient_acct =
+                state
+                    .get_account(&recipient)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| solen_types::account::Account {
+                        id: recipient,
+                        code_hash: [0u8; 32],
+                        auth_methods: vec![],
+                        nonce: 0,
+                        balance: 0,
+                    });
             recipient_acct.balance = recipient_acct.balance.saturating_add(amount);
             let _ = state.save_account(&recipient_acct);
             drop(state);
@@ -1178,12 +1222,17 @@ fn execute_bridge_call(
             let name = String::from_utf8_lossy(&args[12..name_end]).to_string();
 
             // Parse proof_type (length-prefixed)
-            let pt_len = u32::from_le_bytes([args[name_end], args[name_end+1], args[name_end+2], args[name_end+3]]) as usize;
+            let pt_len = u32::from_le_bytes([
+                args[name_end],
+                args[name_end + 1],
+                args[name_end + 2],
+                args[name_end + 3],
+            ]) as usize;
             let pt_end = name_end + 4 + pt_len;
             if args.len() < pt_end + 64 {
                 return err("invalid args: need sequencer[32] + genesis_state_root[32]");
             }
-            let proof_type = String::from_utf8_lossy(&args[name_end+4..pt_end]).to_string();
+            let proof_type = String::from_utf8_lossy(&args[name_end + 4..pt_end]).to_string();
 
             let chain_id = match store.get(b"__chain_id__") {
                 Ok(Some(data)) if data.len() >= 8 => {
@@ -1208,39 +1257,40 @@ fn execute_bridge_call(
                 None => return err("invalid args: bad sequencer"),
             };
             let mut genesis_state_root = [0u8; 32];
-            genesis_state_root.copy_from_slice(&args[pt_end+32..pt_end+64]);
+            genesis_state_root.copy_from_slice(&args[pt_end + 32..pt_end + 64]);
 
             // For committee rollups, parse the validity committee that must
             // attest each batch: threshold[4] + num_attestors[4] + pubkey[32]*N,
             // appended after genesis_state_root.
-            let (committee_threshold, committee_attestors): (u32, Vec<[u8; 32]>) =
-                if proof_type == "committee" {
-                    let coff = pt_end + 64;
-                    if args.len() < coff + 8 {
-                        return err("invalid args: committee needs threshold[4] + num_attestors[4]");
-                    }
-                    let threshold = u32::from_le_bytes(args[coff..coff+4].try_into().unwrap());
-                    let num = u32::from_le_bytes(args[coff+4..coff+8].try_into().unwrap()) as usize;
-                    if num == 0 || num > 100 {
-                        return err("invalid committee: num_attestors must be 1..=100");
-                    }
-                    if threshold == 0 || threshold as usize > num {
-                        return err("invalid committee: threshold must be 1..=num_attestors");
-                    }
-                    let aoff = coff + 8;
-                    if args.len() < aoff + num * 32 {
-                        return err("invalid args: committee attestor list truncated");
-                    }
-                    let mut attestors = Vec::with_capacity(num);
-                    for i in 0..num {
-                        let mut pk = [0u8; 32];
-                        pk.copy_from_slice(&args[aoff + i * 32..aoff + i * 32 + 32]);
-                        attestors.push(pk);
-                    }
-                    (threshold, attestors)
-                } else {
-                    (0, vec![])
-                };
+            let (committee_threshold, committee_attestors): (u32, Vec<[u8; 32]>) = if proof_type
+                == "committee"
+            {
+                let coff = pt_end + 64;
+                if args.len() < coff + 8 {
+                    return err("invalid args: committee needs threshold[4] + num_attestors[4]");
+                }
+                let threshold = u32::from_le_bytes(args[coff..coff + 4].try_into().unwrap());
+                let num = u32::from_le_bytes(args[coff + 4..coff + 8].try_into().unwrap()) as usize;
+                if num == 0 || num > 100 {
+                    return err("invalid committee: num_attestors must be 1..=100");
+                }
+                if threshold == 0 || threshold as usize > num {
+                    return err("invalid committee: threshold must be 1..=num_attestors");
+                }
+                let aoff = coff + 8;
+                if args.len() < aoff + num * 32 {
+                    return err("invalid args: committee attestor list truncated");
+                }
+                let mut attestors = Vec::with_capacity(num);
+                for i in 0..num {
+                    let mut pk = [0u8; 32];
+                    pk.copy_from_slice(&args[aoff + i * 32..aoff + i * 32 + 32]);
+                    attestors.push(pk);
+                }
+                (threshold, attestors)
+            } else {
+                (0, vec![])
+            };
 
             // Require a registration deposit (10,000 SOLEN).
             let deposit: u128 = 10_000 * 100_000_000;
@@ -1275,7 +1325,14 @@ fn execute_bridge_call(
                 _ => 0,
             };
 
-            match bridge.register_rollup(rollup_id, name, proof_type, sequencer, genesis_state_root, height) {
+            match bridge.register_rollup(
+                rollup_id,
+                name,
+                proof_type,
+                sequencer,
+                genesis_state_root,
+                height,
+            ) {
                 Ok(()) => {
                     // Store rollup registration info in a well-known state key
                     // so the RPC can find it without the bridge contract.
@@ -1334,7 +1391,8 @@ fn execute_bridge_call(
             data_hash.copy_from_slice(&args[48..80]);
 
             let proof = if args.len() > 84 {
-                let proof_len = u32::from_le_bytes([args[80], args[81], args[82], args[83]]) as usize;
+                let proof_len =
+                    u32::from_le_bytes([args[80], args[81], args[82], args[83]]) as usize;
                 if args.len() >= 84 + proof_len {
                     args[84..84 + proof_len].to_vec()
                 } else {
@@ -1360,7 +1418,10 @@ fn execute_bridge_call(
             // validity committee that must attest each batch.
             let reg_json: serde_json::Value = {
                 let reg_key = format!("__rollup_{}__", rollup_id);
-                store.get(reg_key.as_bytes()).ok().flatten()
+                store
+                    .get(reg_key.as_bytes())
+                    .ok()
+                    .flatten()
                     .and_then(|d| serde_json::from_slice(&d).ok())
                     .unwrap_or_else(|| serde_json::json!({}))
             };
@@ -1381,7 +1442,8 @@ fn execute_bridge_call(
             // subsequent batch is latest_batch + 1. Prevents skipping/reordering
             // or re-submitting an old index to overwrite latest_state_root with a
             // disconnected root.
-            let expected_index = reg_json.get("latest_batch")
+            let expected_index = reg_json
+                .get("latest_batch")
                 .and_then(|v| v.as_u64())
                 .map(|last| last + 1)
                 .unwrap_or(0);
@@ -1395,11 +1457,17 @@ fn execute_bridge_call(
             // else the rollup's current latest_state_root (guaranteed to be the
             // previous batch's post root by the sequencing check above).
             let pre_state_root = if batch_index == 0 {
-                reg_json.get("genesis_state_root").and_then(|v| v.as_str())
-                    .and_then(decode_hex32).unwrap_or([0u8; 32])
+                reg_json
+                    .get("genesis_state_root")
+                    .and_then(|v| v.as_str())
+                    .and_then(decode_hex32)
+                    .unwrap_or([0u8; 32])
             } else {
-                reg_json.get("latest_state_root").and_then(|v| v.as_str())
-                    .and_then(decode_hex32).unwrap_or([0u8; 32])
+                reg_json
+                    .get("latest_state_root")
+                    .and_then(|v| v.as_str())
+                    .and_then(decode_hex32)
+                    .unwrap_or([0u8; 32])
             };
 
             // Verify the batch proof. The posted state_root is accepted ONLY if
@@ -1407,20 +1475,33 @@ fn execute_bridge_call(
             // data_hash — not merely because the sender is the sequencer.
             let proof_verified = match rollup.proof_type.as_str() {
                 "committee" => {
-                    let threshold = reg_json.get("committee_threshold")
-                        .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let attestors: Vec<[u8; 32]> = reg_json.get("committee_attestors")
+                    let threshold = reg_json
+                        .get("committee_threshold")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let attestors: Vec<[u8; 32]> = reg_json
+                        .get("committee_attestors")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter()
-                            .filter_map(|x| x.as_str().and_then(decode_hex32))
-                            .collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().and_then(decode_hex32))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     match solen_rollup_kit::prover::verify_committee_attestation(
-                        rollup_id, batch_index, &pre_state_root, &state_root,
-                        &data_hash, &attestors, threshold, &proof,
+                        rollup_id,
+                        batch_index,
+                        &pre_state_root,
+                        &state_root,
+                        &data_hash,
+                        &attestors,
+                        threshold,
+                        &proof,
                     ) {
                         Ok(true) => true,
-                        Ok(false) => return err("batch proof: insufficient valid committee attestations"),
+                        Ok(false) => {
+                            return err("batch proof: insufficient valid committee attestations")
+                        }
                         Err(_) => return err("batch proof: malformed committee attestation data"),
                     }
                 }
@@ -1499,8 +1580,16 @@ fn execute_bridge_call(
     bridge.save(store);
 
     match result {
-        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
-        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+        Ok(()) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: None,
+        },
+        Err(e) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: Some(e),
+        },
     }
 }
 
@@ -1526,7 +1615,11 @@ fn execute_treasury_call(
                 )
                 .into_bytes(),
             }];
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            }
         }
         _ => err(&format!("unknown treasury method: {method}")),
     }
@@ -1555,7 +1648,8 @@ fn execute_intent_call(
                 None => return err("invalid args: bad solver"),
             };
             let claimed_tip = read_u128(args, 40).unwrap_or(0);
-            let num_transfers = u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
+            let num_transfers =
+                u32::from_le_bytes([args[56], args[57], args[58], args[59]]) as usize;
 
             // SECURITY: fulfill debits `sender` (the intent owner), so the
             // owner's authorization MUST be verifiable on-chain. Otherwise a
@@ -1640,24 +1734,25 @@ fn execute_intent_call(
                         sender_acct.balance -= *amount;
                         let _ = state.save_account(&sender_acct);
                     }
-                    Err(e) => return SystemCallResult {
-                        gas_used: SYSTEM_CALL_GAS,
-                        events,
-                        error: Some(e.to_string()),
-                    },
+                    Err(e) => {
+                        return SystemCallResult {
+                            gas_used: SYSTEM_CALL_GAS,
+                            events,
+                            error: Some(e.to_string()),
+                        }
+                    }
                 }
 
                 // Credit recipient (create if needed).
-                let mut recipient = state.get_account(to)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| solen_types::account::Account {
+                let mut recipient = state.get_account(to).ok().flatten().unwrap_or_else(|| {
+                    solen_types::account::Account {
                         id: *to,
                         code_hash: [0u8; 32],
                         auth_methods: vec![],
                         nonce: 0,
                         balance: 0,
-                    });
+                    }
+                });
                 recipient.balance = recipient.balance.saturating_add(*amount);
                 let _ = state.save_account(&recipient);
 
@@ -1682,13 +1777,16 @@ fn execute_intent_call(
                             return SystemCallResult {
                                 gas_used: SYSTEM_CALL_GAS,
                                 events,
-                                error: Some("insufficient balance for solver tip (unexpected)".to_string()),
+                                error: Some(
+                                    "insufficient balance for solver tip (unexpected)".to_string(),
+                                ),
                             };
                         }
                         sender_acct.balance -= claimed_tip;
                         let _ = state.save_account(&sender_acct);
 
-                        let mut solver_acct = state.get_account(&solver)
+                        let mut solver_acct = state
+                            .get_account(&solver)
                             .ok()
                             .flatten()
                             .unwrap_or_else(|| solen_types::account::Account {
@@ -1725,27 +1823,37 @@ fn execute_intent_call(
             let constraint_offset = offset + num_transfers * 48;
             if constraint_offset + 4 <= args.len() {
                 let num_constraints = u32::from_le_bytes([
-                    args[constraint_offset], args[constraint_offset+1],
-                    args[constraint_offset+2], args[constraint_offset+3],
+                    args[constraint_offset],
+                    args[constraint_offset + 1],
+                    args[constraint_offset + 2],
+                    args[constraint_offset + 3],
                 ]) as usize;
 
                 let mut c_off = constraint_offset + 4;
                 let state_check = StateManager::new(store);
 
                 for _ in 0..num_constraints {
-                    if c_off >= args.len() { break; }
+                    if c_off >= args.len() {
+                        break;
+                    }
                     let ctype = args[c_off];
                     c_off += 1;
 
                     match ctype {
                         0 => {
                             // MinBalance: account[32] + min_amount[16]
-                            if c_off + 48 > args.len() { break; }
+                            if c_off + 48 > args.len() {
+                                break;
+                            }
                             let account = read_account_id(args, c_off).unwrap_or([0u8; 32]);
                             let min_amount = read_u128(args, c_off + 32).unwrap_or(0);
                             c_off += 48;
-                            let balance = state_check.get_account(&account)
-                                .ok().flatten().map(|a| a.balance).unwrap_or(0);
+                            let balance = state_check
+                                .get_account(&account)
+                                .ok()
+                                .flatten()
+                                .map(|a| a.balance)
+                                .unwrap_or(0);
                             if balance < min_amount {
                                 return SystemCallResult {
                                     gas_used: SYSTEM_CALL_GAS, events,
@@ -1759,7 +1867,9 @@ fn execute_intent_call(
                         1 => {
                             // MaxSpend: account[32] + max_amount[16]
                             // Check that the account's balance didn't decrease by more than max_amount.
-                            if c_off + 48 > args.len() { break; }
+                            if c_off + 48 > args.len() {
+                                break;
+                            }
                             let account = read_account_id(args, c_off).unwrap_or([0u8; 32]);
                             let max_amount = read_u128(args, c_off + 32).unwrap_or(0);
                             c_off += 48;
@@ -1779,13 +1889,16 @@ fn execute_intent_call(
                         }
                         2 => {
                             // RequireTransfer: from[32] + to[32] + min_amount[16]
-                            if c_off + 80 > args.len() { break; }
+                            if c_off + 80 > args.len() {
+                                break;
+                            }
                             let _from = read_account_id(args, c_off).unwrap_or([0u8; 32]);
                             let req_to = read_account_id(args, c_off + 32).unwrap_or([0u8; 32]);
                             let req_min = read_u128(args, c_off + 64).unwrap_or(0);
                             c_off += 80;
                             // Verify that a transfer to the required recipient was included.
-                            let transferred = transfers.iter()
+                            let transferred = transfers
+                                .iter()
                                 .filter(|(to, _)| *to == req_to)
                                 .map(|(_, amt)| *amt)
                                 .sum::<u128>();
@@ -1801,10 +1914,15 @@ fn execute_intent_call(
                         }
                         3 => {
                             // RequireCall: target[32] + method_len[4] + method_bytes
-                            if c_off + 36 > args.len() { break; }
+                            if c_off + 36 > args.len() {
+                                break;
+                            }
                             let _target = read_account_id(args, c_off).unwrap_or([0u8; 32]);
                             let method_len = u32::from_le_bytes([
-                                args[c_off+32], args[c_off+33], args[c_off+34], args[c_off+35],
+                                args[c_off + 32],
+                                args[c_off + 33],
+                                args[c_off + 34],
+                                args[c_off + 35],
                             ]) as usize;
                             c_off += 36 + method_len;
                             // RequireCall verification would need to check execution trace —
@@ -1813,7 +1931,9 @@ fn execute_intent_call(
                         4 => {
                             // CrossChainSwap: input_amount[16] + min_output[16] +
                             //   destination_chain[8] + destination_address[32] + output_token[32]
-                            if c_off + 104 > args.len() { break; }
+                            if c_off + 104 > args.len() {
+                                break;
+                            }
                             let input_amount = read_u128(args, c_off).unwrap_or(0);
                             // min_output, destination_chain, destination_address, output_token
                             // are for the solver (off-chain) — L1 only verifies the lock.
@@ -1822,7 +1942,8 @@ fn execute_intent_call(
                             // Verify that the solution includes a transfer to the bridge vault
                             // of at least input_amount.
                             let bridge_addr = solen_types::system::BRIDGE_ADDRESS;
-                            let bridged = transfers.iter()
+                            let bridged = transfers
+                                .iter()
                                 .filter(|(to, _)| *to == bridge_addr)
                                 .map(|(_, amt)| *amt)
                                 .sum::<u128>();
@@ -1850,7 +1971,11 @@ fn execute_intent_call(
                 data: intent_id.to_le_bytes().to_vec(),
             });
 
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            }
         }
         _ => err(&format!("unknown intent method: {method}")),
     }
@@ -1905,7 +2030,11 @@ fn execute_paymaster_call(
                 data: sender.to_vec(),
             });
 
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            }
         }
         "unregister" => {
             let paymasters_key = b"__paymasters__";
@@ -1926,7 +2055,11 @@ fn execute_paymaster_call(
                 data: sender.to_vec(),
             });
 
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            }
         }
         "list" => {
             let paymasters_key = b"__paymasters__";
@@ -1941,7 +2074,11 @@ fn execute_paymaster_call(
                 data: format!("{}", paymasters.len()).into_bytes(),
             });
 
-            SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None }
+            SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            }
         }
         _ => err(&format!("unknown paymaster method: {method}")),
     }
@@ -1976,7 +2113,9 @@ fn execute_guardian_call(
             // args: target_account[32] + new_auth_methods_json[...]
             let target = match read_account_id(args, 0) {
                 Some(id) => id,
-                None => return err("invalid args: need target_account[32] + new_auth_methods_json"),
+                None => {
+                    return err("invalid args: need target_account[32] + new_auth_methods_json")
+                }
             };
 
             // Parse new auth methods from JSON.
@@ -1994,7 +2133,9 @@ fn execute_guardian_call(
             };
             drop(state);
 
-            let guardian_ids: Vec<AccountId> = target_acct.auth_methods.iter()
+            let guardian_ids: Vec<AccountId> = target_acct
+                .auth_methods
+                .iter()
                 .filter_map(|m| {
                     if let AuthMethod::Guardian { guardian_id } = m {
                         Some(*guardian_id)
@@ -2008,7 +2149,13 @@ fn execute_guardian_call(
                 return err("target account has no guardians configured");
             }
 
-            match guardian.initiate_recovery(target, *sender, new_auth, &guardian_ids, current_height) {
+            match guardian.initiate_recovery(
+                target,
+                *sender,
+                new_auth,
+                &guardian_ids,
+                current_height,
+            ) {
                 Ok(id) => {
                     events.push(Event {
                         emitter: GUARDIAN_ADDRESS,
@@ -2111,7 +2258,11 @@ fn execute_guardian_call(
             });
 
             // Already saved above, return early.
-            return SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None };
+            return SystemCallResult {
+                gas_used: SYSTEM_CALL_GAS,
+                events,
+                error: None,
+            };
         }
         _ => Err(format!("unknown guardian method: {method}")),
     };
@@ -2119,8 +2270,16 @@ fn execute_guardian_call(
     guardian.save(store);
 
     match result {
-        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
-        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+        Ok(()) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: None,
+        },
+        Err(e) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: Some(e),
+        },
     }
 }
 
@@ -2196,36 +2355,36 @@ fn execute_vesting_call(
                 Err(e) => Err(e.to_string()),
             }
         }
-        "status" => {
-            match vesting.get_schedule(sender) {
-                Some(schedule) => {
-                    let current_epoch = read_current_epoch(store);
-                    let vested = schedule.vested_at(current_epoch);
-                    let claimable = schedule.claimable_at(current_epoch);
-                    let data = format!(
-                        "total={},vested={},claimed={},claimable={},type={:?}",
-                        schedule.total_amount,
-                        vested,
-                        schedule.claimed,
-                        claimable,
-                        schedule.vesting_type,
-                    );
-                    events.push(Event {
-                        emitter: solen_types::system::VESTING_ADDRESS,
-                        topic: b"vesting_status".to_vec(),
-                        data: data.into_bytes(),
-                    });
-                    Ok(())
-                }
-                None => Err("no vesting schedule for this account".into()),
+        "status" => match vesting.get_schedule(sender) {
+            Some(schedule) => {
+                let current_epoch = read_current_epoch(store);
+                let vested = schedule.vested_at(current_epoch);
+                let claimable = schedule.claimable_at(current_epoch);
+                let data = format!(
+                    "total={},vested={},claimed={},claimable={},type={:?}",
+                    schedule.total_amount,
+                    vested,
+                    schedule.claimed,
+                    claimable,
+                    schedule.vesting_type,
+                );
+                events.push(Event {
+                    emitter: solen_types::system::VESTING_ADDRESS,
+                    topic: b"vesting_status".to_vec(),
+                    data: data.into_bytes(),
+                });
+                Ok(())
             }
-        }
+            None => Err("no vesting schedule for this account".into()),
+        },
         // Admin: add a new vesting schedule post-genesis.
         // Args: recipient[32] + amount[16] + vesting_type[1] + (optional for Custom: cliff_epochs[8] + total_epochs[8])
         // vesting_type: 0=Team, 1=Investor, 2=Validator, 3=Custom
         "add_vesting" => {
             if args.len() < 49 {
-                return err("add_vesting: invalid args (need recipient[32] + amount[16] + type[1])");
+                return err(
+                    "add_vesting: invalid args (need recipient[32] + amount[16] + type[1])",
+                );
             }
             let mut recipient = [0u8; 32];
             recipient.copy_from_slice(&args[0..32]);
@@ -2238,7 +2397,9 @@ fn execute_vesting_call(
                 2 => VestingType::Validator,
                 3 => {
                     if args.len() < 65 {
-                        return err("add_vesting: Custom type needs cliff_epochs[8] + total_epochs[8]");
+                        return err(
+                            "add_vesting: Custom type needs cliff_epochs[8] + total_epochs[8]",
+                        );
                     }
                     let mut cliff_buf = [0u8; 8];
                     cliff_buf.copy_from_slice(&args[49..57]);
@@ -2269,8 +2430,10 @@ fn execute_vesting_call(
                 }
                 // Credit vesting contract account.
                 let vesting_id = solen_types::system::VESTING_ADDRESS;
-                let mut vesting_acct = state.get_account(&vesting_id)
-                    .ok().flatten()
+                let mut vesting_acct = state
+                    .get_account(&vesting_id)
+                    .ok()
+                    .flatten()
                     .unwrap_or_else(|| solen_types::account::Account {
                         id: vesting_id,
                         code_hash: [0u8; 32],
@@ -2327,8 +2490,16 @@ fn execute_vesting_call(
     vesting.save(store);
 
     match result {
-        Ok(()) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: None },
-        Err(e) => SystemCallResult { gas_used: SYSTEM_CALL_GAS, events, error: Some(e) },
+        Ok(()) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: None,
+        },
+        Err(e) => SystemCallResult {
+            gas_used: SYSTEM_CALL_GAS,
+            events,
+            error: Some(e),
+        },
     }
 }
 

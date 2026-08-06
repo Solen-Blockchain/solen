@@ -131,12 +131,20 @@ impl VmRuntime {
         let strict = ctx.block_height >= self.determinism_fix_height;
         if strict {
             let pre = Self::get_or_prelink(
-                &self.engine_strict, &self.linker_strict, &self.pre_cache_strict, code_hash, bytecode,
+                &self.engine_strict,
+                &self.linker_strict,
+                &self.pre_cache_strict,
+                code_hash,
+                bytecode,
             )?;
             execute_pre(&self.engine_strict, &pre, input, ctx, fuel_limit, true)
         } else {
             let pre = Self::get_or_prelink(
-                &self.engine, &self.linker, &self.pre_cache, code_hash, bytecode,
+                &self.engine,
+                &self.linker,
+                &self.pre_cache,
+                code_hash,
+                bytecode,
             )?;
             execute_pre(&self.engine, &pre, input, ctx, fuel_limit, false)
         }
@@ -153,8 +161,8 @@ impl VmRuntime {
         if let Some(pre) = cache.get(code_hash) {
             return Ok(pre.clone());
         }
-        let module = Module::new(engine, bytecode)
-            .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+        let module =
+            Module::new(engine, bytecode).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
         let pre = linker
             .instantiate_pre(&module)
             .map_err(|e| VmError::Trap(e.to_string()))?;
@@ -188,7 +196,9 @@ fn execute_pre(
     let fuel = fuel_limit.unwrap_or(DEFAULT_FUEL_LIMIT);
 
     let limits = if strict {
-        StoreLimitsBuilder::new().memory_size(MAX_WASM_MEMORY_BYTES).build()
+        StoreLimitsBuilder::new()
+            .memory_size(MAX_WASM_MEMORY_BYTES)
+            .build()
     } else {
         StoreLimits::default()
     };
@@ -215,8 +225,8 @@ pub fn execute(
     ctx: HostContext,
     fuel_limit: Option<u64>,
 ) -> Result<ExecutionResult, VmError> {
-    let engine = Engine::new(&build_config(false))
-        .map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
+    let engine =
+        Engine::new(&build_config(false)).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
     let module =
         Module::new(&engine, bytecode).map_err(|e| VmError::InvalidBytecode(e.to_string()))?;
 
@@ -224,7 +234,13 @@ pub fn execute(
     register_host_functions_typed(&mut linker)?;
 
     let fuel = fuel_limit.unwrap_or(DEFAULT_FUEL_LIMIT);
-    let mut store = Store::new(&engine, StoreData { ctx, limits: StoreLimits::default() });
+    let mut store = Store::new(
+        &engine,
+        StoreData {
+            ctx,
+            limits: StoreLimits::default(),
+        },
+    );
     store.set_fuel(fuel).unwrap();
 
     let instance = linker
@@ -291,18 +307,26 @@ pub struct ExecutionResult {
 
 /// Safely get memory from a caller. Returns None if memory export is missing.
 fn get_memory(caller: &mut Caller<'_, StoreData>) -> Option<wasmtime::Memory> {
-    caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
+    caller.get_export("memory").and_then(|e| e.into_memory())
 }
 
 /// Safely read bytes from WASM memory. Returns false on out-of-bounds.
-fn safe_read(caller: &Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr: usize, buf: &mut [u8]) -> bool {
+fn safe_read(
+    caller: &Caller<'_, StoreData>,
+    memory: &wasmtime::Memory,
+    ptr: usize,
+    buf: &mut [u8],
+) -> bool {
     memory.read(caller, ptr, buf).is_ok()
 }
 
 /// Safely write bytes to WASM memory. Returns false on out-of-bounds.
-fn safe_write(caller: &mut Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr: usize, data: &[u8]) -> bool {
+fn safe_write(
+    caller: &mut Caller<'_, StoreData>,
+    memory: &wasmtime::Memory,
+    ptr: usize,
+    data: &[u8],
+) -> bool {
     memory.write(caller, ptr, data).is_ok()
 }
 
@@ -310,18 +334,20 @@ fn safe_write(caller: &mut Caller<'_, StoreData>, memory: &wasmtime::Memory, ptr
 /// Context is accessed via `Caller::data()` / `Caller::data_mut()`.
 /// All memory operations are bounds-checked — invalid pointers return error
 /// values instead of panicking.
-fn register_host_functions_typed(
-    linker: &mut Linker<StoreData>,
-) -> Result<(), VmError> {
+fn register_host_functions_typed(linker: &mut Linker<StoreData>) -> Result<(), VmError> {
     // Maximum allocation size for host function buffers (1 MB).
     // Prevents OOM from negative i32 cast to usize or huge allocations.
     const MAX_HOST_ALLOC: usize = 1024 * 1024;
 
     /// Validate and convert i32 length to usize, rejecting negative or oversized values.
     fn checked_len(len: i32) -> Option<usize> {
-        if len < 0 { return None; }
+        if len < 0 {
+            return None;
+        }
         let n = len as usize;
-        if n > MAX_HOST_ALLOC { return None; }
+        if n > MAX_HOST_ALLOC {
+            return None;
+        }
         Some(n)
     }
 
@@ -329,12 +355,11 @@ fn register_host_functions_typed(
         .func_wrap(
             "env",
             "storage_read",
-            |mut caller: Caller<'_, StoreData>,
-             key_ptr: i32,
-             key_len: i32,
-             val_ptr: i32|
-             -> i32 {
-                let klen = match checked_len(key_len) { Some(n) => n, None => return -1 };
+            |mut caller: Caller<'_, StoreData>, key_ptr: i32, key_len: i32, val_ptr: i32| -> i32 {
+                let klen = match checked_len(key_len) {
+                    Some(n) => n,
+                    None => return -1,
+                };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return -1,
@@ -347,7 +372,9 @@ fn register_host_functions_typed(
                 let read_cost = crate::metering::storage_read_fuel(key.len());
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < read_cost { return -1; }
+                    if remaining < read_cost {
+                        return -1;
+                    }
                     let _ = caller.set_fuel(remaining - read_cost);
                 }
 
@@ -374,21 +401,33 @@ fn register_host_functions_typed(
              key_len: i32,
              val_ptr: i32,
              val_len: i32| {
-                let klen = match checked_len(key_len) { Some(n) => n, None => return };
-                let vlen = match checked_len(val_len) { Some(n) => n, None => return };
+                let klen = match checked_len(key_len) {
+                    Some(n) => n,
+                    None => return,
+                };
+                let vlen = match checked_len(val_len) {
+                    Some(n) => n,
+                    None => return,
+                };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
                 let mut key = vec![0u8; klen];
                 let mut val = vec![0u8; vlen];
-                if !safe_read(&caller, &memory, key_ptr as usize, &mut key) { return; }
-                if !safe_read(&caller, &memory, val_ptr as usize, &mut val) { return; }
+                if !safe_read(&caller, &memory, key_ptr as usize, &mut key) {
+                    return;
+                }
+                if !safe_read(&caller, &memory, val_ptr as usize, &mut val) {
+                    return;
+                }
 
                 let write_cost = crate::metering::storage_write_fuel(key.len(), val.len());
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < write_cost { return; }
+                    if remaining < write_cost {
+                        return;
+                    }
                     let _ = caller.set_fuel(remaining - write_cost);
                 }
 
@@ -406,23 +445,36 @@ fn register_host_functions_typed(
              topic_len: i32,
              data_ptr: i32,
              data_len: i32| {
-                let tlen = match checked_len(topic_len) { Some(n) => n, None => return };
-                let dlen = match checked_len(data_len) { Some(n) => n, None => return };
+                let tlen = match checked_len(topic_len) {
+                    Some(n) => n,
+                    None => return,
+                };
+                let dlen = match checked_len(data_len) {
+                    Some(n) => n,
+                    None => return,
+                };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
                 let mut topic = vec![0u8; tlen];
                 let mut data = vec![0u8; dlen];
-                if !safe_read(&caller, &memory, topic_ptr as usize, &mut topic) { return; }
-                if !safe_read(&caller, &memory, data_ptr as usize, &mut data) { return; }
+                if !safe_read(&caller, &memory, topic_ptr as usize, &mut topic) {
+                    return;
+                }
+                if !safe_read(&caller, &memory, data_ptr as usize, &mut data) {
+                    return;
+                }
 
                 // Charge fuel for event emission.
                 let event_cost = crate::metering::STORAGE_WRITE_BASE_FUEL
-                    + ((topic.len() + data.len()) as u64) * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
+                    + ((topic.len() + data.len()) as u64)
+                        * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < event_cost { return; }
+                    if remaining < event_cost {
+                        return;
+                    }
                     let _ = caller.set_fuel(remaining - event_cost);
                 }
 
@@ -450,9 +502,7 @@ fn register_host_functions_typed(
         .func_wrap(
             "env",
             "get_block_height",
-            |caller: Caller<'_, StoreData>| -> i64 {
-                caller.data().ctx.block_height as i64
-            },
+            |caller: Caller<'_, StoreData>| -> i64 { caller.data().ctx.block_height as i64 },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
 
@@ -464,10 +514,7 @@ fn register_host_functions_typed(
         .func_wrap(
             "env",
             "transfer_native",
-            |mut caller: Caller<'_, StoreData>,
-             to_ptr: i32,
-             amount_ptr: i32|
-             -> i32 {
+            |mut caller: Caller<'_, StoreData>, to_ptr: i32, amount_ptr: i32| -> i32 {
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return -1,
@@ -489,7 +536,9 @@ fn register_host_functions_typed(
                 let transfer_cost = 5000u64;
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < transfer_cost { return -1; }
+                    if remaining < transfer_cost {
+                        return -1;
+                    }
                     let _ = caller.set_fuel(remaining - transfer_cost);
                 }
 
@@ -498,9 +547,11 @@ fn register_host_functions_typed(
                     return -1;
                 }
 
-                caller.data_mut().ctx.native_transfers.push(
-                    crate::host::NativeTransfer { to, amount }
-                );
+                caller
+                    .data_mut()
+                    .ctx
+                    .native_transfers
+                    .push(crate::host::NativeTransfer { to, amount });
                 0
             },
         )
@@ -520,7 +571,12 @@ fn register_host_functions_typed(
                     Some(m) => m,
                     None => return,
                 };
-                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &amount.to_le_bytes());
+                let _ = safe_write(
+                    &mut caller,
+                    &memory,
+                    out_ptr as usize,
+                    &amount.to_le_bytes(),
+                );
             },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
@@ -559,7 +615,12 @@ fn register_host_functions_typed(
                     Some(m) => m,
                     None => return,
                 };
-                let _ = safe_write(&mut caller, &memory, out_ptr as usize, &balance.to_le_bytes());
+                let _ = safe_write(
+                    &mut caller,
+                    &memory,
+                    out_ptr as usize,
+                    &balance.to_le_bytes(),
+                );
             },
         )
         .map_err(|e| VmError::HostError(e.to_string()))?;
@@ -587,10 +648,20 @@ fn register_host_functions_typed(
                 const MAX_METHOD_LEN: usize = 64;
                 const MAX_ARGS_LEN: usize = 16 * 1024;
 
-                let mlen = match checked_len(method_len) { Some(n) => n, None => return -1 };
-                let alen = match checked_len(args_len) { Some(n) => n, None => return -1 };
-                if mlen == 0 || mlen > MAX_METHOD_LEN { return -1; }
-                if alen > MAX_ARGS_LEN { return -1; }
+                let mlen = match checked_len(method_len) {
+                    Some(n) => n,
+                    None => return -1,
+                };
+                let alen = match checked_len(args_len) {
+                    Some(n) => n,
+                    None => return -1,
+                };
+                if mlen == 0 || mlen > MAX_METHOD_LEN {
+                    return -1;
+                }
+                if alen > MAX_ARGS_LEN {
+                    return -1;
+                }
 
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
@@ -615,7 +686,9 @@ fn register_host_functions_typed(
                 let queue_cost = 5_000u64 + (mlen as u64 + alen as u64) * 10;
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < queue_cost { return -1; }
+                    if remaining < queue_cost {
+                        return -1;
+                    }
                     let _ = caller.set_fuel(remaining - queue_cost);
                 }
 
@@ -623,9 +696,15 @@ fn register_host_functions_typed(
                     return -1;
                 }
 
-                caller.data_mut().ctx.pending_calls.push(
-                    crate::host::PendingCall { target, method, args }
-                );
+                caller
+                    .data_mut()
+                    .ctx
+                    .pending_calls
+                    .push(crate::host::PendingCall {
+                        target,
+                        method,
+                        args,
+                    });
                 0
             },
         )
@@ -636,19 +715,27 @@ fn register_host_functions_typed(
             "env",
             "set_return_data",
             |mut caller: Caller<'_, StoreData>, ptr: i32, len: i32| {
-                let dlen = match checked_len(len) { Some(n) => n, None => return };
+                let dlen = match checked_len(len) {
+                    Some(n) => n,
+                    None => return,
+                };
                 let memory = match get_memory(&mut caller) {
                     Some(m) => m,
                     None => return,
                 };
                 let mut data = vec![0u8; dlen];
-                if !safe_read(&caller, &memory, ptr as usize, &mut data) { return; }
+                if !safe_read(&caller, &memory, ptr as usize, &mut data) {
+                    return;
+                }
 
                 // Charge fuel for return data.
-                let cost = crate::metering::STORAGE_READ_BASE_FUEL + (data.len() as u64) * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
+                let cost = crate::metering::STORAGE_READ_BASE_FUEL
+                    + (data.len() as u64) * crate::metering::STORAGE_WRITE_PER_BYTE_FUEL;
                 {
                     let remaining = caller.get_fuel().unwrap_or(0);
-                    if remaining < cost { return; }
+                    if remaining < cost {
+                        return;
+                    }
                     let _ = caller.set_fuel(remaining - cost);
                 }
 
@@ -699,7 +786,10 @@ mod tests {
         assert_eq!(result.return_data, 1u32.to_le_bytes());
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].topic, b"incremented");
-        assert_eq!(result.storage.get(b"count".as_ref()).unwrap(), &1u32.to_le_bytes());
+        assert_eq!(
+            result.storage.get(b"count".as_ref()).unwrap(),
+            &1u32.to_le_bytes()
+        );
     }
 
     #[test]
@@ -719,7 +809,10 @@ mod tests {
     fn out_of_gas() {
         let wasm = wat::parse_str(COUNTER_CONTRACT).expect("WAT parse failed");
         let ctx = HostContext::new([0u8; 32], 1);
-        assert!(matches!(execute(&wasm, &[], ctx, Some(1)), Err(VmError::OutOfGas)));
+        assert!(matches!(
+            execute(&wasm, &[], ctx, Some(1)),
+            Err(VmError::OutOfGas)
+        ));
     }
 
     #[test]
@@ -759,7 +852,11 @@ mod tests {
         let r = strict
             .execute(&code_hash, &wasm, &[], HostContext::new([0u8; 32], 5), None)
             .unwrap();
-        assert_eq!(r.return_data, (-1i32).to_le_bytes(), "strict mode must deny the oversized growth");
+        assert_eq!(
+            r.return_data,
+            (-1i32).to_le_bytes(),
+            "strict mode must deny the oversized growth"
+        );
 
         // Legacy (gate u64::MAX): height 5 < MAX -> legacy -> grow succeeds
         // (returns previous size = 1 page).
@@ -767,7 +864,11 @@ mod tests {
         let r2 = legacy
             .execute(&code_hash, &wasm, &[], HostContext::new([0u8; 32], 5), None)
             .unwrap();
-        assert_eq!(r2.return_data, 1i32.to_le_bytes(), "legacy mode allows the growth");
+        assert_eq!(
+            r2.return_data,
+            1i32.to_le_bytes(),
+            "legacy mode allows the growth"
+        );
     }
 
     #[test]

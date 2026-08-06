@@ -25,9 +25,16 @@ pub enum AuthMethod {
         /// The assertion's origin must be one of these. Empty = origin not enforced.
         origins: Vec<String>,
     },
-    Ed25519 { public_key: [u8; 32] },
-    Threshold { signers: Vec<[u8; 32]>, threshold: u16 },
-    Guardian { guardian_id: AccountId },
+    Ed25519 {
+        public_key: [u8; 32],
+    },
+    Threshold {
+        signers: Vec<[u8; 32]>,
+        threshold: u16,
+    },
+    Guardian {
+        guardian_id: AccountId,
+    },
     /// Temporary session key with restrictions.
     Session {
         /// Ed25519 session key.
@@ -61,7 +68,9 @@ pub enum AuthMethod {
     /// `signature` carries the 3309-byte ML-DSA signature. Appended last so the
     /// Borsh variant indices of the classical methods above stay stable.
     /// Acceptance is gated by `pq_auth_height` (ships dormant; not the default).
-    MlDsa { public_key: Vec<u8> },
+    MlDsa {
+        public_key: Vec<u8>,
+    },
     /// True AND-hybrid: an operation must carry BOTH a valid Ed25519 signature
     /// AND a valid ML-DSA-65 signature to authorize. Defense-in-depth for the
     /// post-quantum transition — the account stays secure unless BOTH schemes

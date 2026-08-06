@@ -93,11 +93,16 @@ impl Mempool {
 
         // Reject oversized operations (prevent memory exhaustion).
         let op_size: usize = op.signature.len()
-            + op.actions.iter().map(|a| match a {
-                solen_types::transaction::Action::Deploy { code, .. } => code.len() + 32,
-                solen_types::transaction::Action::Call { args, method, .. } => args.len() + method.len() + 32,
-                _ => 64,
-            }).sum::<usize>();
+            + op.actions
+                .iter()
+                .map(|a| match a {
+                    solen_types::transaction::Action::Deploy { code, .. } => code.len() + 32,
+                    solen_types::transaction::Action::Call { args, method, .. } => {
+                        args.len() + method.len() + 32
+                    }
+                    _ => 64,
+                })
+                .sum::<usize>();
         if op_size > Self::MAX_OP_SIZE {
             return false;
         }
@@ -183,7 +188,9 @@ impl Mempool {
             if pool.seen.remove(&key) {
                 // Find and remove from BTreeSet by matching (sender, nonce),
                 // not by full Ord comparison (which includes max_fee).
-                let to_remove = pool.entries.iter()
+                let to_remove = pool
+                    .entries
+                    .iter()
                     .find(|e| e.op.sender == op.sender && e.op.nonce == op.nonce)
                     .cloned();
                 if let Some(entry) = to_remove {
@@ -206,7 +213,13 @@ impl Mempool {
 
     /// Number of pending operations for a specific sender.
     pub fn pending_count_for_sender(&self, sender: &[u8; 32]) -> usize {
-        self.inner.lock().unwrap().sender_counts.get(sender).copied().unwrap_or(0)
+        self.inner
+            .lock()
+            .unwrap()
+            .sender_counts
+            .get(sender)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {

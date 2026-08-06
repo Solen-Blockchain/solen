@@ -63,10 +63,7 @@ impl CheckpointStore {
 
     /// Get a checkpoint at or before a given height.
     pub fn at_or_before(&self, height: BlockHeight) -> Option<&Checkpoint> {
-        self.checkpoints
-            .iter()
-            .rev()
-            .find(|c| c.height <= height)
+        self.checkpoints.iter().rev().find(|c| c.height <= height)
     }
 
     /// Get all checkpoints.
@@ -81,8 +78,7 @@ impl CheckpointStore {
 
     /// Load checkpoints from JSON.
     pub fn from_json(data: &[u8], max_checkpoints: usize) -> Self {
-        let checkpoints: Vec<Checkpoint> =
-            serde_json::from_slice(data).unwrap_or_default();
+        let checkpoints: Vec<Checkpoint> = serde_json::from_slice(data).unwrap_or_default();
         Self {
             checkpoints,
             max_checkpoints,
@@ -176,11 +172,7 @@ impl FinalizedCheckpointStore {
         pending.attestations.push((validator_id, signature));
 
         // Check if we have quorum.
-        let attester_ids: Vec<ValidatorId> = pending
-            .attestations
-            .iter()
-            .map(|(v, _)| *v)
-            .collect();
+        let attester_ids: Vec<ValidatorId> = pending.attestations.iter().map(|(v, _)| *v).collect();
 
         if validator_set.has_quorum(&attester_ids) {
             // Finalize the checkpoint.
@@ -234,11 +226,13 @@ impl FinalizedCheckpointStore {
 
     /// Load from store.
     pub fn load(store: &dyn solen_storage::StateStore) -> Self {
-        let latest = store.get(b"__finalized_checkpoint__")
+        let latest = store
+            .get(b"__finalized_checkpoint__")
             .ok()
             .flatten()
             .and_then(|data| serde_json::from_slice(&data).ok());
-        let finalized_heights = latest.as_ref()
+        let finalized_heights = latest
+            .as_ref()
             .map(|cp: &FinalizedCheckpoint| vec![cp.height])
             .unwrap_or_default();
         Self {

@@ -61,10 +61,7 @@ fn bench_rollback(store_entries: usize) {
         sender: alice,
         nonce: 0,
         actions: vec![
-            Action::Transfer {
-                to: bob,
-                amount: 1,
-            },
+            Action::Transfer { to: bob, amount: 1 },
             Action::Transfer {
                 to: bob,
                 amount: u128::MAX, // Will fail — insufficient balance.

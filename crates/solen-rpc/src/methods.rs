@@ -13,7 +13,9 @@ use solen_consensus::engine::ConsensusEngine;
 use solen_consensus::events::NodeEvent;
 use solen_execution::state::ReadonlyStateManager;
 use solen_intents::types::{Constraint, Intent};
-use solen_types::encoding::{account_to_base58, hex_decode as encoding_hex_decode, hex_encode, parse_address};
+use solen_types::encoding::{
+    account_to_base58, hex_decode as encoding_hex_decode, hex_encode, parse_address,
+};
 use solen_types::rollup::BatchCommitment;
 use solen_types::transaction::UserOperation;
 
@@ -208,10 +210,23 @@ pub struct IntentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConstraintInfo {
-    MinBalance { account: String, min_amount: String },
-    MaxSpend { account: String, max_amount: String },
-    RequireTransfer { from: String, to: String, min_amount: String },
-    RequireCall { target: String, method: String },
+    MinBalance {
+        account: String,
+        min_amount: String,
+    },
+    MaxSpend {
+        account: String,
+        max_amount: String,
+    },
+    RequireTransfer {
+        from: String,
+        to: String,
+        min_amount: String,
+    },
+    RequireCall {
+        target: String,
+        method: String,
+    },
     CrossChainSwap {
         input_amount: String,
         min_output: String,
@@ -219,7 +234,10 @@ pub enum ConstraintInfo {
         destination_address: String,
         output_token: String,
     },
-    Custom { verifier: String, data: String },
+    Custom {
+        verifier: String,
+        data: String,
+    },
 }
 
 /// Intent submission result.
@@ -482,7 +500,11 @@ pub trait SolenApi {
 
     /// Get verified batches for a rollup.
     #[method(name = "solen_getRollupBatches")]
-    fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>>;
+    fn get_rollup_batches(
+        &self,
+        rollup_id: u64,
+        limit: Option<usize>,
+    ) -> RpcResult<Vec<VerifiedBatchInfo>>;
 
     /// Get a compressed state snapshot for fast sync.
     #[method(name = "solen_getSnapshot")]
@@ -495,7 +517,11 @@ pub trait SolenApi {
     /// Get a chunk of the snapshot data. Returns base64-encoded bytes.
     /// chunk_size defaults to 4MB. offset is in bytes of the compressed snapshot.
     #[method(name = "solen_getSnapshotChunk")]
-    fn get_snapshot_chunk(&self, offset: usize, chunk_size: Option<usize>) -> RpcResult<SnapshotChunkInfo>;
+    fn get_snapshot_chunk(
+        &self,
+        offset: usize,
+        chunk_size: Option<usize>,
+    ) -> RpcResult<SnapshotChunkInfo>;
 
     /// Subscribe to new finalized blocks.
     #[subscription(name = "solen_subscribeNewBlocks" => "solen_newBlock", unsubscribe = "solen_unsubscribeNewBlocks", item = BlockNotification)]
@@ -648,7 +674,11 @@ impl SolenRpc {
                         (snap, epoch)
                     };
 
-                    match solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch) {
+                    match solen_consensus::snapshot::create_snapshot(
+                        store_snapshot.as_ref(),
+                        height,
+                        epoch,
+                    ) {
                         Ok(data) => {
                             if let Ok(meta) = solen_consensus::snapshot::read_snapshot_meta(&data) {
                                 let entries = store_snapshot.len() as u64;
@@ -671,11 +701,19 @@ impl SolenRpc {
                                 // we just built) for fast local fork recovery.
                                 if let Some(ref ls) = local_snapshots_bg {
                                     match ls.persist(height, &data) {
-                                        Ok(p) => tracing::info!(height, path = %p.display(), "local snapshot checkpoint written"),
-                                        Err(e) => tracing::warn!(height, error = %e, "local snapshot checkpoint write failed"),
+                                        Ok(p) => {
+                                            tracing::info!(height, path = %p.display(), "local snapshot checkpoint written")
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(height, error = %e, "local snapshot checkpoint write failed")
+                                        }
                                     }
                                 }
-                                *cache_bg.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
+                                *cache_bg.lock().unwrap() = Some(CachedSnapshot {
+                                    height,
+                                    info,
+                                    raw_data: data,
+                                });
                                 tracing::info!(height, "snapshot cache refreshed");
                             }
                         }
@@ -733,8 +771,9 @@ impl SolenRpc {
             (snap, epoch)
         };
 
-        let data = solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
-            .map_err(|e| internal_error(e.to_string()))?;
+        let data =
+            solen_consensus::snapshot::create_snapshot(store_snapshot.as_ref(), height, epoch)
+                .map_err(|e| internal_error(e.to_string()))?;
         let meta = solen_consensus::snapshot::read_snapshot_meta(&data)
             .map_err(|e| internal_error(e.to_string()))?;
 
@@ -746,10 +785,14 @@ impl SolenRpc {
             compressed_bytes: data.len() - 56,
             uncompressed_bytes: meta.uncompressed_size,
             data: String::new(), // single-call fills lazily; chunked serves raw_data
-            checkpoint: None,     // overlaid live from the engine at serve time
+            checkpoint: None,    // overlaid live from the engine at serve time
         };
 
-        *self.snapshot_cache.lock().unwrap() = Some(CachedSnapshot { height, info, raw_data: data });
+        *self.snapshot_cache.lock().unwrap() = Some(CachedSnapshot {
+            height,
+            info,
+            raw_data: data,
+        });
         Ok(())
     }
 
@@ -763,7 +806,9 @@ impl SolenRpc {
             epoch: fc.epoch,
             block_hash: hex_encode(&fc.block_hash),
             state_root: hex_encode(&fc.state_root),
-            attestations: fc.attestations.iter()
+            attestations: fc
+                .attestations
+                .iter()
                 .map(|(v, sig)| (account_to_base58(v), hex_encode(sig)))
                 .collect(),
         })
@@ -858,7 +903,6 @@ impl SolenRpc {
         let account = borsh::from_slice::<solen_types::account::Account>(&data).ok()?;
         Some(account.nonce)
     }
-
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -871,22 +915,26 @@ fn base64_encode(data: &[u8]) -> String {
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 { result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char); } else { result.push('='); }
-        if chunk.len() > 2 { result.push(CHARS[(triple & 0x3F) as usize] as char); } else { result.push('='); }
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
     }
     result
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
-    encoding_hex_decode(s).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, e, None::<()>)
-    })
+    encoding_hex_decode(s).map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
 }
 
 fn parse_account_id(s: &str) -> RpcResult<[u8; 32]> {
-    parse_address(s).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, e, None::<()>)
-    })
+    parse_address(s).map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
 }
 
 fn read_config_u64(store: &dyn solen_storage::StateStore, key: &[u8]) -> Option<u64> {
@@ -936,13 +984,13 @@ impl SolenApiServer for SolenRpc {
         let account = state
             .get_account(&id)
             .map_err(|e| internal_error(e))?
-            .ok_or_else(|| {
-                ErrorObjectOwned::owned(-32001, "account not found", None::<()>)
-            })?;
+            .ok_or_else(|| ErrorObjectOwned::owned(-32001, "account not found", None::<()>))?;
 
         // Look up staked amount from the staking contract.
         let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
-        let staked = staking.validators.iter()
+        let staked = staking
+            .validators
+            .iter()
             .find(|v| v.id == id)
             .map(|v| v.self_stake)
             .unwrap_or(0);
@@ -973,17 +1021,19 @@ impl SolenApiServer for SolenRpc {
     }
 
     fn get_block(&self, height: u64) -> RpcResult<BlockInfo> {
-        let block = self.engine.get_block(height).ok_or_else(|| {
-            ErrorObjectOwned::owned(-32001, "block not found", None::<()>)
-        })?;
+        let block = self
+            .engine
+            .get_block(height)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32001, "block not found", None::<()>))?;
 
         Ok(block_to_info(&block))
     }
 
     fn get_latest_block(&self) -> RpcResult<BlockInfo> {
-        let block = self.engine.latest_block().ok_or_else(|| {
-            ErrorObjectOwned::owned(-32001, "no blocks yet", None::<()>)
-        })?;
+        let block = self
+            .engine
+            .latest_block()
+            .ok_or_else(|| ErrorObjectOwned::owned(-32001, "no blocks yet", None::<()>))?;
 
         Ok(block_to_info(&block))
     }
@@ -1070,8 +1120,7 @@ impl SolenApiServer for SolenRpc {
             }
         }
 
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout);
 
         loop {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -1173,7 +1222,11 @@ impl SolenApiServer for SolenRpc {
 
     fn simulate_operation(&self, op: UserOperation) -> RpcResult<SimulationResult> {
         if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
-            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many view/simulate calls", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "rate limited — too many view/simulate calls",
+                None::<()>,
+            ));
         }
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
@@ -1199,8 +1252,10 @@ impl SolenApiServer for SolenRpc {
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
         let gov = solen_system_contracts::governance::GovernanceContract::load(store.as_ref());
 
-        let proposals = gov.proposals.iter().map(|p| {
-            GovernanceProposalInfo {
+        let proposals = gov
+            .proposals
+            .iter()
+            .map(|p| GovernanceProposalInfo {
                 id: p.id,
                 proposer: account_to_base58(&p.proposer),
                 action: format!("{:?}", p.action),
@@ -1211,8 +1266,8 @@ impl SolenApiServer for SolenRpc {
                 total_for: p.total_for.to_string(),
                 total_against: p.total_against.to_string(),
                 vote_count: p.votes.len(),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(proposals)
     }
@@ -1224,7 +1279,11 @@ impl SolenApiServer for SolenRpc {
         args: Option<String>,
     ) -> RpcResult<CallViewResult> {
         if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
-            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many view/callView calls", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "rate limited — too many view/callView calls",
+                None::<()>,
+            ));
         }
         let target = parse_account_id(&contract_id)?;
         let store = self.engine.store();
@@ -1235,7 +1294,11 @@ impl SolenApiServer for SolenRpc {
             Some(hex) => {
                 let decoded = hex_decode(hex)?;
                 if decoded.len() > 1_000_000 {
-                    return Err(ErrorObjectOwned::owned(-32602, "args too large (max 1MB)", None::<()>));
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "args too large (max 1MB)",
+                        None::<()>,
+                    ));
                 }
                 decoded
             }
@@ -1247,12 +1310,18 @@ impl SolenApiServer for SolenRpc {
 
         // Load contract account.
         let state = ReadonlyStateManager::new(store.as_ref());
-        let account = state.get_account(&target).map_err(|e| internal_error(e))?
+        let account = state
+            .get_account(&target)
+            .map_err(|e| internal_error(e))?
             .ok_or_else(|| ErrorObjectOwned::owned(-32001, "account not found", None::<()>))?;
 
         let zero_hash = [0u8; 32];
         if account.code_hash == zero_hash {
-            return Err(ErrorObjectOwned::owned(-32001, "account has no contract code", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32001,
+                "account has no contract code",
+                None::<()>,
+            ));
         }
 
         // Load bytecode.
@@ -1261,7 +1330,8 @@ impl SolenApiServer for SolenRpc {
             k.extend_from_slice(&account.code_hash);
             k
         };
-        let bytecode = store.get(&code_key)
+        let bytecode = store
+            .get(&code_key)
             .map_err(|e| internal_error(e))?
             .ok_or_else(|| internal_error("bytecode not found"))?;
 
@@ -1302,13 +1372,18 @@ impl SolenApiServer for SolenRpc {
             self_balance: account.balance,
         };
 
-        let vm = solen_vm::runtime::VmRuntime::new()
-            .map_err(|e| internal_error(e))?;
+        let vm = solen_vm::runtime::VmRuntime::new().map_err(|e| internal_error(e))?;
 
         // Use a reduced fuel limit for view calls (read-only, no state changes).
         // Prevents CPU amplification attacks via expensive callView loops.
         const VIEW_FUEL_LIMIT: u64 = 500_000;
-        match vm.execute(&account.code_hash, &bytecode, &input, ctx, Some(VIEW_FUEL_LIMIT)) {
+        match vm.execute(
+            &account.code_hash,
+            &bytecode,
+            &input,
+            ctx,
+            Some(VIEW_FUEL_LIMIT),
+        ) {
             Ok(result) => Ok(CallViewResult {
                 success: true,
                 return_data: hex_encode(&result.return_data),
@@ -1362,23 +1437,24 @@ impl SolenApiServer for SolenRpc {
             .sum();
 
         // Staked tokens are also not circulating.
-        let staking =
-            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
         let total_staked: u128 = staking.validators.iter().map(|v| v.total_stake()).sum();
 
-        let total_circulation = total_allocation.saturating_sub(non_circulating).saturating_sub(total_staked);
+        let total_circulation = total_allocation
+            .saturating_sub(non_circulating)
+            .saturating_sub(total_staked);
 
         // Read governance-configurable parameters.
         let config_block_time = read_config_u64(store.as_ref(), b"__config_block_time__")
             .unwrap_or(self.engine.config().block_time_ms);
         let config_min_stake = read_config_u128(store.as_ref(), b"__config_min_validator_stake__")
             .unwrap_or(solen_system_contracts::staking::DEFAULT_MIN_VALIDATOR_STAKE);
-        let config_unbonding = staking.unbonding_period
+        let config_unbonding = staking
+            .unbonding_period
             .unwrap_or(solen_system_contracts::staking::DEFAULT_UNBONDING_PERIOD);
-        let config_burn_rate = read_config_u64(store.as_ref(), b"__config_burn_rate__")
-            .unwrap_or(5000); // default 50%
-        let config_base_fee = read_config_u128(store.as_ref(), b"__config_base_fee__")
-            .unwrap_or(1); // default: 1 base unit per gas
+        let config_burn_rate =
+            read_config_u64(store.as_ref(), b"__config_burn_rate__").unwrap_or(5000); // default 50%
+        let config_base_fee = read_config_u128(store.as_ref(), b"__config_base_fee__").unwrap_or(1); // default: 1 base unit per gas
 
         Ok(ChainStatus {
             height: self.engine.height(),
@@ -1387,7 +1463,11 @@ impl SolenApiServer for SolenRpc {
             // merkle root every call (O(state)) — that recompute made chainStatus
             // 2-12s and tripped "node behind" false alarms. Identical value.
             state_root: hex_encode(
-                &self.engine.latest_block().map(|b| b.header.state_root).unwrap_or_default(),
+                &self
+                    .engine
+                    .latest_block()
+                    .map(|b| b.header.state_root)
+                    .unwrap_or_default(),
             ),
             pending_ops: self.engine.mempool().len(),
             total_allocation: total_allocation.to_string(),
@@ -1401,7 +1481,11 @@ impl SolenApiServer for SolenRpc {
                 base_fee_per_gas: config_base_fee.to_string(),
                 burn_rate_bps: config_burn_rate,
                 pq_auth_height: self.engine.executor().pq_auth_height().to_string(),
-                epoch_randomness_height: self.engine.executor().epoch_randomness_height().to_string(),
+                epoch_randomness_height: self
+                    .engine
+                    .executor()
+                    .epoch_randomness_height()
+                    .to_string(),
             },
         })
     }
@@ -1409,8 +1493,7 @@ impl SolenApiServer for SolenRpc {
     fn get_validators(&self) -> RpcResult<Vec<ValidatorInfo>> {
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
-        let staking =
-            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
 
         let validators: Vec<ValidatorInfo> = staking
             .validators
@@ -1433,8 +1516,7 @@ impl SolenApiServer for SolenRpc {
         let id = parse_account_id(&account_id)?;
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
-        let staking =
-            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
 
         let delegations: Vec<DelegationInfo> = staking
             .delegations
@@ -1468,8 +1550,7 @@ impl SolenApiServer for SolenRpc {
         let id = parse_account_id(&account_id)?;
         let store = self.engine.store();
         let store = store.read().map_err(|e| internal_error(e.to_string()))?;
-        let vesting =
-            solen_system_contracts::vesting::VestingContract::load(store.as_ref());
+        let vesting = solen_system_contracts::vesting::VestingContract::load(store.as_ref());
 
         match vesting.get_schedule(&id) {
             Some(schedule) => {
@@ -1505,21 +1586,29 @@ impl SolenApiServer for SolenRpc {
 
     fn submit_intent(&self, req: IntentRequest) -> RpcResult<IntentSubmitResult> {
         if req.constraints.len() > 100 {
-            return Err(ErrorObjectOwned::owned(-32602, "too many constraints (max 100)", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "too many constraints (max 100)",
+                None::<()>,
+            ));
         }
         let sender = parse_account_id(&req.sender)?;
         let signature = hex_decode(&req.signature)?;
-        let max_fee: u128 = req.max_fee.parse().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "invalid max_fee", None::<()>)
-        })?;
-        let tip: u128 = req.tip.parse().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "invalid tip", None::<()>)
-        })?;
+        let max_fee: u128 = req
+            .max_fee
+            .parse()
+            .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid max_fee", None::<()>))?;
+        let tip: u128 = req
+            .tip
+            .parse()
+            .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid tip", None::<()>))?;
 
         // Convert constraints from RPC format to internal format.
-        let constraints: Result<Vec<Constraint>, _> = req.constraints.iter().map(|c| {
-            constraint_from_info(c)
-        }).collect();
+        let constraints: Result<Vec<Constraint>, _> = req
+            .constraints
+            .iter()
+            .map(|c| constraint_from_info(c))
+            .collect();
         let constraints = constraints?;
 
         let intent = Intent {
@@ -1552,17 +1641,23 @@ impl SolenApiServer for SolenRpc {
         let pending = pool.pending_intents();
         let limit = limit.unwrap_or(50).min(500);
 
-        let intents: Vec<IntentInfo> = pending.into_iter().take(limit).map(|i| {
-            IntentInfo {
+        let intents: Vec<IntentInfo> = pending
+            .into_iter()
+            .take(limit)
+            .map(|i| IntentInfo {
                 id: i.id,
                 sender: account_to_base58(&i.sender),
-                constraints: i.constraints.iter().map(|c| constraint_to_info(c)).collect(),
+                constraints: i
+                    .constraints
+                    .iter()
+                    .map(|c| constraint_to_info(c))
+                    .collect(),
                 max_fee: i.max_fee.to_string(),
                 expiry_height: i.expiry_height,
                 tip: i.tip.to_string(),
                 status: "Pending".to_string(),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(intents)
     }
@@ -1577,9 +1672,10 @@ impl SolenApiServer for SolenRpc {
         }
 
         let solver = parse_account_id(&req.solver)?;
-        let claimed_tip: u128 = req.claimed_tip.parse().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>)
-        })?;
+        let claimed_tip: u128 = req
+            .claimed_tip
+            .parse()
+            .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid claimed_tip", None::<()>))?;
 
         // Solver signature is mandatory for RPC submissions.
         // Only the built-in solver (in-process) may omit the signature.
@@ -1617,7 +1713,11 @@ impl SolenApiServer for SolenRpc {
 
     fn check_sponsorship(&self, op: UserOperation) -> RpcResult<SponsorshipResult> {
         if !RpcRateLimiter::check(&self.rate_limiter.view_calls, 50) {
-            return Err(ErrorObjectOwned::owned(-32005, "rate limited — too many checkSponsorship calls", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "rate limited — too many checkSponsorship calls",
+                None::<()>,
+            ));
         }
         // Check if any registered paymaster contract is willing to sponsor this operation.
         // Paymasters are contracts that implement a `willSponsor` view method.
@@ -1684,7 +1784,13 @@ impl SolenApiServer for SolenRpc {
                 self_balance: 0,
             };
 
-            if let Ok(result) = vm.execute(&account.code_hash, &bytecode, &input, ctx, Some(SPONSOR_VIEW_FUEL)) {
+            if let Ok(result) = vm.execute(
+                &account.code_hash,
+                &bytecode,
+                &input,
+                ctx,
+                Some(SPONSOR_VIEW_FUEL),
+            ) {
                 if !result.return_data.is_empty() && result.return_data[0] == 1 {
                     let max_gas = if result.return_data.len() >= 17 {
                         let mut buf = [0u8; 16];
@@ -1721,7 +1827,10 @@ impl SolenApiServer for SolenRpc {
         if last_state_root.is_some() {
             let batch_count = registry.batch_count(rollup_id);
             let last_batch_index = if batch_count > 0 {
-                registry.get_verified_batches(rollup_id, 1).first().map(|b| b.batch_index)
+                registry
+                    .get_verified_batches(rollup_id, 1)
+                    .first()
+                    .map(|b| b.batch_index)
             } else {
                 None
             };
@@ -1756,7 +1865,11 @@ impl SolenApiServer for SolenRpc {
         let data_hash = parse_hash(&req.data_hash)?;
         let proof = hex_decode(&req.proof)?;
         if proof.len() > 1_000_000 {
-            return Err(ErrorObjectOwned::owned(-32602, "proof too large (max 1MB)", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "proof too large (max 1MB)",
+                None::<()>,
+            ));
         }
 
         let commitment = BatchCommitment {
@@ -1771,7 +1884,9 @@ impl SolenApiServer for SolenRpc {
         // auto-register it so batch verification can proceed.
         {
             let registry = self.engine.proof_registry();
-            let mut registry = registry.write().map_err(|e| internal_error(e.to_string()))?;
+            let mut registry = registry
+                .write()
+                .map_err(|e| internal_error(e.to_string()))?;
             if registry.last_state_root(req.rollup_id).is_none() {
                 let store = self.engine.store();
                 let store = store.read().map_err(|e| internal_error(e.to_string()))?;
@@ -1780,11 +1895,14 @@ impl SolenApiServer for SolenRpc {
                     if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&data) {
                         let proof_type = info["proof_type"].as_str().unwrap_or("mock");
                         let genesis_root = if let Some(hex) = info["genesis_state_root"].as_str() {
-                            let bytes: Vec<u8> = (0..hex.len()).step_by(2)
-                                .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+                            let bytes: Vec<u8> = (0..hex.len())
+                                .step_by(2)
+                                .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
                                 .collect();
                             let mut root = [0u8; 32];
-                            if bytes.len() == 32 { root.copy_from_slice(&bytes); }
+                            if bytes.len() == 32 {
+                                root.copy_from_slice(&bytes);
+                            }
                             root
                         } else {
                             [0u8; 32]
@@ -1796,13 +1914,19 @@ impl SolenApiServer for SolenRpc {
         }
 
         let registry = self.engine.proof_registry();
-        let mut registry = registry.write().map_err(|e| internal_error(e.to_string()))?;
+        let mut registry = registry
+            .write()
+            .map_err(|e| internal_error(e.to_string()))?;
 
         match registry.verify_batch(&commitment) {
             Ok(verified) => Ok(BatchSubmitResult {
                 accepted: true,
                 verified,
-                error: if verified { None } else { Some("proof verification failed".to_string()) },
+                error: if verified {
+                    None
+                } else {
+                    Some("proof verification failed".to_string())
+                },
             }),
             Err(e) => Ok(BatchSubmitResult {
                 accepted: false,
@@ -1826,7 +1950,8 @@ impl SolenApiServer for SolenRpc {
         self.ensure_snapshot_cached()?;
 
         let cache = self.snapshot_cache.lock().unwrap();
-        let cached = cache.as_ref()
+        let cached = cache
+            .as_ref()
             .ok_or_else(|| internal_error("snapshot unavailable".to_string()))?;
         let mut info = cached.info.clone();
         // Fill the base64 body lazily — only the single-call path needs it.
@@ -1838,7 +1963,11 @@ impl SolenApiServer for SolenRpc {
         Ok(info)
     }
 
-    fn get_rollup_batches(&self, rollup_id: u64, limit: Option<usize>) -> RpcResult<Vec<VerifiedBatchInfo>> {
+    fn get_rollup_batches(
+        &self,
+        rollup_id: u64,
+        limit: Option<usize>,
+    ) -> RpcResult<Vec<VerifiedBatchInfo>> {
         let registry = self.engine.proof_registry();
         let registry = registry.read().map_err(|e| internal_error(e.to_string()))?;
         let batches = registry.get_verified_batches(rollup_id, limit.unwrap_or(50).min(500));
@@ -1860,7 +1989,8 @@ impl SolenApiServer for SolenRpc {
         self.ensure_snapshot_cached()?;
 
         let cache = self.snapshot_cache.lock().unwrap();
-        let cached = cache.as_ref()
+        let cached = cache
+            .as_ref()
             .ok_or_else(|| internal_error("snapshot unavailable".to_string()))?;
         let (height, epoch, state_root, entries, total_bytes) = (
             cached.info.height,
@@ -1881,7 +2011,11 @@ impl SolenApiServer for SolenRpc {
         })
     }
 
-    fn get_snapshot_chunk(&self, offset: usize, chunk_size: Option<usize>) -> RpcResult<SnapshotChunkInfo> {
+    fn get_snapshot_chunk(
+        &self,
+        offset: usize,
+        chunk_size: Option<usize>,
+    ) -> RpcResult<SnapshotChunkInfo> {
         if !RpcRateLimiter::check(&self.rate_limiter.snapshots, 20) {
             return Err(ErrorObjectOwned::owned(-32000, "rate limited", None::<()>));
         }
@@ -1890,7 +2024,8 @@ impl SolenApiServer for SolenRpc {
         self.ensure_snapshot_cached()?;
 
         let cache = self.snapshot_cache.lock().unwrap();
-        let cached = cache.as_ref()
+        let cached = cache
+            .as_ref()
             .ok_or_else(|| internal_error("snapshot not available".to_string()))?;
 
         let total = cached.raw_data.len();
@@ -1898,8 +2033,11 @@ impl SolenApiServer for SolenRpc {
 
         if offset >= total {
             return Ok(SnapshotChunkInfo {
-                offset, length: 0, total_bytes: total,
-                data: String::new(), done: true,
+                offset,
+                length: 0,
+                total_bytes: total,
+                data: String::new(),
+                done: true,
             });
         }
 
@@ -1927,8 +2065,14 @@ impl SolenApiServer for SolenRpc {
             loop {
                 match rx.recv().await {
                     Ok(NodeEvent::BlockFinalized {
-                        height, epoch, block_hash, state_root, proposer,
-                        timestamp_ms, tx_count, gas_used,
+                        height,
+                        epoch,
+                        block_hash,
+                        state_root,
+                        proposer,
+                        timestamp_ms,
+                        tx_count,
+                        gas_used,
                     }) => {
                         let notification = BlockNotification {
                             height,
@@ -1966,7 +2110,13 @@ impl SolenApiServer for SolenRpc {
         let target_sender = match parse_account_id(&sender) {
             Ok(id) => id,
             Err(_) => {
-                let _ = pending.reject(ErrorObjectOwned::owned(-32602, "invalid sender address", None::<()>)).await;
+                let _ = pending
+                    .reject(ErrorObjectOwned::owned(
+                        -32602,
+                        "invalid sender address",
+                        None::<()>,
+                    ))
+                    .await;
                 return Ok(());
             }
         };
@@ -1977,7 +2127,8 @@ impl SolenApiServer for SolenRpc {
             let store = self.engine.store();
             let store = store.read().unwrap();
             let state = ReadonlyStateManager::new(store.as_ref());
-            state.get_account(&target_sender)
+            state
+                .get_account(&target_sender)
                 .ok()
                 .flatten()
                 .map(|a| a.nonce > nonce)
@@ -2020,8 +2171,12 @@ impl SolenApiServer for SolenRpc {
                 let recv = tokio::time::timeout_at(deadline, rx.recv()).await;
                 match recv {
                     Ok(Ok(NodeEvent::TxIncluded {
-                        block_height, tx_hash, sender, nonce: tx_nonce,
-                        success, gas_used,
+                        block_height,
+                        tx_hash,
+                        sender,
+                        nonce: tx_nonce,
+                        success,
+                        gas_used,
                     })) if sender == target_sender && tx_nonce == nonce => {
                         let notification = TxConfirmationNotification {
                             block_height,
@@ -2037,13 +2192,17 @@ impl SolenApiServer for SolenRpc {
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                        tracing::warn!(missed = n, "txConfirmation subscriber lagged — checking chain state");
+                        tracing::warn!(
+                            missed = n,
+                            "txConfirmation subscriber lagged — checking chain state"
+                        );
                         // Re-check chain state in case the tx landed during lag.
                         let confirmed = {
                             let store = engine.store();
                             let store = store.read().unwrap();
                             let state = ReadonlyStateManager::new(store.as_ref());
-                            state.get_account(&target_sender)
+                            state
+                                .get_account(&target_sender)
                                 .ok()
                                 .flatten()
                                 .map(|a| a.nonce > nonce)
@@ -2076,7 +2235,10 @@ impl SolenApiServer for SolenRpc {
         Ok(())
     }
 
-    async fn subscribe_validator_changes(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
+    async fn subscribe_validator_changes(
+        &self,
+        pending: PendingSubscriptionSink,
+    ) -> SubscriptionResult {
         let mut rx = self.event_tx.subscribe();
 
         tokio::spawn(async move {
@@ -2086,7 +2248,10 @@ impl SolenApiServer for SolenRpc {
             };
             loop {
                 match rx.recv().await {
-                    Ok(NodeEvent::ValidatorSetChanged { epoch, active_count }) => {
+                    Ok(NodeEvent::ValidatorSetChanged {
+                        epoch,
+                        active_count,
+                    }) => {
                         let notification = ValidatorChangeNotification {
                             epoch,
                             active_count,
@@ -2125,32 +2290,45 @@ fn parse_hash(s: &str) -> RpcResult<[u8; 32]> {
 
 fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
     match c {
-        ConstraintInfo::MinBalance { account, min_amount } => Ok(Constraint::MinBalance {
+        ConstraintInfo::MinBalance {
+            account,
+            min_amount,
+        } => Ok(Constraint::MinBalance {
             account: parse_account_id(account)?,
-            min_amount: min_amount.parse().map_err(|_| {
-                ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>)
-            })?,
+            min_amount: min_amount
+                .parse()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>))?,
         }),
-        ConstraintInfo::MaxSpend { account, max_amount } => Ok(Constraint::MaxSpend {
+        ConstraintInfo::MaxSpend {
+            account,
+            max_amount,
+        } => Ok(Constraint::MaxSpend {
             account: parse_account_id(account)?,
-            max_amount: max_amount.parse().map_err(|_| {
-                ErrorObjectOwned::owned(-32602, "invalid max_amount", None::<()>)
-            })?,
+            max_amount: max_amount
+                .parse()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid max_amount", None::<()>))?,
         }),
-        ConstraintInfo::RequireTransfer { from, to, min_amount } => Ok(Constraint::RequireTransfer {
+        ConstraintInfo::RequireTransfer {
+            from,
+            to,
+            min_amount,
+        } => Ok(Constraint::RequireTransfer {
             from: parse_account_id(from)?,
             to: parse_account_id(to)?,
-            min_amount: min_amount.parse().map_err(|_| {
-                ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>)
-            })?,
+            min_amount: min_amount
+                .parse()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid min_amount", None::<()>))?,
         }),
         ConstraintInfo::RequireCall { target, method } => Ok(Constraint::RequireCall {
             target: parse_account_id(target)?,
             method: method.clone(),
         }),
         ConstraintInfo::CrossChainSwap {
-            input_amount, min_output, destination_chain,
-            destination_address, output_token,
+            input_amount,
+            min_output,
+            destination_chain,
+            destination_address,
+            output_token,
         } => {
             let mut dest_addr = [0u8; 32];
             let dest_bytes = hex_decode(destination_address)?;
@@ -2183,15 +2361,25 @@ fn constraint_from_info(c: &ConstraintInfo) -> RpcResult<Constraint> {
 
 fn constraint_to_info(c: &Constraint) -> ConstraintInfo {
     match c {
-        Constraint::MinBalance { account, min_amount } => ConstraintInfo::MinBalance {
+        Constraint::MinBalance {
+            account,
+            min_amount,
+        } => ConstraintInfo::MinBalance {
             account: account_to_base58(account),
             min_amount: min_amount.to_string(),
         },
-        Constraint::MaxSpend { account, max_amount } => ConstraintInfo::MaxSpend {
+        Constraint::MaxSpend {
+            account,
+            max_amount,
+        } => ConstraintInfo::MaxSpend {
             account: account_to_base58(account),
             max_amount: max_amount.to_string(),
         },
-        Constraint::RequireTransfer { from, to, min_amount } => ConstraintInfo::RequireTransfer {
+        Constraint::RequireTransfer {
+            from,
+            to,
+            min_amount,
+        } => ConstraintInfo::RequireTransfer {
             from: account_to_base58(from),
             to: account_to_base58(to),
             min_amount: min_amount.to_string(),
@@ -2201,8 +2389,11 @@ fn constraint_to_info(c: &Constraint) -> ConstraintInfo {
             method: method.clone(),
         },
         Constraint::CrossChainSwap {
-            input_amount, min_output, destination_chain,
-            destination_address, output_token,
+            input_amount,
+            min_output,
+            destination_chain,
+            destination_address,
+            output_token,
         } => ConstraintInfo::CrossChainSwap {
             input_amount: input_amount.to_string(),
             min_output: min_output.to_string(),

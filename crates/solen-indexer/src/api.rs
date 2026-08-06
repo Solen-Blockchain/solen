@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, Query, State};
-use axum::response::{Json, IntoResponse};
+use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,9 @@ use tracing::info;
 
 use solen_types::encoding::{account_to_base58, hex_encode, parse_address};
 
-use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
+use crate::store::{
+    IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx,
+};
 
 /// Pre-sorted richlist rows `(id, balance, staked)` with the time the snapshot
 /// was built. Lets `/api/richlist` serve a TTL-cached result instead of
@@ -107,12 +109,18 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tx/hash/:tx_hash", get(get_tx_by_hash))
         .route("/api/txs", get(get_recent_txs))
         .route("/api/accounts/:account/txs", get(get_account_txs))
-        .route("/api/accounts/:account/transfers", get(get_account_transfers))
+        .route(
+            "/api/accounts/:account/transfers",
+            get(get_account_transfers),
+        )
         .route("/api/events", get(get_events))
         .route("/api/validators", get(get_validators))
         .route("/api/validators/stats", get(get_validator_stats))
         .route("/api/accounts/:account/tokens", get(get_account_tokens))
-        .route("/api/contracts/:code_hash/source", get(get_contract_source).post(publish_contract_source))
+        .route(
+            "/api/contracts/:code_hash/source",
+            get(get_contract_source).post(publish_contract_source),
+        )
         .route("/api/contracts", get(get_contracts))
         .route("/api/contracts/:contract/holders", get(get_token_holders))
         .route("/api/intents", get(get_fulfilled_intents))
@@ -191,7 +199,13 @@ async fn get_recent_txs(
 ) -> Json<Vec<IndexedTx>> {
     params.limit = params.limit.min(MAX_PAGE_LIMIT);
     let store = state.store.read().unwrap();
-    Json(store.get_recent_txs_paged(params.limit, params.offset).into_iter().cloned().collect())
+    Json(
+        store
+            .get_recent_txs_paged(params.limit, params.offset)
+            .into_iter()
+            .cloned()
+            .collect(),
+    )
 }
 
 async fn get_account_txs(
@@ -314,21 +328,32 @@ async fn get_account_transfers(
 
     for tx in txs {
         // Per-tx fee amount (0 if no fee event).
-        let tx_fee: u128 = tx.events.iter()
+        let tx_fee: u128 = tx
+            .events
+            .iter()
             .find(|e| e.topic == "fee" && e.data.len() >= 32)
             .and_then(|e| decode_u128_le_hex(&e.data[..32]))
             .unwrap_or(0);
 
-        let block_ts = store.get_block(tx.block_height).map(|b| b.timestamp_ms).unwrap_or(0);
+        let block_ts = store
+            .get_block(tx.block_height)
+            .map(|b| b.timestamp_ms)
+            .unwrap_or(0);
         let mut fee_attributed = false;
 
         for (ev_idx, ev) in tx.events.iter().enumerate() {
-            if ev.topic != "transfer" { continue; }
-            let Some((recipient, amount)) = decode_transfer_data(&ev.data) else { continue };
+            if ev.topic != "transfer" {
+                continue;
+            }
+            let Some((recipient, amount)) = decode_transfer_data(&ev.data) else {
+                continue;
+            };
 
             let is_out = tx.sender == lookup;
             let is_in = recipient == lookup;
-            if !is_out && !is_in { continue; }
+            if !is_out && !is_in {
+                continue;
+            }
             match direction {
                 "in" if !is_in => continue,
                 "out" if !is_out => continue,
@@ -382,7 +407,9 @@ async fn get_events(
     // Normalize the contract filter: callers may pass hex (with or without
     // `0x`) or Base58. Events are stored with Base58 emitters.
     let emitter_b58 = params.contract.as_deref().and_then(|raw| {
-        parse_address(raw).ok().map(|bytes| account_to_base58(&bytes))
+        parse_address(raw)
+            .ok()
+            .map(|bytes| account_to_base58(&bytes))
     });
     let store = state.store.read().unwrap();
     let events: Vec<IndexedEvent> = store
@@ -466,14 +493,13 @@ struct ValidatorStats {
     uptime_pct: f64,
 }
 
-async fn get_validator_stats(
-    State(state): State<ApiState>,
-) -> Json<Vec<ValidatorStats>> {
+async fn get_validator_stats(State(state): State<ApiState>) -> Json<Vec<ValidatorStats>> {
     let store = state.store.read().unwrap();
     let total_blocks = store.latest_height.max(1);
 
     // Get all known proposers.
-    let mut stats: Vec<ValidatorStats> = store.blocks_proposed
+    let mut stats: Vec<ValidatorStats> = store
+        .blocks_proposed
         .iter()
         .map(|(validator, &count)| {
             let last = store.last_proposed.get(validator).copied().unwrap_or(0);
@@ -561,8 +587,12 @@ fn source_compile_enabled() -> bool {
 /// True only if a contract with this code hash is actually deployed on-chain.
 /// Prevents spending compile cycles on arbitrary attacker-chosen hashes.
 fn contract_bytecode_exists(state: &ApiState, code_hash_hex: &str) -> bool {
-    let Some(engine) = &state.engine else { return false };
-    let Ok(hash_bytes) = parse_address(code_hash_hex) else { return false };
+    let Some(engine) = &state.engine else {
+        return false;
+    };
+    let Ok(hash_bytes) = parse_address(code_hash_hex) else {
+        return false;
+    };
     let mut key = b"code/".to_vec();
     key.extend_from_slice(&hash_bytes);
     let estore = engine.store();
@@ -579,7 +609,9 @@ async fn publish_contract_source(
     {
         // Basic validation: code_hash must be valid hex and 64 chars.
         if code_hash.len() != 64 || !code_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Json(serde_json::json!({"success": false, "error": "invalid code_hash format"}));
+            return Json(
+                serde_json::json!({"success": false, "error": "invalid code_hash format"}),
+            );
         }
 
         // Bound the stored/compiled source size.
@@ -594,7 +626,9 @@ async fn publish_contract_source(
         // (durable storage-bloat DoS). Binding to deployed bytecode caps the
         // total set of storable sources to the real contract population.
         if !contract_bytecode_exists(&state, &code_hash) {
-            return Json(serde_json::json!({"success": false, "error": "no deployed contract with this code_hash"}));
+            return Json(
+                serde_json::json!({"success": false, "error": "no deployed contract with this code_hash"}),
+            );
         }
 
         // Rate limit: reject if source was published recently (within 1 hour).
@@ -605,14 +639,18 @@ async fn publish_contract_source(
                 .unwrap_or_default()
                 .as_secs();
             if now.saturating_sub(existing.published_at) < 3600 {
-                return Json(serde_json::json!({"success": false, "error": "source already published recently"}));
+                return Json(
+                    serde_json::json!({"success": false, "error": "source already published recently"}),
+                );
             }
         }
     }
 
     let source_code = body.source_code.clone();
     let language = body.language.unwrap_or_else(|| "rust".to_string());
-    let compiler_version = body.compiler_version.unwrap_or_else(|| "unknown".to_string());
+    let compiler_version = body
+        .compiler_version
+        .unwrap_or_else(|| "unknown".to_string());
     let expected_hash = code_hash.clone();
 
     // Verify by compiling ONLY when on-node compilation is explicitly enabled,
@@ -643,7 +681,9 @@ async fn publish_contract_source(
         verified,
     };
 
-    store.contract_sources.insert(code_hash.clone(), source.clone());
+    store
+        .contract_sources
+        .insert(code_hash.clone(), source.clone());
     drop(store);
 
     // Persist to engine store so it survives restarts.
@@ -709,7 +749,8 @@ strip = true
         let exists = c.join("Cargo.toml").exists();
         tracing::info!(path = %c.display(), exists, "contract verification: checking SDK candidate");
     }
-    let sdk_path = candidates.iter()
+    let sdk_path = candidates
+        .iter()
         .find(|p| p.join("Cargo.toml").exists())
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("crates/solen-contract-sdk"));
@@ -731,9 +772,10 @@ strip = true
         std::path::PathBuf::from("/home/solen/.cargo/bin/cargo"),
         std::path::PathBuf::from("/root/.cargo/bin/cargo"),
         std::path::PathBuf::from("cargo"),
-    ].into_iter()
-        .find(|p| p.exists() || p.to_str() == Some("cargo"))
-        .unwrap_or_else(|| std::path::PathBuf::from("cargo"));
+    ]
+    .into_iter()
+    .find(|p| p.exists() || p.to_str() == Some("cargo"))
+    .unwrap_or_else(|| std::path::PathBuf::from("cargo"));
 
     tracing::info!(cargo = %cargo_bin.display(), "contract verification: compiling");
 
@@ -756,7 +798,8 @@ strip = true
     }
 
     // Find the WASM output.
-    let wasm_path = tmp.path()
+    let wasm_path = tmp
+        .path()
         .join("target/wasm32-unknown-unknown/release/verify_contract.wasm");
 
     let wasm_bytes = match std::fs::read(&wasm_path) {
@@ -794,9 +837,7 @@ async fn get_account_tokens(
     Json(store.get_account_tokens(&lookup))
 }
 
-async fn get_contracts(
-    State(state): State<ApiState>,
-) -> Json<Vec<String>> {
+async fn get_contracts(State(state): State<ApiState>) -> Json<Vec<String>> {
     let store = state.store.read().unwrap();
     Json(store.get_contracts())
 }
@@ -807,7 +848,13 @@ async fn get_fulfilled_intents(
 ) -> Json<Vec<IndexedIntent>> {
     params.limit = params.limit.min(MAX_PAGE_LIMIT);
     let store = state.store.read().unwrap();
-    Json(store.get_recent_intents(params.limit).into_iter().cloned().collect())
+    Json(
+        store
+            .get_recent_intents(params.limit)
+            .into_iter()
+            .cloned()
+            .collect(),
+    )
 }
 
 async fn get_rollups(State(state): State<ApiState>) -> Json<Vec<IndexedRollup>> {
@@ -834,7 +881,11 @@ async fn get_rollup(
     };
     // Check indexed batches first, then fall back to proof registry.
     let mut total_batches = store.get_rollup_batch_count(rollup_id);
-    let mut latest_batch = store.get_rollup_batches(rollup_id, 1).first().cloned().cloned();
+    let mut latest_batch = store
+        .get_rollup_batches(rollup_id, 1)
+        .first()
+        .cloned()
+        .cloned();
     drop(store);
 
     if total_batches == 0 {
@@ -905,7 +956,11 @@ async fn get_rollup_batches(
 fn format_supply(raw: u128) -> String {
     let whole = raw / 100_000_000;
     let frac = raw % 100_000_000;
-    if frac == 0 { format!("{whole}") } else { format!("{whole}.{frac:08}") }
+    if frac == 0 {
+        format!("{whole}")
+    } else {
+        format!("{whole}.{frac:08}")
+    }
 }
 
 async fn get_total_supply(State(state): State<ApiState>) -> impl IntoResponse {
@@ -945,12 +1000,19 @@ async fn get_circulating_supply(State(state): State<ApiState>) -> impl IntoRespo
 
     use solen_types::system::*;
     let non_circ_addrs = [
-        TREASURY_ADDRESS, STAKING_POOL_ADDRESS, ECOSYSTEM_FUND_ADDRESS,
-        COMMUNITY_ADDRESS, LIQUIDITY_ADDRESS, TEAM_POOL_ADDRESS,
-        INVESTOR_POOL_ADDRESS, BRIDGE_ADDRESS, VESTING_ADDRESS,
+        TREASURY_ADDRESS,
+        STAKING_POOL_ADDRESS,
+        ECOSYSTEM_FUND_ADDRESS,
+        COMMUNITY_ADDRESS,
+        LIQUIDITY_ADDRESS,
+        TEAM_POOL_ADDRESS,
+        INVESTOR_POOL_ADDRESS,
+        BRIDGE_ADDRESS,
+        VESTING_ADDRESS,
     ];
     let state_mgr = solen_execution::state::ReadonlyStateManager::new(store.as_ref());
-    let non_circ: u128 = non_circ_addrs.iter()
+    let non_circ: u128 = non_circ_addrs
+        .iter()
         .map(|addr| state_mgr.get_balance(addr).unwrap_or(0))
         .sum();
 
@@ -994,13 +1056,18 @@ fn richlist_page(
     offset: usize,
     limit: usize,
 ) -> Vec<RichListEntry> {
-    accounts.iter()
+    accounts
+        .iter()
         .skip(offset)
         .take(limit)
         .enumerate()
         .map(|(i, (id, balance, staked))| {
             let label = system_account_label(id).map(|s| s.to_string()).or_else(|| {
-                if *staked > 0 { Some("Validator".to_string()) } else { None }
+                if *staked > 0 {
+                    Some("Validator".to_string())
+                } else {
+                    None
+                }
             });
             RichListEntry {
                 rank: offset + i + 1,
@@ -1048,11 +1115,15 @@ async fn get_richlist(
         let staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
         let mut accounts = Vec::new();
         for (key, value) in &entries {
-            if key.len() != 36 { continue; } // "acc/" + 32 bytes
+            if key.len() != 36 {
+                continue;
+            } // "acc/" + 32 bytes
             if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(value) {
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&key[4..]);
-                let staked = staking.validators.iter()
+                let staked = staking
+                    .validators
+                    .iter()
                     .find(|v| v.id == id)
                     .map(|v| v.self_stake)
                     .unwrap_or(0);

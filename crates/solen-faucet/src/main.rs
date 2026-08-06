@@ -20,8 +20,8 @@ use axum::Router;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use solen_crypto::{blake3_hash, Keypair};
-use solen_types::transaction::{Action, UserOperation};
 use solen_types::encoding::{account_to_base58, parse_address};
+use solen_types::transaction::{Action, UserOperation};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -117,7 +117,8 @@ async fn handle_drip(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
         .or_else(|| {
-            headers.get("x-real-ip")
+            headers
+                .get("x-real-ip")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         })
@@ -128,7 +129,9 @@ async fn handle_drip(
     {
         const MAX_DRIPS_PER_IP: u32 = 5;
         let mut ip_limits = state.ip_rate_limit.lock().unwrap();
-        let entry = ip_limits.entry(client_ip.clone()).or_insert((Instant::now(), 0));
+        let entry = ip_limits
+            .entry(client_ip.clone())
+            .or_insert((Instant::now(), 0));
         if entry.0.elapsed() > state.cooldown {
             // Reset window.
             *entry = (Instant::now(), 1);
@@ -303,7 +306,13 @@ async fn get_nonce(
         "id": 1
     });
 
-    let resp: serde_json::Value = client.post(rpc_url).json(&body).send().await?.json().await?;
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
 
     resp["result"]["nonce"]
         .as_u64()
@@ -322,7 +331,13 @@ async fn submit_op(
         "id": 1
     });
 
-    let resp: serde_json::Value = client.post(rpc_url).json(&body).send().await?.json().await?;
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
 
     Ok(resp["result"]["accepted"].as_bool().unwrap_or(false))
 }
@@ -347,8 +362,7 @@ fn resolve_account(input: &str) -> String {
 
 fn hex_decode_32(s: &str) -> anyhow::Result<[u8; 32]> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = solen_types::encoding::hex_decode(s)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let bytes = solen_types::encoding::hex_decode(s).map_err(|e| anyhow::anyhow!("{}", e))?;
     let mut arr = [0u8; 32];
     if bytes.len() != 32 {
         anyhow::bail!("expected 32 bytes");

@@ -66,7 +66,9 @@ pub fn create_snapshot(
     epoch: u64,
 ) -> Result<Vec<u8>, SnapshotError> {
     let state_root = store.state_root();
-    let entries = store.scan_all().map_err(|e| SnapshotError::Storage(e.to_string()))?;
+    let entries = store
+        .scan_all()
+        .map_err(|e| SnapshotError::Storage(e.to_string()))?;
     let entry_count = entries.len() as u64;
 
     // Serialize entries to uncompressed buffer.
@@ -104,7 +106,10 @@ pub fn create_snapshot(
         entries = entry_count,
         compressed = compressed.len(),
         uncompressed = uncompressed_size,
-        ratio = format!("{:.1}x", uncompressed_size as f64 / compressed.len().max(1) as f64),
+        ratio = format!(
+            "{:.1}x",
+            uncompressed_size as f64 / compressed.len().max(1) as f64
+        ),
         "snapshot created"
     );
 
@@ -121,7 +126,9 @@ pub fn read_snapshot_meta(data: &[u8]) -> Result<SnapshotMeta, SnapshotError> {
     }
     let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     if version != VERSION {
-        return Err(SnapshotError::Invalid(format!("unsupported version: {version}")));
+        return Err(SnapshotError::Invalid(format!(
+            "unsupported version: {version}"
+        )));
     }
 
     let height = u64::from_le_bytes(data[8..16].try_into().unwrap());
@@ -181,22 +188,30 @@ pub fn restore_snapshot(
     let mut loaded = 0u64;
 
     while offset < raw.len() && loaded < entry_count {
-        if offset + 4 > raw.len() { break; }
-        let key_len = u32::from_le_bytes(raw[offset..offset+4].try_into().unwrap()) as usize;
+        if offset + 4 > raw.len() {
+            break;
+        }
+        let key_len = u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
-        if offset + key_len + 4 > raw.len() { break; }
-        let key = &raw[offset..offset+key_len];
+        if offset + key_len + 4 > raw.len() {
+            break;
+        }
+        let key = &raw[offset..offset + key_len];
         offset += key_len;
 
-        let val_len = u32::from_le_bytes(raw[offset..offset+4].try_into().unwrap()) as usize;
+        let val_len = u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
-        if offset + val_len > raw.len() { break; }
-        let val = &raw[offset..offset+val_len];
+        if offset + val_len > raw.len() {
+            break;
+        }
+        let val = &raw[offset..offset + val_len];
         offset += val_len;
 
-        store.put(key, val).map_err(|e| SnapshotError::Storage(e.to_string()))?;
+        store
+            .put(key, val)
+            .map_err(|e| SnapshotError::Storage(e.to_string()))?;
         loaded += 1;
     }
 
@@ -255,7 +270,10 @@ pub struct LocalSnapshots {
 
 impl LocalSnapshots {
     pub fn new(dir: impl Into<std::path::PathBuf>, keep: usize) -> Self {
-        Self { dir: dir.into(), keep: keep.max(1) }
+        Self {
+            dir: dir.into(),
+            keep: keep.max(1),
+        }
     }
 
     /// Persist `bytes` as the checkpoint for `height` (atomic publish via a
@@ -333,7 +351,10 @@ pub struct RocksCheckpoints {
 
 impl RocksCheckpoints {
     pub fn new(dir: impl Into<std::path::PathBuf>, keep: usize) -> Self {
-        Self { dir: dir.into(), keep: keep.max(1) }
+        Self {
+            dir: dir.into(),
+            keep: keep.max(1),
+        }
     }
 
     /// Create a checkpoint of `store` at `height`/`state_root`, then prune to
@@ -370,7 +391,9 @@ impl RocksCheckpoints {
                 let entry_dir = entry.path();
                 let db_path = entry_dir.join("db");
                 let meta_path = entry_dir.join("meta");
-                let Ok(meta) = std::fs::read(&meta_path) else { continue };
+                let Ok(meta) = std::fs::read(&meta_path) else {
+                    continue;
+                };
                 if meta.len() < 40 || !db_path.is_dir() {
                     continue;
                 }
@@ -464,12 +487,16 @@ mod tests {
 
         let mut restored = MemoryStore::new();
         let result = restore_snapshot(&mut restored, &data);
-        assert!(matches!(result, Err(SnapshotError::StateRootMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SnapshotError::StateRootMismatch { .. })
+        ));
     }
 
     #[test]
     fn bad_magic_rejected() {
-        let result = read_snapshot_meta(b"BADXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        let result =
+            read_snapshot_meta(b"BADXxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         assert!(matches!(result, Err(SnapshotError::Invalid(_))));
     }
 
@@ -479,16 +506,39 @@ mod tests {
     /// RocksDB checkpoint here without the feature, so verify the metadata ring.
     struct FakeCkptStore;
     impl solen_storage::StateStore for FakeCkptStore {
-        fn get(&self, _k: &[u8]) -> Result<Option<Vec<u8>>, solen_storage::StorageError> { Ok(None) }
-        fn put(&mut self, _k: &[u8], _v: &[u8]) -> Result<(), solen_storage::StorageError> { Ok(()) }
-        fn delete(&mut self, _k: &[u8]) -> Result<(), solen_storage::StorageError> { Ok(()) }
-        fn state_root(&self) -> Hash { [0u8; 32] }
-        fn len(&self) -> usize { 0 }
-        fn snapshot(&self) -> Box<dyn solen_storage::StateStore> { Box::new(MemoryStore::new()) }
-        fn scan_prefix(&self, _p: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> { Ok(vec![]) }
-        fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> { Ok(vec![]) }
-        fn create_checkpoint_at(&self, dir: &std::path::Path) -> Result<(), solen_storage::StorageError> {
-            std::fs::create_dir_all(dir).map_err(|e| solen_storage::StorageError::Backend(e.to_string()))
+        fn get(&self, _k: &[u8]) -> Result<Option<Vec<u8>>, solen_storage::StorageError> {
+            Ok(None)
+        }
+        fn put(&mut self, _k: &[u8], _v: &[u8]) -> Result<(), solen_storage::StorageError> {
+            Ok(())
+        }
+        fn delete(&mut self, _k: &[u8]) -> Result<(), solen_storage::StorageError> {
+            Ok(())
+        }
+        fn state_root(&self) -> Hash {
+            [0u8; 32]
+        }
+        fn len(&self) -> usize {
+            0
+        }
+        fn snapshot(&self) -> Box<dyn solen_storage::StateStore> {
+            Box::new(MemoryStore::new())
+        }
+        fn scan_prefix(
+            &self,
+            _p: &[u8],
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> {
+            Ok(vec![])
+        }
+        fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, solen_storage::StorageError> {
+            Ok(vec![])
+        }
+        fn create_checkpoint_at(
+            &self,
+            dir: &std::path::Path,
+        ) -> Result<(), solen_storage::StorageError> {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| solen_storage::StorageError::Backend(e.to_string()))
         }
     }
 
@@ -527,7 +577,8 @@ mod tests {
 
         // Persist five checkpoints; only the newest 3 should survive.
         for h in [100u64, 200, 300, 400, 500] {
-            cp.persist(h, format!("snapshot-at-{h}").as_bytes()).unwrap();
+            cp.persist(h, format!("snapshot-at-{h}").as_bytes())
+                .unwrap();
         }
         let heights: Vec<u64> = cp.list().into_iter().map(|(h, _)| h).collect();
         assert_eq!(heights, vec![300, 400, 500], "should keep only newest 3");
@@ -535,7 +586,11 @@ mod tests {
         // newest_at_or_below picks the right one.
         assert_eq!(cp.newest_at_or_below(450).map(|(h, _)| h), Some(400));
         assert_eq!(cp.newest_at_or_below(500).map(|(h, _)| h), Some(500));
-        assert_eq!(cp.newest_at_or_below(250).map(|(h, _)| h), None, "all retained are above 250");
+        assert_eq!(
+            cp.newest_at_or_below(250).map(|(h, _)| h),
+            None,
+            "all retained are above 250"
+        );
 
         // Bytes round-trip.
         let (_, path) = cp.newest_at_or_below(500).unwrap();

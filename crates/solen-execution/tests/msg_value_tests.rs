@@ -83,7 +83,11 @@ fn setup() -> Fixture {
     sign_op(&kp, &executor, &mut deploy_op);
 
     let result = executor.execute_block(&mut store, &[deploy_op]);
-    assert!(result.receipts[0].success, "deploy failed: {:?}", result.receipts[0].error);
+    assert!(
+        result.receipts[0].success,
+        "deploy failed: {:?}",
+        result.receipts[0].error
+    );
 
     // Extract deployed contract address from the "deploy" event.
     let deploy_event = result.receipts[0]
@@ -144,7 +148,11 @@ fn msg_value_single_transfer_then_call() {
     assert!(result.receipts[0].success, "{:?}", result.receipts[0].error);
 
     let mvs = extract_msg_values(&result.receipts[0].events);
-    assert_eq!(mvs, vec![12_345u128], "msg_value should equal the Transfer amount");
+    assert_eq!(
+        mvs,
+        vec![12_345u128],
+        "msg_value should equal the Transfer amount"
+    );
 }
 
 // ── B: Multiple Transfers then one Call ──────────────────────
@@ -156,9 +164,18 @@ fn msg_value_multiple_transfers_sum() {
         sender: fx.sender,
         nonce: 1,
         actions: vec![
-            Action::Transfer { to: fx.contract, amount: 100 },
-            Action::Transfer { to: fx.contract, amount: 250 },
-            Action::Transfer { to: fx.contract, amount: 50 },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 100,
+            },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 250,
+            },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 50,
+            },
             Action::Call {
                 target: fx.contract,
                 method: "probe".to_string(),
@@ -174,7 +191,11 @@ fn msg_value_multiple_transfers_sum() {
     assert!(result.receipts[0].success, "{:?}", result.receipts[0].error);
 
     let mvs = extract_msg_values(&result.receipts[0].events);
-    assert_eq!(mvs, vec![400u128], "msg_value should equal the sum of preceding Transfers");
+    assert_eq!(
+        mvs,
+        vec![400u128],
+        "msg_value should equal the sum of preceding Transfers"
+    );
 }
 
 // ── C: Call with no preceding Transfer ───────────────────────
@@ -211,14 +232,23 @@ fn msg_value_resets_between_calls() {
         sender: fx.sender,
         nonce: 1,
         actions: vec![
-            Action::Transfer { to: fx.contract, amount: 10 },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 10,
+            },
             Action::Call {
                 target: fx.contract,
                 method: "probe".to_string(),
                 args: vec![],
             },
-            Action::Transfer { to: fx.contract, amount: 20 },
-            Action::Transfer { to: fx.contract, amount: 5 },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 20,
+            },
+            Action::Transfer {
+                to: fx.contract,
+                amount: 5,
+            },
             Action::Call {
                 target: fx.contract,
                 method: "probe".to_string(),

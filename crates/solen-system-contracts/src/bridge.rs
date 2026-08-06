@@ -108,7 +108,11 @@ impl BridgeContract {
         genesis_state_root: Hash,
         height: u64,
     ) -> Result<(), BridgeError> {
-        if self.registered_rollups.iter().any(|r| r.rollup_id == rollup_id) {
+        if self
+            .registered_rollups
+            .iter()
+            .any(|r| r.rollup_id == rollup_id)
+        {
             return Err(BridgeError::RollupAlreadyRegistered(rollup_id));
         }
         self.registered_rollups.push(RegisteredRollup {
@@ -135,7 +139,9 @@ impl BridgeContract {
 
     /// Get a registered rollup by ID.
     pub fn get_rollup(&self, rollup_id: RollupId) -> Option<&RegisteredRollup> {
-        self.registered_rollups.iter().find(|r| r.rollup_id == rollup_id)
+        self.registered_rollups
+            .iter()
+            .find(|r| r.rollup_id == rollup_id)
     }
 
     /// Register a new bridge vault for a rollup.
@@ -155,11 +161,7 @@ impl BridgeContract {
     }
 
     /// Deposit assets into a rollup's bridge vault.
-    pub fn deposit(
-        &mut self,
-        rollup_id: RollupId,
-        amount: u128,
-    ) -> Result<(), BridgeError> {
+    pub fn deposit(&mut self, rollup_id: RollupId, amount: u128) -> Result<(), BridgeError> {
         let vault = self
             .vaults
             .iter_mut()
@@ -188,7 +190,9 @@ impl BridgeContract {
 
         // Check balance against BOTH current balance AND pending withdrawals
         // to prevent over-commitment of vault funds.
-        let pending_amount: u128 = self.pending_withdrawals.iter()
+        let pending_amount: u128 = self
+            .pending_withdrawals
+            .iter()
             .filter(|w| w.rollup_id == rollup_id && matches!(w.status, WithdrawalStatus::Pending))
             .map(|w| w.amount)
             .sum();
@@ -451,8 +455,12 @@ mod tests {
         bridge.register_vault(1).unwrap();
         bridge.deposit(1, 10_000).unwrap();
 
-        let w1 = bridge.initiate_withdrawal(1, aid(1), 1000, 10, [0; 32]).unwrap();
-        let w2 = bridge.initiate_withdrawal(1, aid(2), 2000, 10, [0; 32]).unwrap();
+        let w1 = bridge
+            .initiate_withdrawal(1, aid(1), 1000, 10, [0; 32])
+            .unwrap();
+        let w2 = bridge
+            .initiate_withdrawal(1, aid(2), 2000, 10, [0; 32])
+            .unwrap();
 
         assert_eq!(bridge.pending_for_recipient(&aid(1)).len(), 1);
         assert_eq!(bridge.pending_for_recipient(&aid(2)).len(), 1);

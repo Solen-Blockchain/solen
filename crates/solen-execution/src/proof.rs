@@ -121,7 +121,10 @@ impl ProofVerifierRegistry {
                 last_verified_state_root: genesis_state_root,
             },
         );
-        info!(rollup_id, proof_type, "rollup registered for proof verification");
+        info!(
+            rollup_id,
+            proof_type, "rollup registered for proof verification"
+        );
         Ok(())
     }
 
@@ -175,7 +178,9 @@ impl ProofVerifierRegistry {
 
     /// Get the last verified state root for a rollup.
     pub fn last_state_root(&self, rollup_id: RollupId) -> Option<[u8; 32]> {
-        self.rollups.get(&rollup_id).map(|r| r.last_verified_state_root)
+        self.rollups
+            .get(&rollup_id)
+            .map(|r| r.last_verified_state_root)
     }
 
     /// Get verified batches for a rollup, newest first.
@@ -190,7 +195,10 @@ impl ProofVerifierRegistry {
 
     /// Get total number of verified batches for a rollup.
     pub fn batch_count(&self, rollup_id: RollupId) -> usize {
-        self.verified_batches.iter().filter(|b| b.rollup_id == rollup_id).count()
+        self.verified_batches
+            .iter()
+            .filter(|b| b.rollup_id == rollup_id)
+            .count()
     }
 }
 
@@ -203,9 +211,7 @@ mod tests {
     fn register_and_verify() {
         let mut registry = ProofVerifierRegistry::new();
         registry.register_verifier(Arc::new(MockVerifier));
-        registry
-            .register_rollup(1, "mock", [0u8; 32])
-            .unwrap();
+        registry.register_rollup(1, "mock", [0u8; 32]).unwrap();
 
         // Generate a valid mock proof.
         let pre = [0u8; 32];
@@ -235,9 +241,7 @@ mod tests {
     fn invalid_proof_rejected() {
         let mut registry = ProofVerifierRegistry::new();
         registry.register_verifier(Arc::new(MockVerifier));
-        registry
-            .register_rollup(1, "mock", [0u8; 32])
-            .unwrap();
+        registry.register_rollup(1, "mock", [0u8; 32]).unwrap();
 
         let commitment = BatchCommitment {
             rollup_id: 1,
@@ -273,9 +277,7 @@ mod tests {
     fn state_root_chain() {
         let mut registry = ProofVerifierRegistry::new();
         registry.register_verifier(Arc::new(MockVerifier));
-        registry
-            .register_rollup(1, "mock", [0u8; 32])
-            .unwrap();
+        registry.register_rollup(1, "mock", [0u8; 32]).unwrap();
 
         // Batch 1: state 0 -> 1
         let proof1 = make_mock_proof(&[0u8; 32], &[1u8; 32], &[10u8; 32]);

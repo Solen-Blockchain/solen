@@ -7,10 +7,18 @@ use solen_types::{Hash, ValidatorId};
 
 /// Build network-specific gossip topic names.
 /// This ensures testnet, devnet, and mainnet nodes don't interfere.
-pub fn topic_blocks(chain_id: u64) -> String { format!("solen/{}/blocks/1", chain_id) }
-pub fn topic_transactions(chain_id: u64) -> String { format!("solen/{}/transactions/1", chain_id) }
-pub fn topic_attestations(chain_id: u64) -> String { format!("solen/{}/attestations/1", chain_id) }
-pub fn topic_sync(chain_id: u64) -> String { format!("solen/{}/sync/1", chain_id) }
+pub fn topic_blocks(chain_id: u64) -> String {
+    format!("solen/{}/blocks/1", chain_id)
+}
+pub fn topic_transactions(chain_id: u64) -> String {
+    format!("solen/{}/transactions/1", chain_id)
+}
+pub fn topic_attestations(chain_id: u64) -> String {
+    format!("solen/{}/attestations/1", chain_id)
+}
+pub fn topic_sync(chain_id: u64) -> String {
+    format!("solen/{}/sync/1", chain_id)
+}
 
 /// Messages that can be sent over the gossip network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,19 +40,11 @@ pub enum NetworkMessage {
         signature: Vec<u8>,
     },
     /// Request blocks for sync. Peer should respond with SyncBlocks.
-    SyncRequest {
-        from_height: u64,
-        to_height: u64,
-    },
+    SyncRequest { from_height: u64, to_height: u64 },
     /// Response with historical blocks for sync.
-    SyncBlocks {
-        blocks: Vec<SyncBlock>,
-    },
+    SyncBlocks { blocks: Vec<SyncBlock> },
     /// Announce current height (for peers to know if they need to sync).
-    StatusAnnounce {
-        height: u64,
-        state_root: Hash,
-    },
+    StatusAnnounce { height: u64, state_root: Hash },
     /// A validator's attestation of an epoch checkpoint.
     CheckpointAttestation {
         validator_id: ValidatorId,
@@ -86,10 +86,8 @@ impl NetworkMessage {
         if matches!(self, NetworkMessage::SyncBlocks { .. }) && json.len() > 1024 {
             // Compress large sync messages. Prefix with 0x01.
             let mut compressed = vec![0x01];
-            let mut encoder = flate2::write::DeflateEncoder::new(
-                Vec::new(),
-                flate2::Compression::fast(),
-            );
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
             std::io::Write::write_all(&mut encoder, &json).ok()?;
             compressed.extend(encoder.finish().ok()?);
             Some(compressed)
@@ -115,7 +113,8 @@ impl NetworkMessage {
                     Ok(n) => {
                         json.extend_from_slice(&buf[..n]);
                         if json.len() > Self::MAX_DECOMPRESSED_SIZE {
-                            return Err(serde_json::from_str::<()>("").unwrap_err()); // size exceeded
+                            return Err(serde_json::from_str::<()>("").unwrap_err());
+                            // size exceeded
                         }
                     }
                     Err(_) => break,

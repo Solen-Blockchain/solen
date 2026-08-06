@@ -153,7 +153,8 @@ fn passkey_valid_signature_roundtrip() {
     assert_eq!(parsed_auth_len, auth_data.len());
 
     // Verify the challenge roundtrip.
-    let parsed_client_data = &sig_blob[2 + parsed_auth_len + 2..2 + parsed_auth_len + 2 + client_data_bytes.len()];
+    let parsed_client_data =
+        &sig_blob[2 + parsed_auth_len + 2..2 + parsed_auth_len + 2 + client_data_bytes.len()];
     assert_eq!(parsed_client_data, client_data_bytes);
 
     println!("Passkey signature blob: {} bytes", sig_blob.len());

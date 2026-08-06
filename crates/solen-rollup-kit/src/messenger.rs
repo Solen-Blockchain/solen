@@ -66,10 +66,7 @@ impl CrossDomainMessenger {
         payload: Vec<u8>,
         timeout_block: u64,
     ) -> u64 {
-        let nonce = self
-            .nonces
-            .entry((source, destination))
-            .or_insert(0);
+        let nonce = self.nonces.entry((source, destination)).or_insert(0);
         let current_nonce = *nonce;
         *nonce += 1;
 

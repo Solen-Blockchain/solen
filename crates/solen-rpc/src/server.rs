@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use jsonrpsee::server::Server;
-use tower_http::cors::{CorsLayer, Any};
 use solen_consensus::engine::ConsensusEngine;
 use thiserror::Error;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::methods::{SolenApiServer, SolenRpc, TxBroadcaster};

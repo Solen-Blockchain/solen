@@ -111,7 +111,12 @@ impl RpcClient {
         method: &str,
         params: P,
     ) -> Result<R> {
-        let req = JsonRpcRequest { jsonrpc: "2.0", id: 1, method, params };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method,
+            params,
+        };
         let resp: JsonRpcResponse<R> = self
             .http
             .post(&self.url)
@@ -123,7 +128,8 @@ impl RpcClient {
         if let Some(e) = resp.error {
             bail!("rpc {method}: {} (code {})", e.message, e.code);
         }
-        resp.result.ok_or_else(|| anyhow!("rpc {method}: empty result"))
+        resp.result
+            .ok_or_else(|| anyhow!("rpc {method}: empty result"))
     }
     fn next_nonce(&self, account: &AccountId) -> Result<u64> {
         self.call("solen_getNextNonce", (hex::encode(account),))
@@ -161,8 +167,7 @@ fn decode_seed(path: &std::path::Path) -> Result<[u8; 32]> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -174,8 +179,7 @@ fn main() -> Result<()> {
     let args_bytes: Vec<u8> = if cli.args.is_empty() {
         vec![]
     } else {
-        hex::decode(cli.args.trim().trim_start_matches("0x"))
-            .context("decode --args hex")?
+        hex::decode(cli.args.trim().trim_start_matches("0x")).context("decode --args hex")?
     };
 
     info!(
@@ -215,10 +219,16 @@ fn main() -> Result<()> {
     if cli.confirm {
         let r = rpc.submit_confirm(&op, 60)?;
         if !r.accepted {
-            bail!("submit rejected: {}", r.error.unwrap_or_else(|| "(no error)".into()));
+            bail!(
+                "submit rejected: {}",
+                r.error.unwrap_or_else(|| "(no error)".into())
+            );
         }
         if !r.confirmed {
-            bail!("not confirmed: {}", r.error.unwrap_or_else(|| "(no error)".into()));
+            bail!(
+                "not confirmed: {}",
+                r.error.unwrap_or_else(|| "(no error)".into())
+            );
         }
         if !r.success {
             bail!(
@@ -235,7 +245,10 @@ fn main() -> Result<()> {
     } else {
         let r = rpc.submit(&op)?;
         if !r.accepted {
-            bail!("submit rejected: {}", r.error.unwrap_or_else(|| "(no error)".into()));
+            bail!(
+                "submit rejected: {}",
+                r.error.unwrap_or_else(|| "(no error)".into())
+            );
         }
         info!("submitted; check the explorer or rerun with --confirm");
     }

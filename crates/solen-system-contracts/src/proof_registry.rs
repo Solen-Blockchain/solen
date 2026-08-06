@@ -33,11 +33,7 @@ impl ProofRegistry {
     }
 
     /// Register a new proof system.
-    pub fn register(
-        &mut self,
-        name: String,
-        description: String,
-    ) -> Result<(), RegistryError> {
+    pub fn register(&mut self, name: String, description: String) -> Result<(), RegistryError> {
         if self.systems.iter().any(|s| s.name == name) {
             return Err(RegistryError::AlreadyRegistered(name));
         }
@@ -88,7 +84,10 @@ mod tests {
             .register("validity-zk".into(), "ZK validity proofs".into())
             .unwrap();
         registry
-            .register("fraud-interactive".into(), "Interactive fraud proofs".into())
+            .register(
+                "fraud-interactive".into(),
+                "Interactive fraud proofs".into(),
+            )
             .unwrap();
 
         assert_eq!(registry.active_systems().len(), 2);

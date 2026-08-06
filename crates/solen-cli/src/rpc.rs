@@ -54,7 +54,12 @@ impl RpcClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| anyhow!("connection failed: {e}\nIs the node running at {}?", self.url))?;
+            .map_err(|e| {
+                anyhow!(
+                    "connection failed: {e}\nIs the node running at {}?",
+                    self.url
+                )
+            })?;
 
         let body: RpcResponse<T> = resp.json().await?;
 
@@ -91,7 +96,8 @@ impl RpcClient {
     }
 
     pub async fn get_latest_block(&self) -> Result<BlockInfo> {
-        self.call("solen_getLatestBlock", serde_json::json!([])).await
+        self.call("solen_getLatestBlock", serde_json::json!([]))
+            .await
     }
 
     pub async fn submit_operation(&self, op: serde_json::Value) -> Result<SubmitResult> {
@@ -105,7 +111,8 @@ impl RpcClient {
     }
 
     pub async fn get_validators(&self) -> Result<Vec<ValidatorInfo>> {
-        self.call("solen_getValidators", serde_json::json!([])).await
+        self.call("solen_getValidators", serde_json::json!([]))
+            .await
     }
 
     pub async fn get_governance_proposals(&self) -> Result<Vec<ProposalInfo>> {

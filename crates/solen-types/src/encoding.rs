@@ -155,7 +155,10 @@ mod tests {
         let mut input = [0u8; 32];
         input[31] = 1;
         let encoded = base58_encode(&input);
-        assert!(encoded.starts_with('1'), "leading zeros should produce leading '1's");
+        assert!(
+            encoded.starts_with('1'),
+            "leading zeros should produce leading '1's"
+        );
         let decoded = base58_decode(&encoded).unwrap();
         assert_eq!(decoded, input);
     }

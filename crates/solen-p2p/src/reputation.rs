@@ -201,7 +201,9 @@ impl PeerReputation {
     /// Get summary stats.
     pub fn stats(&self) -> (usize, usize) {
         let total = self.peers.len();
-        let banned = self.peers.values()
+        let banned = self
+            .peers
+            .values()
             .filter(|s| s.banned_until.is_some())
             .count();
         (total, banned)

@@ -78,24 +78,21 @@ fn withdraw_is_idempotent() {
     .unwrap();
 
     // Register validator with self-stake.
-    let mut staking =
-        solen_system_contracts::staking::StakingContract::load(&store);
+    let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
     staking
         .register_validator(validator_id, 50_000_000_000_000)
         .unwrap();
     staking.save(&mut store);
 
     // Delegate to self so we can undelegate.
-    let mut staking =
-        solen_system_contracts::staking::StakingContract::load(&store);
+    let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
     staking
         .delegate(validator_id, validator_id, 10_000_000_000_000)
         .unwrap();
     staking.save(&mut store);
 
     // Undelegate the delegation.
-    let mut staking =
-        solen_system_contracts::staking::StakingContract::load(&store);
+    let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
     staking
         .undelegate(validator_id, validator_id, 10_000_000_000_000, 0)
         .unwrap();
@@ -105,23 +102,20 @@ fn withdraw_is_idempotent() {
     let epoch = 10;
 
     // First withdraw — should return the undelegated amount.
-    let mut staking =
-        solen_system_contracts::staking::StakingContract::load(&store);
+    let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
     let withdrawn1 = staking.withdraw_undelegated(validator_id, epoch);
     assert_eq!(withdrawn1, 10_000_000_000_000);
     staking.save(&mut store);
 
     // Second withdraw — should return 0 (already withdrawn).
-    let mut staking =
-        solen_system_contracts::staking::StakingContract::load(&store);
+    let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
     let withdrawn2 = staking.withdraw_undelegated(validator_id, epoch);
     assert_eq!(withdrawn2, 0, "second withdraw should return 0");
     staking.save(&mut store);
 
     // Ten more withdraws — all 0.
     for _ in 0..10 {
-        let mut staking =
-            solen_system_contracts::staking::StakingContract::load(&store);
+        let mut staking = solen_system_contracts::staking::StakingContract::load(&store);
         let w = staking.withdraw_undelegated(validator_id, epoch);
         assert_eq!(w, 0, "repeated withdraw should always return 0");
         staking.save(&mut store);
@@ -145,10 +139,7 @@ fn multi_action_rollback_restores_full_state() {
         sender: alice,
         nonce: 0,
         actions: vec![
-            Action::Transfer {
-                to: bob,
-                amount: 1,
-            },
+            Action::Transfer { to: bob, amount: 1 },
             Action::Transfer {
                 to: bob,
                 amount: 999_999_999_999, // way more than balance
@@ -171,11 +162,17 @@ fn multi_action_rollback_restores_full_state() {
     );
 
     // Verify: nonce was consumed (failure still burns nonce).
-    assert_eq!(alice_after.nonce, 1, "nonce must be consumed even on failure");
+    assert_eq!(
+        alice_after.nonce, 1,
+        "nonce must be consumed even on failure"
+    );
 
     // Verify: bob's balance unchanged.
     let bob_after = state.require_account(&bob).unwrap();
-    assert_eq!(bob_after.balance, 500_000_000, "bob's balance must be unchanged");
+    assert_eq!(
+        bob_after.balance, 500_000_000,
+        "bob's balance must be unchanged"
+    );
 }
 
 // Test #14 (intent [0xFF] mempool rejection) is in solen-consensus/tests/adversarial_tests.rs
@@ -227,10 +224,7 @@ fn nonce_never_decreases() {
         let mut op = UserOperation {
             sender: alice,
             nonce: i,
-            actions: vec![Action::Transfer {
-                to: bob,
-                amount: 1,
-            }],
+            actions: vec![Action::Transfer { to: bob, amount: 1 }],
             max_fee: 100_000,
             signature: vec![],
         };
@@ -319,7 +313,9 @@ fn threshold_rejects_duplicate_signers() {
             GenesisAccount {
                 id: recipient,
                 balance: 0,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+                auth_methods: vec![AuthMethod::Ed25519 {
+                    public_key: recipient,
+                }],
             },
         ],
     )
@@ -331,7 +327,10 @@ fn threshold_rejects_duplicate_signers() {
     let mut op = UserOperation {
         sender: multisig_id,
         nonce: 0,
-        actions: vec![Action::Transfer { to: recipient, amount: 100 }],
+        actions: vec![Action::Transfer {
+            to: recipient,
+            amount: 100,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -344,7 +343,7 @@ fn threshold_rejects_duplicate_signers() {
     duplicate_sig.extend_from_slice(&signer1.public_key());
     duplicate_sig.extend_from_slice(&sig1);
     duplicate_sig.extend_from_slice(&signer1.public_key()); // duplicate!
-    duplicate_sig.extend_from_slice(&sig1);                 // duplicate!
+    duplicate_sig.extend_from_slice(&sig1); // duplicate!
     op.signature = duplicate_sig;
 
     let result = executor.execute_block(&mut store, &[op]);
@@ -357,7 +356,10 @@ fn threshold_rejects_duplicate_signers() {
     let mut op2 = UserOperation {
         sender: multisig_id,
         nonce: 0,
-        actions: vec![Action::Transfer { to: recipient, amount: 100 }],
+        actions: vec![Action::Transfer {
+            to: recipient,
+            amount: 100,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -400,9 +402,9 @@ fn session_key_cannot_set_auth() {
                     expires_at: 999_999,
                     spending_limit: 1_000_000_000,
                     budget_total: 0,
-                    allowed_targets: vec![],  // all targets
+                    allowed_targets: vec![], // all targets
                     allowed_methods: vec![],
-                    restrict_subcalls: false,  // all methods
+                    restrict_subcalls: false, // all methods
                 },
             ],
         }],
@@ -433,7 +435,11 @@ fn session_key_cannot_set_auth() {
         "CRITICAL: session key must NOT be able to call SetAuth"
     );
     assert!(
-        result.receipts[0].error.as_ref().unwrap().contains("session keys cannot modify"),
+        result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("session keys cannot modify"),
         "error should explain session key restriction"
     );
 }
@@ -497,7 +503,10 @@ fn session_key_cumulative_budget_enforced() {
         let mut op = UserOperation {
             sender: owner,
             nonce,
-            actions: vec![Action::Transfer { to: recipient, amount }],
+            actions: vec![Action::Transfer {
+                to: recipient,
+                amount,
+            }],
             max_fee: 0,
             signature: vec![],
         };
@@ -507,11 +516,17 @@ fn session_key_cumulative_budget_enforced() {
     };
 
     assert!(spend(&mut store, 0, 60), "60 is within the 100 budget");
-    assert!(spend(&mut store, 1, 30), "running total 90 is within budget");
+    assert!(
+        spend(&mut store, 1, 30),
+        "running total 90 is within budget"
+    );
     assert!(!spend(&mut store, 2, 20), "90 + 20 exceeds the 100 budget");
     // The budget-rejected op never consumed nonce 2 (the check precedes nonce
     // consumption), so the agent can retry the same nonce with a smaller amount.
-    assert!(spend(&mut store, 2, 10), "90 + 10 == 100 is exactly at budget");
+    assert!(
+        spend(&mut store, 2, 10),
+        "90 + 10 == 100 is exactly at budget"
+    );
     assert!(!spend(&mut store, 3, 1), "budget is now fully spent");
     assert_eq!(session_spent(&store, &owner, &session_kp.public_key()), 100);
 }
@@ -550,7 +565,10 @@ fn session_budget_not_charged_on_reverted_op() {
         let mut op = UserOperation {
             sender: owner,
             nonce,
-            actions: vec![Action::Transfer { to: recipient, amount }],
+            actions: vec![Action::Transfer {
+                to: recipient,
+                amount,
+            }],
             max_fee: 0,
             signature: vec![],
         };
@@ -561,7 +579,10 @@ fn session_budget_not_charged_on_reverted_op() {
 
     // Transfer 500 from a balance of 100 passes the budget check but reverts in
     // execution (insufficient balance). The revert must NOT consume budget.
-    assert!(!run(&mut store, 0, 500), "transfer exceeds balance → reverts");
+    assert!(
+        !run(&mut store, 0, 500),
+        "transfer exceeds balance → reverts"
+    );
     assert_eq!(
         session_spent(&store, &owner, &session_kp.public_key()),
         0,
@@ -607,7 +628,10 @@ fn system_signature_rejected_from_block_execution() {
     let op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: bob, amount: 100 }],
+        actions: vec![Action::Transfer {
+            to: bob,
+            amount: 100,
+        }],
         max_fee: 0,
         signature: vec![0xFF],
     };
@@ -640,7 +664,9 @@ fn governance_vote_weight_capped_at_stake() {
             GenesisAccount {
                 id: proposer,
                 balance: 1_000_000_000,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: proposer }],
+                auth_methods: vec![AuthMethod::Ed25519 {
+                    public_key: proposer,
+                }],
             },
         ],
     )
@@ -677,7 +703,11 @@ fn governance_vote_weight_capped_at_stake() {
         "voter with 0 stake must not be able to vote"
     );
     assert!(
-        result.receipts[0].error.as_ref().unwrap().contains("no stake"),
+        result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("no stake"),
         "error should mention no stake"
     );
 }
@@ -708,7 +738,9 @@ fn threshold_single_signer_insufficient_for_2of3() {
             GenesisAccount {
                 id: recipient,
                 balance: 0,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+                auth_methods: vec![AuthMethod::Ed25519 {
+                    public_key: recipient,
+                }],
             },
         ],
     )
@@ -720,7 +752,10 @@ fn threshold_single_signer_insufficient_for_2of3() {
     let mut op = UserOperation {
         sender: owner,
         nonce: 0,
-        actions: vec![Action::Transfer { to: recipient, amount: 1 }],
+        actions: vec![Action::Transfer {
+            to: recipient,
+            amount: 1,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -732,7 +767,10 @@ fn threshold_single_signer_insufficient_for_2of3() {
     op.signature = single_sig;
 
     let result = executor.execute_block(&mut store, &[op.clone()]);
-    assert!(!result.receipts[0].success, "1-of-3 must fail for threshold 2");
+    assert!(
+        !result.receipts[0].success,
+        "1-of-3 must fail for threshold 2"
+    );
 
     // Unknown signer — must fail.
     let rogue = Keypair::from_seed(&[0xFF; 32]);
@@ -745,7 +783,10 @@ fn threshold_single_signer_insufficient_for_2of3() {
     op.signature = rogue_two;
 
     let result2 = executor.execute_block(&mut store, &[op]);
-    assert!(!result2.receipts[0].success, "unknown signer + 1 valid must fail for threshold 2");
+    assert!(
+        !result2.receipts[0].success,
+        "unknown signer + 1 valid must fail for threshold 2"
+    );
 }
 
 // ── Test #22: Session key cannot deploy contracts ────────────
@@ -855,7 +896,11 @@ fn session_key_cannot_call_guardian() {
         "session key must NOT be able to call guardian recovery"
     );
     assert!(
-        result.receipts[0].error.as_ref().unwrap().contains("guardian"),
+        result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("guardian"),
         "error should mention guardian restriction"
     );
 }
@@ -919,7 +964,11 @@ fn session_key_cannot_create_proposal() {
         "session key must NOT be able to create governance proposals"
     );
     assert!(
-        result.receipts[0].error.as_ref().unwrap().contains("governance"),
+        result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("governance"),
         "error should mention governance restriction"
     );
 }
@@ -1019,7 +1068,9 @@ fn threshold_zero_rejects_empty_signature() {
             GenesisAccount {
                 id: recipient,
                 balance: 0,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+                auth_methods: vec![AuthMethod::Ed25519 {
+                    public_key: recipient,
+                }],
             },
         ],
     )
@@ -1031,7 +1082,10 @@ fn threshold_zero_rejects_empty_signature() {
     let op = UserOperation {
         sender: owner,
         nonce: 0,
-        actions: vec![Action::Transfer { to: recipient, amount: 100 }],
+        actions: vec![Action::Transfer {
+            to: recipient,
+            amount: 100,
+        }],
         max_fee: 0,
         signature: vec![], // empty!
     };
@@ -1111,7 +1165,9 @@ fn unjail_cooldown_enforced_after_slash() {
         vec![GenesisAccount {
             id: validator,
             balance: 100_000_000_000_000, // 1M SOLEN
-            auth_methods: vec![AuthMethod::Ed25519 { public_key: validator }],
+            auth_methods: vec![AuthMethod::Ed25519 {
+                public_key: validator,
+            }],
         }],
     )
     .unwrap();
@@ -1143,7 +1199,7 @@ fn unjail_cooldown_enforced_after_slash() {
     // Set chain height to 100 (epoch 1). Chain meta needs 16 bytes: height[8] + epoch[8].
     let mut meta = Vec::new();
     meta.extend_from_slice(&100u64.to_le_bytes()); // height=100 → epoch=1
-    meta.extend_from_slice(&1u64.to_le_bytes());   // epoch field
+    meta.extend_from_slice(&1u64.to_le_bytes()); // epoch field
     store.put(b"__chain_meta__", &meta).unwrap();
 
     // Consensus records slashing evidence on-chain (slash/{offender_hex}/{height})
@@ -1235,7 +1291,9 @@ fn large_threshold_signature_does_not_hang() {
             GenesisAccount {
                 id: recipient,
                 balance: 0,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: recipient }],
+                auth_methods: vec![AuthMethod::Ed25519 {
+                    public_key: recipient,
+                }],
             },
         ],
     )
@@ -1245,7 +1303,10 @@ fn large_threshold_signature_does_not_hang() {
     let mut op = UserOperation {
         sender: owner,
         nonce: 0,
-        actions: vec![Action::Transfer { to: recipient, amount: 1 }],
+        actions: vec![Action::Transfer {
+            to: recipient,
+            amount: 1,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -1266,7 +1327,10 @@ fn large_threshold_signature_does_not_hang() {
     let elapsed = start.elapsed();
 
     // Should succeed (1 valid unique signer meets threshold=1).
-    assert!(result.receipts[0].success, "1-of-1 with duplicates should succeed");
+    assert!(
+        result.receipts[0].success,
+        "1-of-1 with duplicates should succeed"
+    );
     // Should complete quickly (under 100ms even with 100 chunks).
     assert!(
         elapsed.as_millis() < 1000,

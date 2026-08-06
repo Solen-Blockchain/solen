@@ -40,7 +40,12 @@ fn save_or_warn(state: &mut StateManager<'_>, account: &solen_types::account::Ac
 /// For `Ed25519`: expects a 64-byte signature.
 /// For `Threshold`: expects concatenated (pubkey[32] + sig[64]) pairs.
 /// At least `threshold` valid signatures from the signers list are required.
-fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bool) -> Option<&'static str> {
+fn verify_auth(
+    method: &AuthMethod,
+    msg: &[u8],
+    signature: &[u8],
+    pq_enabled: bool,
+) -> Option<&'static str> {
     match method {
         AuthMethod::Ed25519 { public_key } => {
             if signature.len() != 64 {
@@ -48,7 +53,9 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bo
             }
             let mut sig = [0u8; 64];
             sig.copy_from_slice(signature);
-            solen_crypto::verify(public_key, msg, &sig).ok().map(|_| "ed25519")
+            solen_crypto::verify(public_key, msg, &sig)
+                .ok()
+                .map(|_| "ed25519")
         }
         AuthMethod::Threshold { signers, threshold } => {
             // Reject invalid threshold (0 would accept empty signatures).
@@ -77,9 +84,19 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bo
                     valid_count += 1;
                 }
             }
-            if valid_count >= *threshold { Some("threshold") } else { None }
+            if valid_count >= *threshold {
+                Some("threshold")
+            } else {
+                None
+            }
         }
-        AuthMethod::Passkey { public_key_x, public_key_y, rp_id, origins, .. } => {
+        AuthMethod::Passkey {
+            public_key_x,
+            public_key_y,
+            rp_id,
+            origins,
+            ..
+        } => {
             if verify_passkey(public_key_x, public_key_y, rp_id, origins, msg, signature) {
                 Some("passkey")
             } else {
@@ -94,7 +111,9 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bo
             }
             let mut sig = [0u8; 64];
             sig.copy_from_slice(signature);
-            solen_crypto::verify(session_key, msg, &sig).ok().map(|_| "session")
+            solen_crypto::verify(session_key, msg, &sig)
+                .ok()
+                .map(|_| "session")
         }
         AuthMethod::Guardian { .. } => None, // Guardians don't sign transactions.
         AuthMethod::MlDsa { public_key } => {
@@ -110,7 +129,10 @@ fn verify_auth(method: &AuthMethod, msg: &[u8], signature: &[u8], pq_enabled: bo
                 .ok()
                 .map(|_| "ml-dsa")
         }
-        AuthMethod::Hybrid { ed25519_public_key, ml_dsa_public_key } => {
+        AuthMethod::Hybrid {
+            ed25519_public_key,
+            ml_dsa_public_key,
+        } => {
             // True AND-hybrid: BOTH signatures must verify. Secure unless both
             // Ed25519 and ML-DSA are broken. Gated with the rest of PQ (it relies
             // on ML-DSA verification). Signature layout: ed25519[64] ‖ ml_dsa.
@@ -199,7 +221,8 @@ fn verify_passkey(
     let auth_data = &signature[2..2 + auth_data_len];
 
     let cd_offset = 2 + auth_data_len;
-    let client_data_len = u16::from_le_bytes([signature[cd_offset], signature[cd_offset + 1]]) as usize;
+    let client_data_len =
+        u16::from_le_bytes([signature[cd_offset], signature[cd_offset + 1]]) as usize;
     let sig_start = cd_offset + 2 + client_data_len;
     if signature.len() < sig_start + 64 {
         return false;
@@ -522,7 +545,10 @@ impl BlockExecutor {
         store: &dyn StateStore,
         operations: &[UserOperation],
         height: u64,
-    ) -> (BlockResult, std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>) {
+    ) -> (
+        BlockResult,
+        std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
+    ) {
         let mut overlay = solen_storage::OverlayStore::new(store);
 
         let mut result = if operations.len() >= 200 {
@@ -675,9 +701,11 @@ impl BlockExecutor {
                     .ok()
                     .flatten()
                     .and_then(|data| {
-                        <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(&data)
-                            .ok()
-                            .map(|a| a.auth_methods)
+                        <solen_types::account::Account as borsh::BorshDeserialize>::try_from_slice(
+                            &data,
+                        )
+                        .ok()
+                        .map(|a| a.auth_methods)
                     });
                 (msg, auth)
             })
@@ -701,7 +729,9 @@ impl BlockExecutor {
                 if auth_methods.is_empty() {
                     return None; // no auth methods = reject (accounts must have auth)
                 }
-                auth_methods.iter().find_map(|method| verify_auth(method, msg, &op.signature, pq_enabled))
+                auth_methods
+                    .iter()
+                    .find_map(|method| verify_auth(method, msg, &op.signature, pq_enabled))
             })
             .collect();
 
@@ -742,7 +772,6 @@ impl BlockExecutor {
         }
     }
 
-
     /// Execute a single user operation.
     fn execute_operation(
         &self,
@@ -760,7 +789,11 @@ impl BlockExecutor {
                 nonce: op.nonce,
                 success: false,
                 gas_used: 0,
-                error: Some(format!("too many actions: {} (max {})", op.actions.len(), MAX_ACTIONS_PER_OP)),
+                error: Some(format!(
+                    "too many actions: {} (max {})",
+                    op.actions.len(),
+                    MAX_ACTIONS_PER_OP
+                )),
                 events: vec![],
                 auth_method: "ed25519".to_string(),
             };
@@ -775,7 +808,11 @@ impl BlockExecutor {
                         nonce: op.nonce,
                         success: false,
                         gas_used: 0,
-                        error: Some(format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE)),
+                        error: Some(format!(
+                            "contract too large: {} bytes (max {})",
+                            code.len(),
+                            MAX_CODE_SIZE
+                        )),
                         events: vec![],
                         auth_method: "ed25519".to_string(),
                     };
@@ -859,7 +896,12 @@ impl BlockExecutor {
 
             // Check for system contract calls (need raw store access).
             // System contracts use a direct-debit model and do not consume msg_value.
-            if let Action::Call { target, method, args } = action {
+            if let Action::Call {
+                target,
+                method,
+                args,
+            } = action
+            {
                 if solen_types::system::is_system_contract(target) {
                     let result = crate::system_calls::execute_system_call(
                         store, &op.sender, target, method, args,
@@ -875,7 +917,15 @@ impl BlockExecutor {
             }
 
             let mut state = StateManager::new(store);
-            match self.execute_action(&mut state, &op.sender, action, msg_value_for_action, height, &mut events, subcall_policy.as_ref()) {
+            match self.execute_action(
+                &mut state,
+                &op.sender,
+                action,
+                msg_value_for_action,
+                height,
+                &mut events,
+                subcall_policy.as_ref(),
+            ) {
                 Ok(gas) => gas_used += gas,
                 Err(e) => {
                     action_failed = Some(e.to_string());
@@ -903,7 +953,11 @@ impl BlockExecutor {
             // H-01: cap the failed-op fee at the signed max_fee as well (gated).
             let actual_fee = {
                 let f = self.fee_config.calculate_fee(gas_used);
-                if height >= self.fee_fix_height { f.min(op.max_fee) } else { f }
+                if height >= self.fee_fix_height {
+                    f.min(op.max_fee)
+                } else {
+                    f
+                }
             };
             if actual_fee > 0 {
                 let mut state = StateManager::new(store);
@@ -948,7 +1002,11 @@ impl BlockExecutor {
         let fix_active = height >= self.fee_fix_height;
         let total_fee = {
             let f = fee_config.calculate_fee(gas_used);
-            if fix_active { f.min(op.max_fee) } else { f }
+            if fix_active {
+                f.min(op.max_fee)
+            } else {
+                f
+            }
         };
         if max_possible_fee > 0 || total_fee > 0 {
             let mut state = StateManager::new(store);
@@ -958,7 +1016,11 @@ impl BlockExecutor {
                 // the basis for the treasury split; legacy uses the intended fee
                 // for both (which is where the mint came from).
                 let available = sender_acct.balance.saturating_add(max_possible_fee);
-                let fee_paid = if fix_active { total_fee.min(available) } else { total_fee };
+                let fee_paid = if fix_active {
+                    total_fee.min(available)
+                } else {
+                    total_fee
+                };
                 sender_acct.balance = available.saturating_sub(fee_paid);
                 save_or_warn(&mut state, &sender_acct);
 
@@ -968,8 +1030,7 @@ impl BlockExecutor {
                 // removed from circulation by not being credited to any account.
                 let treasury_share = fee_config.treasury_amount(fee_paid);
                 if treasury_share > 0 {
-                    if let Ok(Some(mut treasury)) =
-                        state.get_account(&fee_config.treasury_account)
+                    if let Ok(Some(mut treasury)) = state.get_account(&fee_config.treasury_account)
                     {
                         treasury.balance = treasury.balance.saturating_add(treasury_share);
                         save_or_warn(&mut state, &treasury);
@@ -1033,9 +1094,10 @@ impl BlockExecutor {
             // Verify signature against one of the account's auth methods.
             let msg = self.operation_signing_message(op);
             let pq_enabled = height >= self.pq_auth_height;
-            let sig_valid = account.auth_methods.iter().any(|method| {
-                verify_auth(method, &msg, &op.signature, pq_enabled).is_some()
-            });
+            let sig_valid = account
+                .auth_methods
+                .iter()
+                .any(|method| verify_auth(method, &msg, &op.signature, pq_enabled).is_some());
 
             if !sig_valid {
                 return Err(ExecutionError::InvalidSignature);
@@ -1085,35 +1147,44 @@ impl BlockExecutor {
             // Compute this operation's spend once — counts all balance-affecting
             // actions, including system contract calls (staking, bridge deposits,
             // etc.). Used by both the per-op cap and the cumulative budget.
-            let this_spend: u128 = op.actions.iter().map(|a| match a {
-                Action::Transfer { amount, .. } => *amount,
-                Action::Call { target, args, .. } => {
-                    // System calls that deduct balance: delegate, deposit, register_rollup, etc.
-                    // The amount is typically encoded in args as u128 at a known offset.
-                    if solen_types::system::is_system_contract(target) && args.len() >= 48 {
-                        // Most system calls: args contain amount at offset 32 as u128 LE.
-                        // (staking: validator[32] + amount[16], bridge deposit: rollup_id[8] + amount[16])
-                        let amount_offset = if target == &solen_types::system::BRIDGE_ADDRESS { 8 } else { 32 };
-                        if args.len() >= amount_offset + 16 {
-                            let mut buf = [0u8; 16];
-                            buf.copy_from_slice(&args[amount_offset..amount_offset + 16]);
-                            u128::from_le_bytes(buf)
+            let this_spend: u128 = op
+                .actions
+                .iter()
+                .map(|a| match a {
+                    Action::Transfer { amount, .. } => *amount,
+                    Action::Call { target, args, .. } => {
+                        // System calls that deduct balance: delegate, deposit, register_rollup, etc.
+                        // The amount is typically encoded in args as u128 at a known offset.
+                        if solen_types::system::is_system_contract(target) && args.len() >= 48 {
+                            // Most system calls: args contain amount at offset 32 as u128 LE.
+                            // (staking: validator[32] + amount[16], bridge deposit: rollup_id[8] + amount[16])
+                            let amount_offset = if target == &solen_types::system::BRIDGE_ADDRESS {
+                                8
+                            } else {
+                                32
+                            };
+                            if args.len() >= amount_offset + 16 {
+                                let mut buf = [0u8; 16];
+                                buf.copy_from_slice(&args[amount_offset..amount_offset + 16]);
+                                u128::from_le_bytes(buf)
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         }
-                    } else {
-                        0
                     }
-                }
-                Action::Deploy { .. } => 0,
-                _ => 0,
-            }).sum();
+                    Action::Deploy { .. } => 0,
+                    _ => 0,
+                })
+                .sum();
 
             // Per-operation spend cap.
             if *spending_limit > 0 && this_spend > *spending_limit {
-                return Err(ExecutionError::State(StateError::AccountNotFound(
-                    format!("session spending limit exceeded: {} > {}", this_spend, spending_limit),
-                )));
+                return Err(ExecutionError::State(StateError::AccountNotFound(format!(
+                    "session spending limit exceeded: {} > {}",
+                    this_spend, spending_limit
+                ))));
             }
 
             // Cumulative lifetime budget across every op signed by this session
@@ -1190,7 +1261,9 @@ impl BlockExecutor {
                         // Block governance operations that change proposal state.
                         // Session keys may vote but cannot create, finalize, or execute proposals.
                         if *target == solen_types::system::GOVERNANCE_ADDRESS
-                            && (method.starts_with("propose") || method == "finalize" || method == "execute")
+                            && (method.starts_with("propose")
+                                || method == "finalize"
+                                || method == "execute")
                         {
                             return Err(ExecutionError::State(StateError::AccountNotFound(
                                 "session keys cannot create or execute governance proposals".into(),
@@ -1220,7 +1293,10 @@ impl BlockExecutor {
             state.consume_nonce(&op.sender, op.nonce)?;
         }
 
-        Ok(PreparedOp { session_charge, subcall_policy })
+        Ok(PreparedOp {
+            session_charge,
+            subcall_policy,
+        })
     }
 
     /// Compute the message that must be signed for an operation.
@@ -1304,7 +1380,11 @@ impl BlockExecutor {
                         AuthMethod::Threshold { signers, threshold } => {
                             if *threshold == 0 || *threshold as usize > signers.len() {
                                 return Err(ExecutionError::State(StateError::AccountNotFound(
-                                    format!("invalid threshold: {} of {} signers", threshold, signers.len()),
+                                    format!(
+                                        "invalid threshold: {} of {} signers",
+                                        threshold,
+                                        signers.len()
+                                    ),
                                 )));
                             }
                         }
@@ -1312,7 +1392,10 @@ impl BlockExecutor {
                             // Verify guardian account exists.
                             if state.get_account(guardian_id)?.is_none() {
                                 return Err(ExecutionError::State(StateError::AccountNotFound(
-                                    format!("guardian account does not exist: {:?}", &guardian_id[..4]),
+                                    format!(
+                                        "guardian account does not exist: {:?}",
+                                        &guardian_id[..4]
+                                    ),
                                 )));
                             }
                         }
@@ -1333,9 +1416,11 @@ impl BlockExecutor {
             Action::Deploy { code, salt } => {
                 // Validate code size.
                 if code.len() > MAX_CODE_SIZE {
-                    return Err(ExecutionError::State(StateError::AccountNotFound(
-                        format!("contract too large: {} bytes (max {})", code.len(), MAX_CODE_SIZE),
-                    )));
+                    return Err(ExecutionError::State(StateError::AccountNotFound(format!(
+                        "contract too large: {} bytes (max {})",
+                        code.len(),
+                        MAX_CODE_SIZE
+                    ))));
                 }
 
                 // Store the bytecode.
@@ -1409,9 +1494,9 @@ impl BlockExecutor {
         // so this bounds the whole chain.
         const MAX_CALL_DEPTH: u32 = 8;
         if depth > MAX_CALL_DEPTH {
-            return Err(ExecutionError::State(StateError::AccountNotFound(
-                format!("call depth exceeded: {depth} > {MAX_CALL_DEPTH}"),
-            )));
+            return Err(ExecutionError::State(StateError::AccountNotFound(format!(
+                "call depth exceeded: {depth} > {MAX_CALL_DEPTH}"
+            ))));
         }
 
         // Enforce a session key's sub-call allowlist (opt-in via
@@ -1426,7 +1511,10 @@ impl BlockExecutor {
                     )));
                 }
                 if !policy.allowed_methods.is_empty()
-                    && !policy.allowed_methods.iter().any(|m| m.as_bytes() == method)
+                    && !policy
+                        .allowed_methods
+                        .iter()
+                        .any(|m| m.as_bytes() == method)
                 {
                     return Err(ExecutionError::State(StateError::AccountNotFound(
                         "session key not authorized for sub-call method".into(),
@@ -1458,9 +1546,9 @@ impl BlockExecutor {
             );
             events.extend(result.events);
             if let Some(err) = result.error {
-                return Err(ExecutionError::State(StateError::AccountNotFound(
-                    format!("system call failed: {err}"),
-                )));
+                return Err(ExecutionError::State(StateError::AccountNotFound(format!(
+                    "system call failed: {err}"
+                ))));
             }
             return Ok(CALL_BASE_GAS + result.gas_used);
         }
@@ -1596,7 +1684,7 @@ impl BlockExecutor {
                 height,
                 events,
                 depth + 1,
-                fuel_budget, // same shared budget across the whole tree
+                fuel_budget,    // same shared budget across the whole tree
                 subcall_policy, // carry the session allowlist down the call tree
             )?;
             total_gas = total_gas.saturating_add(sub_gas);
@@ -1660,11 +1748,9 @@ fn distribute_epoch_rewards_in_executor(
     };
 
     let pool_balance = match store.get(&pool_key) {
-        Ok(Some(data)) => {
-            solen_types::account::Account::try_from_slice(&data)
-                .map(|a| a.balance)
-                .unwrap_or(0)
-        }
+        Ok(Some(data)) => solen_types::account::Account::try_from_slice(&data)
+            .map(|a| a.balance)
+            .unwrap_or(0),
         _ => 0,
     };
 
@@ -1701,7 +1787,8 @@ fn distribute_epoch_rewards_in_executor(
         }
 
         // Only count eligible delegations for reward splitting.
-        let eligible_delegations = staking.eligible_delegations_for_validator(&validator.id, current_epoch);
+        let eligible_delegations =
+            staking.eligible_delegations_for_validator(&validator.id, current_epoch);
         let eligible_delegated: u128 = eligible_delegations.iter().map(|d| d.amount).sum();
 
         // Split rewards: eligible delegators get their proportional share,
@@ -1711,7 +1798,8 @@ fn distribute_epoch_rewards_in_executor(
         } else {
             0
         };
-        let commission = delegator_pool.saturating_mul(validator.commission_rate_bps as u128) / 10_000;
+        let commission =
+            delegator_pool.saturating_mul(validator.commission_rate_bps as u128) / 10_000;
         let delegator_net = delegator_pool.saturating_sub(commission);
         let validator_reward = validator_share.saturating_sub(delegator_pool) + commission;
 
@@ -1730,7 +1818,8 @@ fn distribute_epoch_rewards_in_executor(
         // Credit eligible delegators only.
         if delegator_net > 0 && eligible_delegated > 0 {
             for delegation in &eligible_delegations {
-                let del_share = delegator_net.saturating_mul(delegation.amount) / eligible_delegated;
+                let del_share =
+                    delegator_net.saturating_mul(delegation.amount) / eligible_delegated;
                 if del_share == 0 {
                     continue;
                 }
@@ -1788,9 +1877,9 @@ fn credit_account_raw(store: &mut dyn StateStore, id: &[u8; 32], amount: u128) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genesis::{apply_genesis, GenesisAccount};
     use solen_crypto::Keypair;
     use solen_storage::MemoryStore;
-    use crate::genesis::{apply_genesis, GenesisAccount};
 
     /// Build a valid passkey signature blob over `msg`, bound to `rp_id` and
     /// `origin`, signed by `signing_key`. Lets the binding tests vary one field
@@ -1851,7 +1940,14 @@ mod tests {
         assert!(verify_passkey(&x, &y, rp, &origins, msg, &blob));
 
         // Wrong rp_id (assertion's rpIdHash no longer matches) → rejected.
-        assert!(!verify_passkey(&x, &y, "evil.example.com", &origins, msg, &blob));
+        assert!(!verify_passkey(
+            &x,
+            &y,
+            "evil.example.com",
+            &origins,
+            msg,
+            &blob
+        ));
 
         // Disallowed origin → rejected.
         let other_origins = vec!["https://phishing.example.com".to_string()];
@@ -1934,7 +2030,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 200 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 200,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -1947,8 +2046,15 @@ mod tests {
         // Wrong expected root → block must be reverted, store fully restored.
         let bad_root = [0xABu8; 32];
         let rejected = executor.execute_block_checked(&mut store, &[op.clone()], 1, &bad_root);
-        assert!(rejected.is_none(), "block with wrong expected root must be rejected");
-        assert_eq!(store.state_root(), root_before, "root must be restored after revert");
+        assert!(
+            rejected.is_none(),
+            "block with wrong expected root must be rejected"
+        );
+        assert_eq!(
+            store.state_root(),
+            root_before,
+            "root must be restored after revert"
+        );
         assert_eq!(
             StateManager::new(&mut store).get_balance(&alice).unwrap(),
             alice_before,
@@ -1958,16 +2064,30 @@ mod tests {
         // Compute the real root the block produces (on a throwaway store), then
         // pass it as expected → block must commit and move the balances.
         let mut probe = store.snapshot();
-        let real_root = executor.execute_block_with_height(probe.as_mut(), &[op.clone()], 1).state_root;
+        let real_root = executor
+            .execute_block_with_height(probe.as_mut(), &[op.clone()], 1)
+            .state_root;
 
         let committed = executor.execute_block_checked(&mut store, &[op], 1, &real_root);
-        assert!(committed.is_some(), "block with correct expected root must commit");
+        assert!(
+            committed.is_some(),
+            "block with correct expected root must commit"
+        );
         // The committed path returns the reverse-delta for the rollback journal.
         let (_res, revert) = committed.unwrap();
-        assert!(!revert.is_empty(), "a non-empty block must yield a non-empty revert");
+        assert!(
+            !revert.is_empty(),
+            "a non-empty block must yield a non-empty revert"
+        );
         assert_eq!(store.state_root(), real_root);
-        assert_eq!(StateManager::new(&mut store).get_balance(&alice).unwrap(), alice_before - 200);
-        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 700);
+        assert_eq!(
+            StateManager::new(&mut store).get_balance(&alice).unwrap(),
+            alice_before - 200
+        );
+        assert_eq!(
+            StateManager::new(&mut store).get_balance(&bob).unwrap(),
+            700
+        );
     }
 
     /// Security (C-01 / H-01): fee settlement must never mint SOLEN. When the
@@ -2010,10 +2130,15 @@ mod tests {
         sign_op(&kp, &executor, &mut op);
 
         let result = executor.execute_block_with_height(&mut store, &[op], 1);
-        assert!(result.receipts[0].success, "the zero-value transfer must succeed");
+        assert!(
+            result.receipts[0].success,
+            "the zero-value transfer must succeed"
+        );
 
         let alice_after = StateManager::new(&mut store).get_balance(&alice).unwrap();
-        let treasury_after = StateManager::new(&mut store).get_balance(&treasury_id()).unwrap();
+        let treasury_after = StateManager::new(&mut store)
+            .get_balance(&treasury_id())
+            .unwrap();
         let supply_after = supply(&mut store);
 
         // No mint: total supply must never increase.
@@ -2093,25 +2218,55 @@ mod tests {
     fn ml_dsa_pq_auth_is_gated_by_height() {
         use solen_crypto::MlDsaKeypair;
         let pq = MlDsaKeypair::generate();
-        let alice = { let mut id = [0u8; 32]; id[..4].copy_from_slice(b"pqal"); id };
-        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let alice = {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(b"pqal");
+            id
+        };
+        let bob = {
+            let mut id = [0u8; 32];
+            id[..3].copy_from_slice(b"bob");
+            id
+        };
         let mk_store = || {
             let mut store = MemoryStore::new();
-            apply_genesis(&mut store, vec![
-                GenesisAccount { id: alice, balance: 10_000,
-                    auth_methods: vec![AuthMethod::MlDsa { public_key: pq.public_key() }] },
-                GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
-                GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
-            ]).unwrap();
+            apply_genesis(
+                &mut store,
+                vec![
+                    GenesisAccount {
+                        id: alice,
+                        balance: 10_000,
+                        auth_methods: vec![AuthMethod::MlDsa {
+                            public_key: pq.public_key(),
+                        }],
+                    },
+                    GenesisAccount {
+                        id: bob,
+                        balance: 0,
+                        auth_methods: vec![],
+                    },
+                    GenesisAccount {
+                        id: treasury_id(),
+                        balance: 0,
+                        auth_methods: vec![],
+                    },
+                ],
+            )
+            .unwrap();
             store
         };
 
         // Build + ML-DSA-sign the operation (signing message is identical across
         // executors with the same chain_id).
         let mut op = UserOperation {
-            sender: alice, nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }],
-            max_fee: 1000, signature: vec![],
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
+            max_fee: 1000,
+            signature: vec![],
         };
         let probe = zero_fee_executor();
         let msg = probe.operation_signing_message(&op);
@@ -2122,16 +2277,28 @@ mod tests {
         let mut store = mk_store();
         let dormant = zero_fee_executor();
         let r = dormant.execute_block_with_height(&mut store, &[op.clone()], 1);
-        assert!(!r.receipts[0].success, "ML-DSA op must be rejected while gate is dormant");
+        assert!(
+            !r.receipts[0].success,
+            "ML-DSA op must be rejected while gate is dormant"
+        );
         assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 0);
 
         // ACTIVE (gate at height 0): same op now authorizes the transfer.
         let mut store = mk_store();
-        let active = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
-            .with_pq_auth_height(0);
+        let active = BlockExecutor::with_fee_config(FeeConfig {
+            base_fee_per_gas: 0,
+            ..Default::default()
+        })
+        .with_pq_auth_height(0);
         let r = active.execute_block_with_height(&mut store, &[op.clone()], 1);
-        assert!(r.receipts[0].success, "ML-DSA op must authorize once the gate is active");
-        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 100);
+        assert!(
+            r.receipts[0].success,
+            "ML-DSA op must authorize once the gate is active"
+        );
+        assert_eq!(
+            StateManager::new(&mut store).get_balance(&bob).unwrap(),
+            100
+        );
 
         // ACTIVE but a signature from a DIFFERENT pq key is rejected.
         let mut store = mk_store();
@@ -2151,49 +2318,103 @@ mod tests {
         use solen_crypto::{Keypair, MlDsaKeypair};
         let ed = Keypair::from_seed(&[3u8; 32]);
         let alice = ed.public_key();
-        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let bob = {
+            let mut id = [0u8; 32];
+            id[..3].copy_from_slice(b"bob");
+            id
+        };
         let pq = MlDsaKeypair::generate();
 
         let mut store = MemoryStore::new();
-        apply_genesis(&mut store, vec![
-            GenesisAccount { id: alice, balance: 10_000,
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }] },
-            GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
-            GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
-        ]).unwrap();
-        let exec = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
-            .with_pq_auth_height(0);
+        apply_genesis(
+            &mut store,
+            vec![
+                GenesisAccount {
+                    id: alice,
+                    balance: 10_000,
+                    auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }],
+                },
+                GenesisAccount {
+                    id: bob,
+                    balance: 0,
+                    auth_methods: vec![],
+                },
+                GenesisAccount {
+                    id: treasury_id(),
+                    balance: 0,
+                    auth_methods: vec![],
+                },
+            ],
+        )
+        .unwrap();
+        let exec = BlockExecutor::with_fee_config(FeeConfig {
+            base_fee_per_gas: 0,
+            ..Default::default()
+        })
+        .with_pq_auth_height(0);
 
         // Block 1: SetAuth -> ML-DSA, signed by the CURRENT Ed25519 key.
         let mut setauth = UserOperation {
-            sender: alice, nonce: 0,
-            actions: vec![Action::SetAuth { auth_methods: vec![AuthMethod::MlDsa { public_key: pq.public_key() }] }],
-            max_fee: 1000, signature: vec![],
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::SetAuth {
+                auth_methods: vec![AuthMethod::MlDsa {
+                    public_key: pq.public_key(),
+                }],
+            }],
+            max_fee: 1000,
+            signature: vec![],
         };
         setauth.signature = ed.sign(&exec.operation_signing_message(&setauth)).to_vec();
-        assert!(exec.execute_block_with_height(&mut store, &[setauth], 1).receipts[0].success,
-            "SetAuth signed by the current Ed25519 key must succeed");
+        assert!(
+            exec.execute_block_with_height(&mut store, &[setauth], 1)
+                .receipts[0]
+                .success,
+            "SetAuth signed by the current Ed25519 key must succeed"
+        );
 
         // Block 2: transfer now signed with the post-quantum key -> authorized.
         let mut xfer = UserOperation {
-            sender: alice, nonce: 1,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }],
-            max_fee: 1000, signature: vec![],
+            sender: alice,
+            nonce: 1,
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
+            max_fee: 1000,
+            signature: vec![],
         };
         xfer.signature = pq.sign(&exec.operation_signing_message(&xfer));
-        assert!(exec.execute_block_with_height(&mut store, &[xfer], 2).receipts[0].success,
-            "post-upgrade ML-DSA-signed op must authorize");
-        assert_eq!(StateManager::new(&mut store).get_balance(&bob).unwrap(), 100);
+        assert!(
+            exec.execute_block_with_height(&mut store, &[xfer], 2)
+                .receipts[0]
+                .success,
+            "post-upgrade ML-DSA-signed op must authorize"
+        );
+        assert_eq!(
+            StateManager::new(&mut store).get_balance(&bob).unwrap(),
+            100
+        );
 
         // The rotated-out Ed25519 key no longer authorizes anything.
         let mut stale = UserOperation {
-            sender: alice, nonce: 2,
-            actions: vec![Action::Transfer { to: bob, amount: 50 }],
-            max_fee: 1000, signature: vec![],
+            sender: alice,
+            nonce: 2,
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 50,
+            }],
+            max_fee: 1000,
+            signature: vec![],
         };
         stale.signature = ed.sign(&exec.operation_signing_message(&stale)).to_vec();
-        assert!(!exec.execute_block_with_height(&mut store, &[stale], 3).receipts[0].success,
-            "the rotated-out Ed25519 key must be rejected");
+        assert!(
+            !exec
+                .execute_block_with_height(&mut store, &[stale], 3)
+                .receipts[0]
+                .success,
+            "the rotated-out Ed25519 key must be rejected"
+        );
     }
 
     /// AND-hybrid (Ed25519 + ML-DSA-65): an op authorizes only with BOTH valid
@@ -2203,28 +2424,66 @@ mod tests {
         use solen_crypto::{Keypair, MlDsaKeypair};
         let ed = Keypair::from_seed(&[5u8; 32]);
         let pq = MlDsaKeypair::from_seed(&[6u8; 32]);
-        let alice = { let mut id = [0u8; 32]; id[..4].copy_from_slice(b"hyb_"); id };
-        let bob = { let mut id = [0u8; 32]; id[..3].copy_from_slice(b"bob"); id };
+        let alice = {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(b"hyb_");
+            id
+        };
+        let bob = {
+            let mut id = [0u8; 32];
+            id[..3].copy_from_slice(b"bob");
+            id
+        };
         let mk = || {
             let mut s = MemoryStore::new();
-            apply_genesis(&mut s, vec![
-                GenesisAccount { id: alice, balance: 10_000, auth_methods: vec![AuthMethod::Hybrid {
-                    ed25519_public_key: ed.public_key(), ml_dsa_public_key: pq.public_key() }] },
-                GenesisAccount { id: bob, balance: 0, auth_methods: vec![] },
-                GenesisAccount { id: treasury_id(), balance: 0, auth_methods: vec![] },
-            ]).unwrap();
+            apply_genesis(
+                &mut s,
+                vec![
+                    GenesisAccount {
+                        id: alice,
+                        balance: 10_000,
+                        auth_methods: vec![AuthMethod::Hybrid {
+                            ed25519_public_key: ed.public_key(),
+                            ml_dsa_public_key: pq.public_key(),
+                        }],
+                    },
+                    GenesisAccount {
+                        id: bob,
+                        balance: 0,
+                        auth_methods: vec![],
+                    },
+                    GenesisAccount {
+                        id: treasury_id(),
+                        balance: 0,
+                        auth_methods: vec![],
+                    },
+                ],
+            )
+            .unwrap();
             s
         };
-        let exec = BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
-            .with_pq_auth_height(0);
-        let base = UserOperation { sender: alice, nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }], max_fee: 1000, signature: vec![] };
+        let exec = BlockExecutor::with_fee_config(FeeConfig {
+            base_fee_per_gas: 0,
+            ..Default::default()
+        })
+        .with_pq_auth_height(0);
+        let base = UserOperation {
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
+            max_fee: 1000,
+            signature: vec![],
+        };
         let msg = exec.operation_signing_message(&base);
         let ed_sig = ed.sign(&msg).to_vec();
         let ml_sig = pq.sign(&msg);
         let run = |exec: &BlockExecutor, sig: Vec<u8>| {
             let mut s = mk();
-            let mut op = base.clone(); op.signature = sig;
+            let mut op = base.clone();
+            op.signature = sig;
             let ok = exec.execute_block_with_height(&mut s, &[op], 1).receipts[0].success;
             (ok, StateManager::new(&mut s).get_balance(&bob).unwrap())
         };
@@ -2233,13 +2492,25 @@ mod tests {
         let (ok, bal) = run(&exec, [ed_sig.clone(), ml_sig.clone()].concat());
         assert!(ok && bal == 100, "both signatures must authorize");
         // Either signature alone -> rejected.
-        assert!(!run(&exec, ed_sig.clone()).0, "ed25519 alone must be rejected");
-        assert!(!run(&exec, ml_sig.clone()).0, "ml-dsa alone must be rejected");
+        assert!(
+            !run(&exec, ed_sig.clone()).0,
+            "ed25519 alone must be rejected"
+        );
+        assert!(
+            !run(&exec, ml_sig.clone()).0,
+            "ml-dsa alone must be rejected"
+        );
         // Wrong ed25519 sig (good ml-dsa) -> rejected.
         let bad_ed = Keypair::from_seed(&[9u8; 32]).sign(&msg).to_vec();
-        assert!(!run(&exec, [bad_ed, ml_sig.clone()].concat()).0, "wrong ed25519 sig must be rejected");
+        assert!(
+            !run(&exec, [bad_ed, ml_sig.clone()].concat()).0,
+            "wrong ed25519 sig must be rejected"
+        );
         // Both, but gate dormant -> rejected.
-        assert!(!run(&zero_fee_executor(), [ed_sig, ml_sig].concat()).0, "hybrid rejected while gate is dormant");
+        assert!(
+            !run(&zero_fee_executor(), [ed_sig, ml_sig].concat()).0,
+            "hybrid rejected while gate is dormant"
+        );
     }
 
     #[test]
@@ -2261,7 +2532,11 @@ mod tests {
 
         let result = executor.execute_block(&mut store, &[op]);
         assert_eq!(result.receipts.len(), 1);
-        assert!(result.receipts[0].success, "receipt: {:?}", result.receipts[0]);
+        assert!(
+            result.receipts[0].success,
+            "receipt: {:?}",
+            result.receipts[0]
+        );
         assert_eq!(result.gas_used, TRANSFER_GAS);
 
         let state = StateManager::new(&mut store);
@@ -2287,7 +2562,11 @@ mod tests {
 
         let result = executor.execute_block(&mut store, &[op]);
         assert!(!result.receipts[0].success);
-        assert!(result.receipts[0].error.as_ref().unwrap().contains("signature"));
+        assert!(result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("signature"));
     }
 
     #[test]
@@ -2331,7 +2610,11 @@ mod tests {
 
         let result = executor.execute_block(&mut store, &[op]);
         assert!(!result.receipts[0].success);
-        assert!(result.receipts[0].error.as_ref().unwrap().contains("balance"));
+        assert!(result.receipts[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("balance"));
     }
 
     #[test]
@@ -2340,10 +2623,13 @@ mod tests {
         let executor = zero_fee_executor();
 
         // Minimal valid WASM module with required exports.
-        let code = wat::parse_str(r#"(module
+        let code = wat::parse_str(
+            r#"(module
             (memory (export "memory") 1)
             (func (export "call") (param i32 i32) (result i32) (i32.const 0))
-        )"#).expect("WAT parse failed");
+        )"#,
+        )
+        .expect("WAT parse failed");
         let salt = [42u8; 32];
 
         let mut op = UserOperation {
@@ -2380,7 +2666,10 @@ mod tests {
         let mut op1 = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -2389,7 +2678,10 @@ mod tests {
         let mut op2 = UserOperation {
             sender: alice,
             nonce: 1,
-            actions: vec![Action::Transfer { to: bob, amount: 200 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 200,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -2454,7 +2746,11 @@ mod tests {
         sign_op(&kp, &executor, &mut deploy_op);
 
         let result = executor.execute_block(&mut store, &[deploy_op]);
-        assert!(result.receipts[0].success, "deploy failed: {:?}", result.receipts[0]);
+        assert!(
+            result.receipts[0].success,
+            "deploy failed: {:?}",
+            result.receipts[0]
+        );
 
         // Extract the deployed contract ID.
         let deploy_event = &result.receipts[0].events[0];
@@ -2476,7 +2772,11 @@ mod tests {
         sign_op(&kp, &executor, &mut call_op);
 
         let result = executor.execute_block(&mut store, &[call_op]);
-        assert!(result.receipts[0].success, "call failed: {:?}", result.receipts[0]);
+        assert!(
+            result.receipts[0].success,
+            "call failed: {:?}",
+            result.receipts[0]
+        );
 
         // Should have an "incremented" event from the contract.
         let events = &result.receipts[0].events;
@@ -2498,7 +2798,11 @@ mod tests {
         sign_op(&kp, &executor, &mut call_op2);
 
         let result2 = executor.execute_block(&mut store, &[call_op2]);
-        assert!(result2.receipts[0].success, "call2 failed: {:?}", result2.receipts[0]);
+        assert!(
+            result2.receipts[0].success,
+            "call2 failed: {:?}",
+            result2.receipts[0]
+        );
     }
 
     #[test]
@@ -2509,7 +2813,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 500 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 500,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -2537,7 +2844,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 200 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 200,
+            }],
             max_fee: 5000,
             signature: vec![],
         };
@@ -2566,7 +2876,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
             max_fee: 5000,
             signature: vec![],
         };
@@ -2637,7 +2950,10 @@ mod tests {
         let wasm = wat::parse_str(QUEUE_TO_B_WAT).expect("WAT parse failed");
         std::fs::create_dir_all("/tmp/solen-demo").unwrap();
         std::fs::write("/tmp/solen-demo/queue_to_b.wasm", &wasm).unwrap();
-        eprintln!("wrote /tmp/solen-demo/queue_to_b.wasm ({} bytes)", wasm.len());
+        eprintln!(
+            "wrote /tmp/solen-demo/queue_to_b.wasm ({} bytes)",
+            wasm.len()
+        );
     }
 
     /// Deploy QUEUE_TO_B, grant alice a session key scoped to ONLY that contract
@@ -2653,9 +2969,14 @@ mod tests {
         // Deploy the queueing contract (owner-signed).
         let wasm = wat::parse_str(QUEUE_TO_B_WAT).expect("WAT parse failed");
         let mut deploy = UserOperation {
-            sender: alice, nonce: 0,
-            actions: vec![Action::Deploy { code: wasm.to_vec(), salt: [0xCD; 32] }],
-            max_fee: 200_000, signature: vec![],
+            sender: alice,
+            nonce: 0,
+            actions: vec![Action::Deploy {
+                code: wasm.to_vec(),
+                salt: [0xCD; 32],
+            }],
+            max_fee: 200_000,
+            signature: vec![],
         };
         sign_op(&kp, &executor, &mut deploy);
         let r = executor.execute_block(&mut store, &[deploy]);
@@ -2666,12 +2987,20 @@ mod tests {
         // Make B = 0x42*32 exist (code-less) so an *unrestricted* queued sub-call
         // to it reaches the no-op path instead of failing on require_account.
         let mut transfer_b = UserOperation {
-            sender: alice, nonce: 1,
-            actions: vec![Action::Transfer { to: [0x42; 32], amount: 1 }],
-            max_fee: 0, signature: vec![],
+            sender: alice,
+            nonce: 1,
+            actions: vec![Action::Transfer {
+                to: [0x42; 32],
+                amount: 1,
+            }],
+            max_fee: 0,
+            signature: vec![],
         };
         sign_op(&kp, &executor, &mut transfer_b);
-        assert!(executor.execute_block(&mut store, &[transfer_b]).receipts[0].success, "transfer to B failed");
+        assert!(
+            executor.execute_block(&mut store, &[transfer_b]).receipts[0].success,
+            "transfer to B failed"
+        );
 
         // Add a session key allowed to call ONLY that contract.
         let session = AuthMethod::Session {
@@ -2684,22 +3013,39 @@ mod tests {
             restrict_subcalls,
         };
         let mut setauth = UserOperation {
-            sender: alice, nonce: 2,
+            sender: alice,
+            nonce: 2,
             actions: vec![Action::SetAuth {
-                auth_methods: vec![AuthMethod::Ed25519 { public_key: kp.public_key() }, session],
+                auth_methods: vec![
+                    AuthMethod::Ed25519 {
+                        public_key: kp.public_key(),
+                    },
+                    session,
+                ],
             }],
-            max_fee: 0, signature: vec![],
+            max_fee: 0,
+            signature: vec![],
         };
         sign_op(&kp, &executor, &mut setauth);
         let r2 = executor.execute_block(&mut store, &[setauth]);
-        assert!(r2.receipts[0].success, "setauth failed: {:?}", r2.receipts[0]);
+        assert!(
+            r2.receipts[0].success,
+            "setauth failed: {:?}",
+            r2.receipts[0]
+        );
 
         // Session-key op: call the (allowed) contract, which queues a sub-call to
         // the non-allowlisted B.
         let mut callop = UserOperation {
-            sender: alice, nonce: 3,
-            actions: vec![Action::Call { target: contract_id, method: "call".into(), args: vec![] }],
-            max_fee: 0, signature: vec![],
+            sender: alice,
+            nonce: 3,
+            actions: vec![Action::Call {
+                target: contract_id,
+                method: "call".into(),
+                args: vec![],
+            }],
+            max_fee: 0,
+            signature: vec![],
         };
         let msg = executor.operation_signing_message(&callop);
         callop.signature = session_kp.sign(&msg).to_vec();
@@ -2749,7 +3095,8 @@ mod tests {
         // 500_000 SOLEN from a sender) — fine for unit tests.
         {
             let mut sc = StakingContract::new();
-            sc.register_validator(validator_id, MIN_VALIDATOR_STAKE).unwrap();
+            sc.register_validator(validator_id, MIN_VALIDATOR_STAKE)
+                .unwrap();
             sc.save(&mut store);
         }
 
@@ -2881,9 +3228,7 @@ mod tests {
         let contract_id = deploy_queue_delegate(&mut store, &executor, &kp, alice);
 
         // Snapshot pre-op state so we can assert nothing moved on rollback.
-        let alice_balance_before = StateManager::new(&mut store)
-            .get_balance(&alice)
-            .unwrap();
+        let alice_balance_before = StateManager::new(&mut store).get_balance(&alice).unwrap();
         let contract_balance_before = StateManager::new(&mut store)
             .get_balance(&contract_id)
             .unwrap();

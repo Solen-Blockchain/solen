@@ -122,12 +122,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Waiting for funding transactions to finalize...");
     let last_sender = senders.last().unwrap().public_key();
     loop {
-        let nonce = get_next_nonce(&client, &cli.rpc, &last_sender).await.unwrap_or(0);
+        let nonce = get_next_nonce(&client, &cli.rpc, &last_sender)
+            .await
+            .unwrap_or(0);
         if nonce > 0 {
             break; // Account exists and has been used (funded).
         }
         // Also check balance directly.
-        let balance = get_balance(&client, &cli.rpc, &last_sender).await.unwrap_or(0);
+        let balance = get_balance(&client, &cli.rpc, &last_sender)
+            .await
+            .unwrap_or(0);
         if balance > 0 {
             break;
         }
@@ -136,9 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  All senders funded.");
 
     // Parse contract target if specified.
-    let contract_target: Option<[u8; 32]> = cli.contract.as_ref().map(|c| {
-        parse_account_id(c).expect("invalid contract address")
-    });
+    let contract_target: Option<[u8; 32]> = cli
+        .contract
+        .as_ref()
+        .map(|c| parse_account_id(c).expect("invalid contract address"));
     let bench_method = cli.method.clone();
 
     // Now blast transactions.
@@ -158,7 +163,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for sender_kp in &senders {
         let sender_id = sender_kp.public_key();
         // Each sender sends to the next sender (round-robin).
-        let recipient = senders[(senders.iter().position(|s| s.public_key() == sender_id).unwrap() + 1) % senders.len()].public_key();
+        let recipient = senders[(senders
+            .iter()
+            .position(|s| s.public_key() == sender_id)
+            .unwrap()
+            + 1)
+            % senders.len()]
+        .public_key();
 
         let client = client.clone();
         let rpc = cli.rpc.clone();
@@ -179,8 +190,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let hash = blake3_hash(&sender_id);
         seed.copy_from_slice(&hash);
         // Actually, we need the real seed. Let's encode the public key position.
-        let sender_idx = senders.iter().position(|s| s.public_key() == sender_id).unwrap();
-        let sender_seed = blake3_hash(&format!("bench-sender-{}-{}", sender_idx, start_height).into_bytes());
+        let sender_idx = senders
+            .iter()
+            .position(|s| s.public_key() == sender_id)
+            .unwrap();
+        let sender_seed =
+            blake3_hash(&format!("bench-sender-{}-{}", sender_idx, start_height).into_bytes());
 
         let handle = tokio::spawn(async move {
             let kp = Keypair::from_seed(&sender_seed);
@@ -209,8 +224,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 submitted.fetch_add(1, Ordering::Relaxed);
                 match submit_op(&client, &rpc, &op).await {
-                    Ok(()) => { accepted.fetch_add(1, Ordering::Relaxed); }
-                    Err(_) => { rejected.fetch_add(1, Ordering::Relaxed); }
+                    Ok(()) => {
+                        accepted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        rejected.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         });
@@ -226,9 +245,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let s = submitted_r.load(Ordering::Relaxed);
             let a = accepted_r.load(Ordering::Relaxed);
             let elapsed = blast_start.elapsed().as_secs_f64();
-            let rate = if elapsed > 0.0 { a as f64 / elapsed } else { 0.0 };
-            print!("\r  Submitted: {}/{} | Accepted: {} | Rate: {:.1} tx/s    ", s, total_txs, a, rate);
-            if s >= total_txs as u64 { break; }
+            let rate = if elapsed > 0.0 {
+                a as f64 / elapsed
+            } else {
+                0.0
+            };
+            print!(
+                "\r  Submitted: {}/{} | Accepted: {} | Rate: {:.1} tx/s    ",
+                s, total_txs, a, rate
+            );
+            if s >= total_txs as u64 {
+                break;
+            }
         }
     });
 
@@ -243,7 +271,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_accepted = accepted.load(Ordering::Relaxed);
     let total_rejected = rejected.load(Ordering::Relaxed);
 
-    println!("\n\nSubmission complete in {:.2}s", blast_elapsed.as_secs_f64());
+    println!(
+        "\n\nSubmission complete in {:.2}s",
+        blast_elapsed.as_secs_f64()
+    );
     println!("  Submitted: {}", total_submitted);
     println!("  Accepted:  {}", total_accepted);
     println!("  Rejected:  {}", total_rejected);
@@ -251,7 +282,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for all txs to finalize — give enough time for blocks to include them.
     println!("\nWaiting for finalization...");
     let expected_blocks = (total_accepted as f64 / 1000.0).ceil() as u64 + 5; // 1000 ops/block + margin
-    wait_for_height(&client, &cli.rpc, blast_start_height + expected_blocks.max(10)).await?;
+    wait_for_height(
+        &client,
+        &cli.rpc,
+        blast_start_height + expected_blocks.max(10),
+    )
+    .await?;
 
     let end_height = get_height(&client, &cli.rpc).await?;
     let blocks_elapsed = end_height - blast_start_height;
@@ -297,7 +333,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n══════════════════════════════════════════");
     println!("  BENCHMARK RESULTS");
     println!("══════════════════════════════════════════");
-    println!("  Blocks:           {} ({} → {})", blocks_elapsed, blast_start_height, end_height);
+    println!(
+        "  Blocks:           {} ({} → {})",
+        blocks_elapsed, blast_start_height, end_height
+    );
     println!("  Finalized txs:    {}", total_finalized_txs);
     println!("  Chain duration:   {:.2}s", chain_duration_secs);
     println!("  Avg block time:   {:.2}s", avg_block_time);
@@ -324,10 +363,12 @@ async fn rpc_call(
         "jsonrpc": "2.0", "id": 1,
         "method": method, "params": params
     });
-    let resp = client.post(rpc)
+    let resp = client
+        .post(rpc)
         .header("Content-Type", "application/json")
         .body(body.to_string())
-        .send().await
+        .send()
+        .await
         .map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if let Some(err) = json.get("error") {
@@ -341,26 +382,50 @@ async fn get_height(client: &reqwest::Client, rpc: &str) -> Result<u64, String> 
     result["height"].as_u64().ok_or("no height".into())
 }
 
-async fn get_next_nonce(client: &reqwest::Client, rpc: &str, account: &[u8; 32]) -> Result<u64, String> {
-    let hex = account.iter().map(|b| format!("{b:02x}")).collect::<String>();
+async fn get_next_nonce(
+    client: &reqwest::Client,
+    rpc: &str,
+    account: &[u8; 32],
+) -> Result<u64, String> {
+    let hex = account
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     let result = rpc_call(client, rpc, "solen_getNextNonce", serde_json::json!([hex])).await?;
     Ok(result.as_u64().unwrap_or(0))
 }
 
-async fn get_balance(client: &reqwest::Client, rpc: &str, account: &[u8; 32]) -> Result<u128, String> {
-    let hex = account.iter().map(|b| format!("{b:02x}")).collect::<String>();
+async fn get_balance(
+    client: &reqwest::Client,
+    rpc: &str,
+    account: &[u8; 32],
+) -> Result<u128, String> {
+    let hex = account
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     let result = rpc_call(client, rpc, "solen_getBalance", serde_json::json!([hex])).await?;
     let s = result.as_str().unwrap_or("0");
     s.parse::<u128>().map_err(|e| e.to_string())
 }
 
-async fn get_block(client: &reqwest::Client, rpc: &str, height: u64) -> Result<serde_json::Value, String> {
+async fn get_block(
+    client: &reqwest::Client,
+    rpc: &str,
+    height: u64,
+) -> Result<serde_json::Value, String> {
     rpc_call(client, rpc, "solen_getBlock", serde_json::json!([height])).await
 }
 
 async fn submit_op(client: &reqwest::Client, rpc: &str, op: &UserOperation) -> Result<(), String> {
     let op_json = serde_json::to_value(op).map_err(|e| e.to_string())?;
-    let result = rpc_call(client, rpc, "solen_submitOperation", serde_json::json!([op_json])).await?;
+    let result = rpc_call(
+        client,
+        rpc,
+        "solen_submitOperation",
+        serde_json::json!([op_json]),
+    )
+    .await?;
     if result["accepted"].as_bool() == Some(true) {
         Ok(())
     } else {
@@ -371,7 +436,9 @@ async fn submit_op(client: &reqwest::Client, rpc: &str, op: &UserOperation) -> R
 async fn wait_for_height(client: &reqwest::Client, rpc: &str, target: u64) -> Result<(), String> {
     loop {
         let h = get_height(client, rpc).await?;
-        if h >= target { return Ok(()); }
+        if h >= target {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -386,8 +453,11 @@ fn parse_account_id(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let mut result = [0u8; 32];
     let mut digits: Vec<u8> = Vec::new();
     for &c in s.as_bytes() {
-        let idx = ALPHABET.iter().position(|&a| a == c)
-            .ok_or_else(|| format!("invalid base58 character: {}", c as char))? as u8;
+        let idx = ALPHABET
+            .iter()
+            .position(|&a| a == c)
+            .ok_or_else(|| format!("invalid base58 character: {}", c as char))?
+            as u8;
         let mut carry = idx as u32;
         for d in digits.iter_mut().rev() {
             carry += (*d as u32) * 58;
@@ -411,7 +481,7 @@ fn hex_to_bytes(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     }
     let mut out = [0u8; 32];
     for i in 0..32 {
-        out[i] = u8::from_str_radix(&hex[i*2..i*2+2], 16)?;
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)?;
     }
     Ok(out)
 }

@@ -65,9 +65,15 @@ fn full_rollup_lifecycle() {
     };
     let sequencer = Sequencer::new(config);
 
-    sequencer.submit(dummy_tx(1, 0, b"transfer(alice, bob, 100)")).unwrap();
-    sequencer.submit(dummy_tx(2, 0, b"deploy(contract_code)")).unwrap();
-    sequencer.submit(dummy_tx(1, 1, b"call(contract, method, args)")).unwrap();
+    sequencer
+        .submit(dummy_tx(1, 0, b"transfer(alice, bob, 100)"))
+        .unwrap();
+    sequencer
+        .submit(dummy_tx(2, 0, b"deploy(contract_code)"))
+        .unwrap();
+    sequencer
+        .submit(dummy_tx(1, 1, b"call(contract, method, args)"))
+        .unwrap();
 
     assert_eq!(sequencer.pending_count(), 3);
 
@@ -82,7 +88,10 @@ fn full_rollup_lifecycle() {
     let batch_data = BatchPublisher::compress_batch(&batch).unwrap();
     let pre_state_root = genesis_state_root;
     let post_state_root = execute_batch(&pre_state_root, &batch_data);
-    assert_ne!(post_state_root, pre_state_root, "state should change after execution");
+    assert_ne!(
+        post_state_root, pre_state_root,
+        "state should change after execution"
+    );
 
     // ── 5. Generate mock proof ─────────────────────────────────
     let prover = MockProver;
@@ -94,7 +103,9 @@ fn full_rollup_lifecycle() {
     // Verify the proof locally before submitting.
     let data_hash = blake3_hash(&batch_data);
     assert!(
-        prover.verify_proof(&pre_state_root, &post_state_root, &data_hash, &proof).unwrap(),
+        prover
+            .verify_proof(&pre_state_root, &post_state_root, &data_hash, &proof)
+            .unwrap(),
         "local proof verification should pass"
     );
 
@@ -122,8 +133,12 @@ fn full_rollup_lifecycle() {
     );
 
     // ── 8. Submit a second batch (state chain) ─────────────────
-    sequencer.submit(dummy_tx(3, 0, b"transfer(charlie, dave, 50)")).unwrap();
-    sequencer.submit(dummy_tx(4, 0, b"stake(validator, 1000)")).unwrap();
+    sequencer
+        .submit(dummy_tx(3, 0, b"transfer(charlie, dave, 50)"))
+        .unwrap();
+    sequencer
+        .submit(dummy_tx(4, 0, b"stake(validator, 1000)"))
+        .unwrap();
 
     let batch2 = sequencer.produce_batch().expect("should produce batch 2");
     assert_eq!(batch2.batch_index, 2);
@@ -141,7 +156,10 @@ fn full_rollup_lifecycle() {
         .unwrap();
 
     let verified2 = registry.verify_batch(&commitment2).unwrap();
-    assert!(verified2, "batch 2 should verify (state chains from batch 1)");
+    assert!(
+        verified2,
+        "batch 2 should verify (state chains from batch 1)"
+    );
 
     assert_eq!(
         registry.last_state_root(rollup_id),
@@ -150,17 +168,26 @@ fn full_rollup_lifecycle() {
     );
 
     // ── 9. Submit a third batch ────────────────────────────────
-    sequencer.submit(dummy_tx(5, 0, b"mint(nft, token_id_1)")).unwrap();
+    sequencer
+        .submit(dummy_tx(5, 0, b"mint(nft, token_id_1)"))
+        .unwrap();
     let batch3 = sequencer.produce_batch().unwrap();
     assert_eq!(batch3.batch_index, 3);
 
     let batch3_data = BatchPublisher::compress_batch(&batch3).unwrap();
     let pre_state_3 = post_state_2;
     let post_state_3 = execute_batch(&pre_state_3, &batch3_data);
-    let proof3 = prover.generate_proof(&pre_state_3, &post_state_3, &batch3_data).unwrap();
-    let commitment3 = publisher.prepare_commitment(&batch3, pre_state_3, post_state_3, proof3).unwrap();
+    let proof3 = prover
+        .generate_proof(&pre_state_3, &post_state_3, &batch3_data)
+        .unwrap();
+    let commitment3 = publisher
+        .prepare_commitment(&batch3, pre_state_3, post_state_3, proof3)
+        .unwrap();
 
-    assert!(registry.verify_batch(&commitment3).unwrap(), "batch 3 should verify");
+    assert!(
+        registry.verify_batch(&commitment3).unwrap(),
+        "batch 3 should verify"
+    );
     assert_eq!(registry.last_state_root(rollup_id), Some(post_state_3));
 }
 
@@ -169,7 +196,9 @@ fn invalid_proof_rejected_on_l1() {
     let rollup_id = 1;
     let mut registry = ProofVerifierRegistry::new();
     registry.register_verifier(Arc::new(MockVerifier));
-    registry.register_rollup(rollup_id, "mock", [0u8; 32]).unwrap();
+    registry
+        .register_rollup(rollup_id, "mock", [0u8; 32])
+        .unwrap();
 
     let sequencer = Sequencer::new(SequencerConfig {
         rollup_id,
@@ -207,7 +236,9 @@ fn stale_pre_state_rejected() {
 
     let mut registry = ProofVerifierRegistry::new();
     registry.register_verifier(Arc::new(MockVerifier));
-    registry.register_rollup(rollup_id, "mock", [0u8; 32]).unwrap();
+    registry
+        .register_rollup(rollup_id, "mock", [0u8; 32])
+        .unwrap();
 
     // Submit batch 1 successfully.
     let sequencer = Sequencer::new(SequencerConfig {
@@ -218,10 +249,14 @@ fn stale_pre_state_rejected() {
     let batch1 = sequencer.produce_batch().unwrap();
     let batch1_data = BatchPublisher::compress_batch(&batch1).unwrap();
     let post_state_1 = execute_batch(&[0u8; 32], &batch1_data);
-    let proof1 = prover.generate_proof(&[0u8; 32], &post_state_1, &batch1_data).unwrap();
+    let proof1 = prover
+        .generate_proof(&[0u8; 32], &post_state_1, &batch1_data)
+        .unwrap();
 
     let publisher = BatchPublisher::new(rollup_id);
-    let c1 = publisher.prepare_commitment(&batch1, [0u8; 32], post_state_1, proof1).unwrap();
+    let c1 = publisher
+        .prepare_commitment(&batch1, [0u8; 32], post_state_1, proof1)
+        .unwrap();
     assert!(registry.verify_batch(&c1).unwrap());
 
     // Now try to submit batch 2 with a proof based on genesis (stale pre-state).
@@ -277,31 +312,44 @@ fn multiple_rollups_independent_state_chains() {
     registry.register_rollup(2, "mock", [0u8; 32]).unwrap();
 
     // Rollup 1: batch 1
-    let seq1 = Sequencer::new(SequencerConfig { rollup_id: 1, ..Default::default() });
+    let seq1 = Sequencer::new(SequencerConfig {
+        rollup_id: 1,
+        ..Default::default()
+    });
     seq1.submit(dummy_tx(1, 0, b"rollup1_tx")).unwrap();
     let batch1 = seq1.produce_batch().unwrap();
     let data1 = BatchPublisher::compress_batch(&batch1).unwrap();
     let post1 = execute_batch(&[0u8; 32], &data1);
     let proof1 = prover.generate_proof(&[0u8; 32], &post1, &data1).unwrap();
     let pub1 = BatchPublisher::new(1);
-    let c1 = pub1.prepare_commitment(&batch1, [0u8; 32], post1, proof1).unwrap();
+    let c1 = pub1
+        .prepare_commitment(&batch1, [0u8; 32], post1, proof1)
+        .unwrap();
     assert!(registry.verify_batch(&c1).unwrap());
 
     // Rollup 2: batch 1 (independent state chain)
-    let seq2 = Sequencer::new(SequencerConfig { rollup_id: 2, ..Default::default() });
+    let seq2 = Sequencer::new(SequencerConfig {
+        rollup_id: 2,
+        ..Default::default()
+    });
     seq2.submit(dummy_tx(2, 0, b"rollup2_tx")).unwrap();
     let batch2 = seq2.produce_batch().unwrap();
     let data2 = BatchPublisher::compress_batch(&batch2).unwrap();
     let post2 = execute_batch(&[0u8; 32], &data2);
     let proof2 = prover.generate_proof(&[0u8; 32], &post2, &data2).unwrap();
     let pub2 = BatchPublisher::new(2);
-    let c2 = pub2.prepare_commitment(&batch2, [0u8; 32], post2, proof2).unwrap();
+    let c2 = pub2
+        .prepare_commitment(&batch2, [0u8; 32], post2, proof2)
+        .unwrap();
     assert!(registry.verify_batch(&c2).unwrap());
 
     // State roots are independent.
     assert_eq!(registry.last_state_root(1), Some(post1));
     assert_eq!(registry.last_state_root(2), Some(post2));
-    assert_ne!(post1, post2, "different tx data should produce different state roots");
+    assert_ne!(
+        post1, post2,
+        "different tx data should produce different state roots"
+    );
 
     // Rollup 1: batch 2 (chains from rollup 1's state, not rollup 2's)
     seq1.submit(dummy_tx(1, 1, b"rollup1_tx2")).unwrap();
@@ -309,7 +357,9 @@ fn multiple_rollups_independent_state_chains() {
     let data1b = BatchPublisher::compress_batch(&batch1b).unwrap();
     let post1b = execute_batch(&post1, &data1b);
     let proof1b = prover.generate_proof(&post1, &post1b, &data1b).unwrap();
-    let c1b = pub1.prepare_commitment(&batch1b, post1, post1b, proof1b).unwrap();
+    let c1b = pub1
+        .prepare_commitment(&batch1b, post1, post1b, proof1b)
+        .unwrap();
     assert!(registry.verify_batch(&c1b).unwrap());
     assert_eq!(registry.last_state_root(1), Some(post1b));
 
@@ -324,7 +374,9 @@ fn large_batch_flow() {
 
     let mut registry = ProofVerifierRegistry::new();
     registry.register_verifier(Arc::new(MockVerifier));
-    registry.register_rollup(rollup_id, "mock", [0u8; 32]).unwrap();
+    registry
+        .register_rollup(rollup_id, "mock", [0u8; 32])
+        .unwrap();
 
     let sequencer = Sequencer::new(SequencerConfig {
         rollup_id,
@@ -335,7 +387,9 @@ fn large_batch_flow() {
     // Submit 100 transactions — should produce 2 batches.
     for i in 0..100u64 {
         let data = format!("tx_{}", i);
-        sequencer.submit(dummy_tx((i % 10) as u8, i / 10, data.as_bytes())).unwrap();
+        sequencer
+            .submit(dummy_tx((i % 10) as u8, i / 10, data.as_bytes()))
+            .unwrap();
     }
     assert_eq!(sequencer.pending_count(), 100);
 
@@ -348,8 +402,12 @@ fn large_batch_flow() {
         batch_count += 1;
         let data = BatchPublisher::compress_batch(&batch).unwrap();
         let post_state = execute_batch(&current_state, &data);
-        let proof = prover.generate_proof(&current_state, &post_state, &data).unwrap();
-        let commitment = publisher.prepare_commitment(&batch, current_state, post_state, proof).unwrap();
+        let proof = prover
+            .generate_proof(&current_state, &post_state, &data)
+            .unwrap();
+        let commitment = publisher
+            .prepare_commitment(&batch, current_state, post_state, proof)
+            .unwrap();
 
         assert!(
             registry.verify_batch(&commitment).unwrap(),
@@ -359,7 +417,10 @@ fn large_batch_flow() {
         current_state = post_state;
     }
 
-    assert_eq!(batch_count, 2, "100 txs with max_batch_size=50 should produce 2 batches");
+    assert_eq!(
+        batch_count, 2,
+        "100 txs with max_batch_size=50 should produce 2 batches"
+    );
     assert_eq!(sequencer.pending_count(), 0);
     assert_eq!(registry.last_state_root(rollup_id), Some(current_state));
 }

@@ -141,7 +141,11 @@ pub fn verify_committee_attestation(
     let count = u32::from_le_bytes([proof[0], proof[1], proof[2], proof[3]]) as usize;
 
     let msg = committee_attestation_message(
-        rollup_id, batch_index, pre_state_root, post_state_root, data_hash,
+        rollup_id,
+        batch_index,
+        pre_state_root,
+        post_state_root,
+        data_hash,
     );
 
     let mut valid_signers = std::collections::BTreeSet::new();
@@ -150,7 +154,8 @@ pub fn verify_committee_attestation(
         if off + 68 > proof.len() {
             return Err(ProverError::InvalidFormat);
         }
-        let idx = u32::from_le_bytes([proof[off], proof[off + 1], proof[off + 2], proof[off + 3]]) as usize;
+        let idx = u32::from_le_bytes([proof[off], proof[off + 1], proof[off + 2], proof[off + 3]])
+            as usize;
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&proof[off + 4..off + 68]);
         off += 68;
@@ -181,7 +186,9 @@ mod tests {
         assert_eq!(proof.len(), 32);
 
         let data_hash = solen_crypto::blake3_hash(batch_data);
-        let valid = prover.verify_proof(&pre, &post, &data_hash, &proof).unwrap();
+        let valid = prover
+            .verify_proof(&pre, &post, &data_hash, &proof)
+            .unwrap();
         assert!(valid);
     }
 
@@ -238,7 +245,9 @@ mod tests {
         let (pre, post, dh) = ([0u8; 32], [9u8; 32], [7u8; 32]);
         // 2-of-3 signed.
         let proof = committee_proof(1, 0, &pre, &post, &dh, &[(0, &a[0]), (1, &a[1])]);
-        assert!(verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap());
+        assert!(
+            verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap()
+        );
     }
 
     #[test]
@@ -248,7 +257,9 @@ mod tests {
         let (pre, post, dh) = ([0u8; 32], [9u8; 32], [7u8; 32]);
         // Only 1 signed but threshold is 2.
         let proof = committee_proof(1, 0, &pre, &post, &dh, &[(0, &a[0])]);
-        assert!(!verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap());
+        assert!(
+            !verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap()
+        );
     }
 
     #[test]
@@ -258,7 +269,9 @@ mod tests {
         let (pre, post, dh) = ([0u8; 32], [9u8; 32], [7u8; 32]);
         // Same attestor counted twice — must NOT reach a threshold of 2.
         let proof = committee_proof(1, 0, &pre, &post, &dh, &[(0, &a[0]), (0, &a[0])]);
-        assert!(!verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap());
+        assert!(
+            !verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap()
+        );
     }
 
     #[test]
@@ -269,7 +282,9 @@ mod tests {
         // Signers attest a DIFFERENT post root; verifying against `post` fails.
         let bad_post = [8u8; 32];
         let proof = committee_proof(1, 0, &pre, &bad_post, &dh, &[(0, &a[0]), (1, &a[1])]);
-        assert!(!verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap());
+        assert!(
+            !verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap()
+        );
     }
 
     #[test]
@@ -280,6 +295,8 @@ mod tests {
         // A non-committee key signs but claims index 0 — must not count.
         let outsider = attestor(99);
         let proof = committee_proof(1, 0, &pre, &post, &dh, &[(0, &outsider), (1, &a[1])]);
-        assert!(!verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap());
+        assert!(
+            !verify_committee_attestation(1, 0, &pre, &post, &dh, &attestors, 2, &proof).unwrap()
+        );
     }
 }

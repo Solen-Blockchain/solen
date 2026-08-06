@@ -20,7 +20,11 @@ use solen_types::account::AuthMethod;
 use solen_types::transaction::{Action, UserOperation};
 
 #[derive(Parser)]
-#[command(name = "solen-vectors", version, about = "Generate and check Solen signing test vectors")]
+#[command(
+    name = "solen-vectors",
+    version,
+    about = "Generate and check Solen signing test vectors"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

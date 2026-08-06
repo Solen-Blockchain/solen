@@ -19,7 +19,10 @@ fn decompression_bounded_to_16mb() {
     // Attempt to decode — should not crash or allocate 20MB.
     let result = NetworkMessage::decode(&compressed);
     // Should fail (not valid JSON after decompression), but should NOT panic or OOM.
-    assert!(result.is_err(), "garbage decompressed data should fail JSON parse");
+    assert!(
+        result.is_err(),
+        "garbage decompressed data should fail JSON parse"
+    );
 }
 
 // ── Test: Empty compressed message ────────────────────────────

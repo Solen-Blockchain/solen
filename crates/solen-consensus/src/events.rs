@@ -27,8 +27,5 @@ pub enum NodeEvent {
         gas_used: u64,
     },
     /// The active validator set changed at an epoch boundary.
-    ValidatorSetChanged {
-        epoch: u64,
-        active_count: usize,
-    },
+    ValidatorSetChanged { epoch: u64, active_count: usize },
 }

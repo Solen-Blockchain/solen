@@ -96,7 +96,8 @@ impl StateStore for MemoryStore {
         }
 
         // Build Merkle tree from pre-hashed leaves, excluding non-execution keys.
-        let leaves: Vec<Hash> = self.leaf_hashes
+        let leaves: Vec<Hash> = self
+            .leaf_hashes
             .iter()
             .filter(|(k, _)| !is_non_state_key(k))
             .map(|(_, v)| *v)
@@ -117,12 +118,17 @@ impl StateStore for MemoryStore {
             return;
         }
 
-        let leaves: Vec<Hash> = self.leaf_hashes
+        let leaves: Vec<Hash> = self
+            .leaf_hashes
             .iter()
             .filter(|(k, _)| !is_non_state_key(k))
             .map(|(_, v)| *v)
             .collect();
-        let root = if leaves.is_empty() { [0u8; 32] } else { merkle_root(&leaves) };
+        let root = if leaves.is_empty() {
+            [0u8; 32]
+        } else {
+            merkle_root(&leaves)
+        };
         self.tree_cache = Some(MerkleTree { root });
     }
 
@@ -149,7 +155,11 @@ impl StateStore for MemoryStore {
     }
 
     fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        Ok(self.data.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        Ok(self
+            .data
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
 
     fn delete_prefix(&mut self, prefix: &[u8]) -> Result<usize, StorageError> {
@@ -296,7 +306,7 @@ mod tests {
 
         let root1 = store.state_root();
         store.put(b"a", b"1").unwrap(); // same value
-        // structural didn't change but our simple impl still invalidates
+                                        // structural didn't change but our simple impl still invalidates
         let root2 = store.state_root();
         assert_eq!(root1, root2);
     }
@@ -313,7 +323,9 @@ mod tests {
         // Same data, same root.
         let mut store2 = MemoryStore::new();
         for i in 0u32..1000 {
-            store2.put(&i.to_le_bytes(), &(i * 2).to_le_bytes()).unwrap();
+            store2
+                .put(&i.to_le_bytes(), &(i * 2).to_le_bytes())
+                .unwrap();
         }
         assert_eq!(store2.state_root(), root);
     }

@@ -35,12 +35,7 @@ fn build_and_load_wasm() -> Vec<u8> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let contract_dir = manifest_dir.join(STSOLEN_DIR);
     let status = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--target",
-            "wasm32-unknown-unknown",
-        ])
+        .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
         .current_dir(&contract_dir)
         .status()
         .expect("failed to spawn cargo");
@@ -88,7 +83,8 @@ fn setup() -> (MemoryStore, Keypair) {
 
     {
         let mut sc = StakingContract::new();
-        sc.register_validator(validator_id(), MIN_VALIDATOR_STAKE).unwrap();
+        sc.register_validator(validator_id(), MIN_VALIDATOR_STAKE)
+            .unwrap();
         sc.save(&mut store);
     }
 
@@ -206,7 +202,14 @@ fn add_operator(
     let mut args1 = Vec::with_capacity(40);
     args1.extend_from_slice(&0u64.to_le_bytes());
     args1.extend_from_slice(&validator_id());
-    let op1 = call_op(executor, kp, starting_nonce, contract, "set_operator", args1);
+    let op1 = call_op(
+        executor,
+        kp,
+        starting_nonce,
+        contract,
+        "set_operator",
+        args1,
+    );
 
     // set_op_count(1)
     let args2 = 1u64.to_le_bytes().to_vec();
@@ -220,8 +223,16 @@ fn add_operator(
     );
 
     let r = executor.execute_block(store, &[op1, op2]);
-    assert!(r.receipts[0].success, "set_operator failed: {:?}", r.receipts[0]);
-    assert!(r.receipts[1].success, "set_op_count failed: {:?}", r.receipts[1]);
+    assert!(
+        r.receipts[0].success,
+        "set_operator failed: {:?}",
+        r.receipts[0]
+    );
+    assert!(
+        r.receipts[1].success,
+        "set_op_count failed: {:?}",
+        r.receipts[1]
+    );
 }
 
 /// Build a contract-storage backing-store key:  `cs/{contract_id}/{inner}`.
@@ -301,8 +312,15 @@ fn first_deposit_mints_minus_bootstrap_burn_and_delegates() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -320,7 +338,10 @@ fn first_deposit_mints_minus_bootstrap_burn_and_delegates() {
 
     // Alice got `deposit_amount - BOOTSTRAP_BURN`.
     let dead_addr = [0xDEu8; 32];
-    assert_eq!(stsolen_balance(&store, &contract, &alice_id()), deposit_amount - 1_000);
+    assert_eq!(
+        stsolen_balance(&store, &contract, &alice_id()),
+        deposit_amount - 1_000
+    );
     assert_eq!(stsolen_balance(&store, &contract, &dead_addr), 1_000);
 
     // Staking system contract recorded a delegation FROM the contract for
@@ -336,7 +357,10 @@ fn first_deposit_mints_minus_bootstrap_burn_and_delegates() {
     // Contract account retains exactly MIN_FEE_RESERVE.
     let mgr = StateManager::new(&mut store);
     let acct = mgr.require_account(&contract).unwrap();
-    assert_eq!(acct.balance, 10_000, "contract should retain MIN_FEE_RESERVE");
+    assert_eq!(
+        acct.balance, 10_000,
+        "contract should retain MIN_FEE_RESERVE"
+    );
 }
 
 #[test]
@@ -357,8 +381,15 @@ fn reward_inflow_grows_pool_and_skims_treasury_fee() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -434,8 +465,15 @@ fn request_crank_claim_full_withdrawal_cycle() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -456,7 +494,11 @@ fn request_crank_claim_full_withdrawal_cycle() {
     args.extend_from_slice(&burn.to_le_bytes());
     let req_op = call_op(&executor, &kp, nonce, contract, "request_withdrawal", args);
     let r = executor.execute_block_with_height(&mut store, &[req_op], 0);
-    assert!(r.receipts[0].success, "request_withdrawal failed: {:?}", r.receipts[0]);
+    assert!(
+        r.receipts[0].success,
+        "request_withdrawal failed: {:?}",
+        r.receipts[0]
+    );
     nonce += 1;
 
     // Verify queue state. wq_tail = 1, pending_withdrawal_solen = 100_000.
@@ -472,7 +514,14 @@ fn request_crank_claim_full_withdrawal_cycle() {
 
     // Crank at epoch 0 (block 0). Queues `STAKING_ADDRESS:undelegate` for
     // the operator with the pending share.
-    let crank_op = call_op(&executor, &kp, nonce, contract, "crank_undelegations", vec![]);
+    let crank_op = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "crank_undelegations",
+        vec![],
+    );
     let r = executor.execute_block_with_height(&mut store, &[crank_op], 1);
     assert!(r.receipts[0].success, "crank failed: {:?}", r.receipts[0]);
     nonce += 1;
@@ -482,12 +531,22 @@ fn request_crank_claim_full_withdrawal_cycle() {
     let sc = StakingContract::load(&store);
     let staked_now = sc.delegator_total_stake(&contract);
     let expected_staked = (deposit_amount - 10_000) - burn; // delegated less reserve, less crank
-    assert_eq!(staked_now, expected_staked, "delegation should drop by `burn`");
+    assert_eq!(
+        staked_now, expected_staked,
+        "delegation should drop by `burn`"
+    );
 
     // Claim before eligibility — should fail (block 100 = epoch 1, way too early).
     let mut early_args = Vec::with_capacity(8);
     early_args.extend_from_slice(&0u64.to_le_bytes());
-    let early_op = call_op(&executor, &kp, nonce, contract, "claim_withdrawal", early_args.clone());
+    let early_op = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "claim_withdrawal",
+        early_args.clone(),
+    );
     let r = executor.execute_block_with_height(&mut store, &[early_op], 100);
     assert!(
         r.receipts[0].success,
@@ -510,13 +569,31 @@ fn request_crank_claim_full_withdrawal_cycle() {
     // the executor fires native_transfers before queued contract calls;
     // mixing the two in one op would attempt the payout before the matured
     // pull.
-    let crank2 = call_op(&executor, &kp, nonce, contract, "crank_undelegations", vec![]);
+    let crank2 = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "crank_undelegations",
+        vec![],
+    );
     let r = executor.execute_block_with_height(&mut store, &[crank2], 800);
-    assert!(r.receipts[0].success, "second crank failed: {:?}", r.receipts[0]);
+    assert!(
+        r.receipts[0].success,
+        "second crank failed: {:?}",
+        r.receipts[0]
+    );
     nonce += 1;
 
     // Now claim — pays from the buffer that the crank just filled.
-    let claim_op = call_op(&executor, &kp, nonce, contract, "claim_withdrawal", early_args);
+    let claim_op = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "claim_withdrawal",
+        early_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[claim_op], 800);
     assert!(r.receipts[0].success, "claim failed: {:?}", r.receipts[0]);
 
@@ -576,8 +653,15 @@ fn claim_before_eligibility_returns_error() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -589,12 +673,26 @@ fn claim_before_eligibility_returns_error() {
 
     let mut req_args = Vec::with_capacity(16);
     req_args.extend_from_slice(&100_000u128.to_le_bytes());
-    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let req = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "request_withdrawal",
+        req_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[req], 0);
     assert!(r.receipts[0].success);
     nonce += 1;
 
-    let crank = call_op(&executor, &kp, nonce, contract, "crank_undelegations", vec![]);
+    let crank = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "crank_undelegations",
+        vec![],
+    );
     let r = executor.execute_block_with_height(&mut store, &[crank], 0);
     assert!(r.receipts[0].success);
     nonce += 1;
@@ -603,7 +701,14 @@ fn claim_before_eligibility_returns_error() {
     // panic, not advance head.
     let mut claim_args = Vec::with_capacity(8);
     claim_args.extend_from_slice(&0u64.to_le_bytes());
-    let claim = call_op(&executor, &kp, nonce, contract, "claim_withdrawal", claim_args);
+    let claim = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "claim_withdrawal",
+        claim_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[claim], 50);
     assert!(r.receipts[0].success, "call shouldn't panic on early claim");
 
@@ -639,7 +744,9 @@ fn admin_methods_reject_non_owner() {
         let mut mgr = StateManager::new(&mut store);
         mgr.create_account(
             mallory_id,
-            vec![AuthMethod::Ed25519 { public_key: mallory_kp.public_key() }],
+            vec![AuthMethod::Ed25519 {
+                public_key: mallory_kp.public_key(),
+            }],
             10_000_000,
         )
         .unwrap();
@@ -681,9 +788,15 @@ fn admin_methods_reject_non_owner() {
     // Owner unchanged.
     assert_eq!(read_owner(&store, &contract), owner_before);
     // Treasury still pointing at the original, not mallory.
-    assert_eq!(read_32_at(&store, &cs_key(&contract, b"treasury")), treasury_id());
+    assert_eq!(
+        read_32_at(&store, &cs_key(&contract, b"treasury")),
+        treasury_id()
+    );
     // Default fee unchanged at 1000 bps.
-    assert_eq!(read_u64_at(&store, &cs_key(&contract, b"protocol_fee_bps")), 1000);
+    assert_eq!(
+        read_u64_at(&store, &cs_key(&contract, b"protocol_fee_bps")),
+        1000
+    );
     // paused flag still false.
     let paused = match store.get(&cs_key(&contract, b"paused")).ok().flatten() {
         Some(d) => d.first().copied().unwrap_or(0),
@@ -714,8 +827,15 @@ fn pause_halts_deposits_but_not_transfers() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -743,8 +863,15 @@ fn pause_halts_deposits_but_not_transfers() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 500_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 500_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -786,8 +913,15 @@ fn pause_halts_deposits_but_not_transfers() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 500_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 500_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -823,8 +957,15 @@ fn report_slash_oracle_auth_and_math() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -852,7 +993,9 @@ fn report_slash_oracle_auth_and_math() {
         let mut mgr = StateManager::new(&mut store);
         mgr.create_account(
             mallory_id,
-            vec![AuthMethod::Ed25519 { public_key: mallory_kp.public_key() }],
+            vec![AuthMethod::Ed25519 {
+                public_key: mallory_kp.public_key(),
+            }],
             10_000_000,
         )
         .unwrap();
@@ -876,7 +1019,7 @@ fn report_slash_oracle_auth_and_math() {
         .to_vec();
     let r = executor.execute_block(&mut store, &[bad_op]);
     assert!(r.receipts[0].success); // contract returns err string, not panic
-    // State unchanged.
+                                    // State unchanged.
     assert_eq!(
         read_u128_at(&store, &cs_key(&contract, &op_stake_inner)),
         stake_before
@@ -910,7 +1053,11 @@ fn report_slash_oracle_auth_and_math() {
     let stake_after = read_u128_at(&store, &cs_key(&contract, &op_stake_inner));
     let pool_after = total_pooled(&store, &contract);
     assert_eq!(stake_after, realized);
-    assert_eq!(pool_after, pool_before - 50_000, "pool should decrement by exact loss");
+    assert_eq!(
+        pool_after,
+        pool_before - 50_000,
+        "pool should decrement by exact loss"
+    );
 }
 
 /// After a reward inflow grows the pool, a subsequent deposit of the same
@@ -934,8 +1081,15 @@ fn exchange_rate_rises_after_reward() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -974,8 +1128,15 @@ fn exchange_rate_rises_after_reward() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -1011,8 +1172,15 @@ fn claim_without_crank_fails_buffer_insufficient() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -1024,7 +1192,14 @@ fn claim_without_crank_fails_buffer_insufficient() {
 
     let mut req_args = Vec::with_capacity(16);
     req_args.extend_from_slice(&100_000u128.to_le_bytes());
-    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let req = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "request_withdrawal",
+        req_args,
+    );
     let r = executor.execute_block(&mut store, &[req]);
     assert!(r.receipts[0].success);
     nonce += 1;
@@ -1034,7 +1209,14 @@ fn claim_without_crank_fails_buffer_insufficient() {
     set_chain_height(&mut store, 800);
     let mut claim_args = Vec::with_capacity(8);
     claim_args.extend_from_slice(&0u64.to_le_bytes());
-    let claim = call_op(&executor, &kp, nonce, contract, "claim_withdrawal", claim_args);
+    let claim = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "claim_withdrawal",
+        claim_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[claim], 800);
     assert!(r.receipts[0].success); // contract returns err string
 
@@ -1079,8 +1261,15 @@ fn recompound_redelegates_idle_rewards() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: deposit_amount },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: deposit_amount,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 5_000_000,
         signature: vec![],
@@ -1114,7 +1303,14 @@ fn recompound_redelegates_idle_rewards() {
     // Bump block height past epoch 0 so the rate-limit doesn't wedge us — we
     // need `current_epoch > last_recompound_epoch` (last is 0 default; we go
     // to epoch 1). Block 100 == epoch 1.
-    let recompound_op = call_op(&executor, &kp, nonce, contract, "recompound_rewards", vec![]);
+    let recompound_op = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "recompound_rewards",
+        vec![],
+    );
     let r = executor.execute_block_with_height(&mut store, &[recompound_op], 100);
     assert!(
         r.receipts[0].success,
@@ -1175,15 +1371,25 @@ fn audit_f01_deposit_without_operators_makes_no_mutations() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
     };
     sign_op(&kp, &executor, &mut op);
     let r = executor.execute_block(&mut store, &[op]);
-    assert!(r.receipts[0].success, "executor accepts the op (Transfer lands)");
+    assert!(
+        r.receipts[0].success,
+        "executor accepts the op (Transfer lands)"
+    );
 
     // Critical: NO mutations to the dead-address balance, total_supply, or
     // total_pooled_solen. The Transfer DID land (action-level), but the
@@ -1227,8 +1433,15 @@ fn audit_f02_request_withdrawal_without_delegated_stake_makes_no_mutations() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -1252,25 +1465,42 @@ fn audit_f02_request_withdrawal_without_delegated_stake_makes_no_mutations() {
     let alice_stsolen_before = stsolen_balance(&store, &contract, &alice_id());
     let supply_before = total_supply(&store, &contract);
     let pool_before = total_pooled(&store, &contract);
-    let pending_before =
-        read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen"));
+    let pending_before = read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen"));
     let wq_tail_before = read_u64_at(&store, &cs_key(&contract, b"wq_tail"));
 
     // Request withdrawal — should refuse with err:no_delegated_stake without
     // mutating any of the above.
     let mut req_args = Vec::with_capacity(16);
     req_args.extend_from_slice(&100_000u128.to_le_bytes());
-    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let req = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "request_withdrawal",
+        req_args,
+    );
     let r = executor.execute_block(&mut store, &[req]);
-    assert!(r.receipts[0].success, "op accepted, but contract should refuse");
+    assert!(
+        r.receipts[0].success,
+        "op accepted, but contract should refuse"
+    );
 
     assert_eq!(
         stsolen_balance(&store, &contract, &alice_id()),
         alice_stsolen_before,
         "F-02: alice's stSOLEN must not be burned"
     );
-    assert_eq!(total_supply(&store, &contract), supply_before, "F-02: supply unchanged");
-    assert_eq!(total_pooled(&store, &contract), pool_before, "F-02: pool unchanged");
+    assert_eq!(
+        total_supply(&store, &contract),
+        supply_before,
+        "F-02: supply unchanged"
+    );
+    assert_eq!(
+        total_pooled(&store, &contract),
+        pool_before,
+        "F-02: pool unchanged"
+    );
     assert_eq!(
         read_u128_at(&store, &cs_key(&contract, b"pending_withdrawal_solen")),
         pending_before,
@@ -1302,8 +1532,15 @@ fn audit_f03_admin_cannot_strand_op_stake() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -1366,8 +1603,15 @@ fn audit_f04_settle_shortfall_advances_blocked_queue() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 1_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 1_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 1_000_000,
         signature: vec![],
@@ -1380,7 +1624,14 @@ fn audit_f04_settle_shortfall_advances_blocked_queue() {
     let burn: u128 = 100_000;
     let mut req_args = Vec::with_capacity(16);
     req_args.extend_from_slice(&burn.to_le_bytes());
-    let req = call_op(&executor, &kp, nonce, contract, "request_withdrawal", req_args);
+    let req = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "request_withdrawal",
+        req_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[req], 0);
     assert!(r.receipts[0].success);
     nonce += 1;
@@ -1396,9 +1647,20 @@ fn audit_f04_settle_shortfall_advances_blocked_queue() {
 
     let mut shortfall_args = Vec::with_capacity(8);
     shortfall_args.extend_from_slice(&0u64.to_le_bytes());
-    let settle = call_op(&executor, &kp, nonce, contract, "settle_shortfall", shortfall_args);
+    let settle = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "settle_shortfall",
+        shortfall_args,
+    );
     let r = executor.execute_block_with_height(&mut store, &[settle], 800);
-    assert!(r.receipts[0].success, "settle_shortfall failed: {:?}", r.receipts[0]);
+    assert!(
+        r.receipts[0].success,
+        "settle_shortfall failed: {:?}",
+        r.receipts[0]
+    );
 
     // Queue head advanced from 0 → 1.
     let head = read_u64_at(&store, &cs_key(&contract, b"wq_head"));
@@ -1424,11 +1686,21 @@ fn audit_f04_settle_shortfall_advances_blocked_queue() {
     if bal_now > 0 {
         let mut req2_args = Vec::with_capacity(16);
         req2_args.extend_from_slice(&100u128.to_le_bytes());
-        let req2 = call_op(&executor, &kp, nonce + 1, contract, "request_withdrawal", req2_args);
+        let req2 = call_op(
+            &executor,
+            &kp,
+            nonce + 1,
+            contract,
+            "request_withdrawal",
+            req2_args,
+        );
         let r = executor.execute_block_with_height(&mut store, &[req2], 800);
         assert!(r.receipts[0].success);
         let new_tail = read_u64_at(&store, &cs_key(&contract, b"wq_tail"));
-        assert!(new_tail > 1, "F-04: subsequent withdrawals can still be queued");
+        assert!(
+            new_tail > 1,
+            "F-04: subsequent withdrawals can still be queued"
+        );
     }
 }
 
@@ -1458,8 +1730,15 @@ fn audit_f07_recompound_works_at_epoch_zero() {
         sender: alice_id(),
         nonce,
         actions: vec![
-            Action::Transfer { to: contract, amount: 50_000_000_000 },
-            Action::Call { target: contract, method: "deposit".to_string(), args: vec![] },
+            Action::Transfer {
+                to: contract,
+                amount: 50_000_000_000,
+            },
+            Action::Call {
+                target: contract,
+                method: "deposit".to_string(),
+                args: vec![],
+            },
         ],
         max_fee: 5_000_000,
         signature: vec![],
@@ -1479,7 +1758,14 @@ fn audit_f07_recompound_works_at_epoch_zero() {
     }
 
     // Stay at epoch 0. recompound should succeed (F-07 fix).
-    let recompound = call_op(&executor, &kp, nonce, contract, "recompound_rewards", vec![]);
+    let recompound = call_op(
+        &executor,
+        &kp,
+        nonce,
+        contract,
+        "recompound_rewards",
+        vec![],
+    );
     let r = executor.execute_block_with_height(&mut store, &[recompound], 0);
     assert!(
         r.receipts[0].success,
@@ -1490,5 +1776,8 @@ fn audit_f07_recompound_works_at_epoch_zero() {
     // Verify last_recompound_epoch was set to 0 (the new condition uses
     // `last_recomp != 0` so first call always allowed).
     let last = read_u64_at(&store, &cs_key(&contract, b"last_recompound_epoch"));
-    assert_eq!(last, 0, "F-07: last_recompound_epoch should be 0 after first recompound at epoch 0");
+    assert_eq!(
+        last, 0,
+        "F-07: last_recompound_epoch should be 0 after first recompound at epoch 0"
+    );
 }

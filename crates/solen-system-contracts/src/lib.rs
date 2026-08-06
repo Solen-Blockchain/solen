@@ -7,8 +7,8 @@
 pub mod bridge;
 pub mod epoch_randomness;
 pub mod governance;
+pub mod guardian;
 pub mod proof_registry;
 pub mod staking;
-pub mod guardian;
 pub mod treasury;
 pub mod vesting;

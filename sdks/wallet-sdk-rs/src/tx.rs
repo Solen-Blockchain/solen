@@ -37,12 +37,7 @@ pub fn build_call(
 }
 
 /// Build an unsigned deploy operation.
-pub fn build_deploy(
-    sender: AccountId,
-    nonce: u64,
-    code: Vec<u8>,
-    salt: [u8; 32],
-) -> UserOperation {
+pub fn build_deploy(sender: AccountId, nonce: u64, code: Vec<u8>, salt: [u8; 32]) -> UserOperation {
     UserOperation {
         sender,
         nonce,

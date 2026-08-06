@@ -67,13 +67,13 @@ impl RecoveryManager {
             return Err(RecoveryError::NotAGuardian);
         }
 
-        let request = self
-            .pending_request
-            .as_mut()
-            .ok_or(RecoveryError::InsufficientApprovals {
-                have: 0,
-                need: self.threshold,
-            })?;
+        let request =
+            self.pending_request
+                .as_mut()
+                .ok_or(RecoveryError::InsufficientApprovals {
+                    have: 0,
+                    need: self.threshold,
+                })?;
 
         if request.approvals.contains(guardian) {
             return Err(RecoveryError::DuplicateApproval);
@@ -85,13 +85,13 @@ impl RecoveryManager {
 
     /// Check if the recovery can be executed.
     pub fn can_execute(&self, current_epoch: u64) -> Result<(), RecoveryError> {
-        let request = self
-            .pending_request
-            .as_ref()
-            .ok_or(RecoveryError::InsufficientApprovals {
-                have: 0,
-                need: self.threshold,
-            })?;
+        let request =
+            self.pending_request
+                .as_ref()
+                .ok_or(RecoveryError::InsufficientApprovals {
+                    have: 0,
+                    need: self.threshold,
+                })?;
 
         if request.approvals.len() < self.threshold {
             return Err(RecoveryError::InsufficientApprovals {
@@ -130,8 +130,8 @@ mod tests {
         let mut rm = RecoveryManager::new(
             aid(1),
             vec![aid(10), aid(11), aid(12)],
-            2,  // 2-of-3
-            3,  // 3 epoch timelock
+            2, // 2-of-3
+            3, // 3 epoch timelock
         );
 
         rm.initiate([99u8; 32], 10);
@@ -163,6 +163,9 @@ mod tests {
     fn non_guardian_rejected() {
         let mut rm = RecoveryManager::new(aid(1), vec![aid(10)], 1, 0);
         rm.initiate([99u8; 32], 0);
-        assert!(matches!(rm.approve(&aid(50)), Err(RecoveryError::NotAGuardian)));
+        assert!(matches!(
+            rm.approve(&aid(50)),
+            Err(RecoveryError::NotAGuardian)
+        ));
     }
 }

@@ -41,7 +41,10 @@ pub enum StakingError {
     #[error("already registered")]
     AlreadyRegistered,
     #[error("genesis validator locked until epoch {unlock_epoch} (current: {current_epoch})")]
-    GenesisLocked { unlock_epoch: u64, current_epoch: u64 },
+    GenesisLocked {
+        unlock_epoch: u64,
+        current_epoch: u64,
+    },
     #[error("cannot deregister: would drop below minimum validator count ({min})")]
     BelowMinValidators { min: usize },
     #[error("key rotation already pending")]
@@ -183,7 +186,12 @@ impl StakingContract {
         self_stake: u128,
         current_epoch: u64,
     ) -> Result<(), StakingError> {
-        self.register_validator_at_epoch_with_config(id, self_stake, current_epoch, MIN_VALIDATOR_STAKE)
+        self.register_validator_at_epoch_with_config(
+            id,
+            self_stake,
+            current_epoch,
+            MIN_VALIDATOR_STAKE,
+        )
     }
 
     pub fn register_validator_at_epoch_with_config(
@@ -358,7 +366,9 @@ impl StakingContract {
         // Check unbonding entry limit BEFORE mutating state to prevent
         // state corruption if this check fails.
         const MAX_UNDELEGATION_ENTRIES: usize = 7;
-        let existing_count = self.undelegations.iter()
+        let existing_count = self
+            .undelegations
+            .iter()
             .filter(|u| u.delegator == delegator && u.validator == validator)
             .count();
         if existing_count >= MAX_UNDELEGATION_ENTRIES {
@@ -369,7 +379,9 @@ impl StakingContract {
 
         // Remove zero-amount delegations to prevent state bloat.
         if delegation.amount == 0 {
-            self.delegations.retain(|d| !(d.delegator == delegator && d.validator == validator && d.amount == 0));
+            self.delegations.retain(|d| {
+                !(d.delegator == delegator && d.validator == validator && d.amount == 0)
+            });
         }
 
         // Reduce validator's total.
@@ -388,11 +400,7 @@ impl StakingContract {
     }
 
     /// Withdraw unlocked undelegations. Returns the total amount withdrawn.
-    pub fn withdraw_undelegated(
-        &mut self,
-        delegator: AccountId,
-        current_epoch: u64,
-    ) -> u128 {
+    pub fn withdraw_undelegated(&mut self, delegator: AccountId, current_epoch: u64) -> u128 {
         let mut total = 0u128;
         self.undelegations.retain(|u| {
             if u.delegator == delegator && u.unlock_epoch <= current_epoch {
@@ -418,8 +426,7 @@ impl StakingContract {
             .ok_or(StakingError::ValidatorNotFound)?;
 
         if val.total_stake() > 0 {
-            val.accumulated_reward_per_token +=
-                reward * 1_000_000 / val.total_stake();
+            val.accumulated_reward_per_token += reward * 1_000_000 / val.total_stake();
         }
 
         Ok(())
@@ -509,7 +516,10 @@ impl StakingContract {
 
     /// Apply all pending key rotations that have reached their effective epoch.
     /// Call this at each epoch boundary.
-    pub fn apply_pending_rotations(&mut self, current_epoch: u64) -> Vec<(ValidatorId, ValidatorId)> {
+    pub fn apply_pending_rotations(
+        &mut self,
+        current_epoch: u64,
+    ) -> Vec<(ValidatorId, ValidatorId)> {
         let mut rotated = Vec::new();
 
         for val in &mut self.validators {
@@ -675,14 +685,19 @@ mod tests {
         sc.distribute_rewards(vid(1), 10_000).unwrap();
 
         let val = sc.get_validator(&vid(1)).unwrap();
-        assert_eq!(val.accumulated_reward_per_token, 10_000 * 1_000_000 / total_stake);
+        assert_eq!(
+            val.accumulated_reward_per_token,
+            10_000 * 1_000_000 / total_stake
+        );
     }
 
     #[test]
     fn duplicate_registration_fails() {
         let mut sc = StakingContract::new();
         sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap();
-        let err = sc.register_validator(vid(1), MIN_VALIDATOR_STAKE).unwrap_err();
+        let err = sc
+            .register_validator(vid(1), MIN_VALIDATOR_STAKE)
+            .unwrap_err();
         assert!(matches!(err, StakingError::AlreadyRegistered));
     }
 
@@ -705,7 +720,9 @@ mod tests {
             sc.register_validator(vid(i), MIN_VALIDATOR_STAKE).unwrap();
         }
 
-        let stake = sc.deregister_validator(&vid(1), GENESIS_LOCK_EPOCHS + 1).unwrap();
+        let stake = sc
+            .deregister_validator(&vid(1), GENESIS_LOCK_EPOCHS + 1)
+            .unwrap();
         assert_eq!(stake, 100_000);
         assert!(!sc.get_validator(&vid(1)).unwrap().is_active);
     }

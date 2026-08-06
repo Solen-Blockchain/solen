@@ -1,7 +1,7 @@
 //! VM sandbox and malformed input tests.
 
-use solen_vm::runtime::VmRuntime;
 use solen_vm::host::HostContext;
+use solen_vm::runtime::VmRuntime;
 
 // ── Test #21: Malformed WASM deploy validation ────────────────
 
@@ -16,20 +16,29 @@ fn reject_invalid_wasm_bytecode() {
 fn reject_wasm_missing_memory_export() {
     let vm = VmRuntime::new().unwrap();
     // Valid WASM module but no memory export.
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (func (export "call") (param i32 i32) (result i32) (i32.const 0))
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
     let result = vm.validate_bytecode(&wasm);
-    assert!(result.is_err(), "WASM without memory export must be rejected");
+    assert!(
+        result.is_err(),
+        "WASM without memory export must be rejected"
+    );
 }
 
 #[test]
 fn reject_wasm_missing_call_export() {
     let vm = VmRuntime::new().unwrap();
     // Valid WASM with memory but no call export.
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (memory (export "memory") 1)
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
     let result = vm.validate_bytecode(&wasm);
     assert!(result.is_err(), "WASM without call export must be rejected");
 }
@@ -37,10 +46,13 @@ fn reject_wasm_missing_call_export() {
 #[test]
 fn accept_valid_wasm() {
     let vm = VmRuntime::new().unwrap();
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (memory (export "memory") 1)
         (func (export "call") (param i32 i32) (result i32) (i32.const 0))
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
     let result = vm.validate_bytecode(&wasm);
     assert!(result.is_ok(), "valid WASM must be accepted");
 }
@@ -52,14 +64,17 @@ fn host_function_negative_length_does_not_panic() {
     let vm = VmRuntime::new().unwrap();
 
     // Contract that calls storage_read with len=-1 (i32::MIN mapped).
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (import "env" "storage_read" (func $read (param i32 i32 i32) (result i32)))
         (memory (export "memory") 1)
         (func (export "call") (param i32 i32) (result i32)
             ;; Call storage_read with key_ptr=0, key_len=-1 (negative), val_ptr=0
             (call $read (i32.const 0) (i32.const -1) (i32.const 0))
         )
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
     let ctx = HostContext::new([0u8; 32], 1);
@@ -75,7 +90,8 @@ fn host_function_huge_length_does_not_panic() {
     let vm = VmRuntime::new().unwrap();
 
     // Contract that calls storage_write with huge lengths.
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (import "env" "storage_write" (func $write (param i32 i32 i32 i32)))
         (memory (export "memory") 1)
         (func (export "call") (param i32 i32) (result i32)
@@ -83,7 +99,9 @@ fn host_function_huge_length_does_not_panic() {
             (call $write (i32.const 0) (i32.const 2147483647) (i32.const 0) (i32.const 0))
             (i32.const 0)
         )
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
     let ctx = HostContext::new([0u8; 32], 1);
@@ -97,7 +115,8 @@ fn set_return_data_bounded() {
     let vm = VmRuntime::new().unwrap();
 
     // Contract that calls set_return_data with huge length.
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (import "env" "set_return_data" (func $set_ret (param i32 i32)))
         (memory (export "memory") 1)
         (func (export "call") (param i32 i32) (result i32)
@@ -105,7 +124,9 @@ fn set_return_data_bounded() {
             (call $set_ret (i32.const 0) (i32.const 2000000000))
             (i32.const 0)
         )
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
     let ctx = HostContext::new([0u8; 32], 1);
@@ -128,7 +149,8 @@ fn emit_event_consumes_fuel() {
     let vm = VmRuntime::new().unwrap();
 
     // Contract that emits 1000 events in a loop.
-    let wasm = wat::parse_str(r#"(module
+    let wasm = wat::parse_str(
+        r#"(module
         (import "env" "emit_event" (func $emit (param i32 i32 i32 i32)))
         (memory (export "memory") 1)
         (data (i32.const 0) "test")
@@ -145,7 +167,9 @@ fn emit_event_consumes_fuel() {
             )
             (i32.const 0)
         )
-    )"#).unwrap();
+    )"#,
+    )
+    .unwrap();
 
     let code_hash = solen_crypto::blake3_hash(&wasm);
     let ctx = HostContext::new([0u8; 32], 1);

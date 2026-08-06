@@ -119,9 +119,7 @@ impl EncryptedMempool {
     pub fn expire_commitments(&self, current_block: u64) -> usize {
         let mut commitments = self.commitments.lock().unwrap();
         let before = commitments.len();
-        commitments.retain(|_, c| {
-            current_block <= c.submitted_at + self.reveal_window
-        });
+        commitments.retain(|_, c| current_block <= c.submitted_at + self.reveal_window);
         before - commitments.len()
     }
 

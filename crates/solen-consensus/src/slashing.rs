@@ -29,9 +29,9 @@ impl SlashingReason {
     /// Penalty in basis points (out of 10_000).
     pub fn penalty_bps(&self) -> u64 {
         match self {
-            SlashingReason::DoubleSign { .. } => 1000,        // 10% slash
-            SlashingReason::Downtime { .. } => 100,           // 1% slash
-            SlashingReason::InvalidStateRoot { .. } => 500,   // 5% slash
+            SlashingReason::DoubleSign { .. } => 1000, // 10% slash
+            SlashingReason::Downtime { .. } => 100,    // 1% slash
+            SlashingReason::InvalidStateRoot { .. } => 500, // 5% slash
         }
     }
 }
@@ -222,10 +222,8 @@ mod tests {
             state_root: [2; 32], // different state root → different block
             ..header_a.clone()
         };
-        header_a.proposer_signature =
-            kp.sign(&crate::engine::block_hash(&header_a)).to_vec();
-        header_b.proposer_signature =
-            kp.sign(&crate::engine::block_hash(&header_b)).to_vec();
+        header_a.proposer_signature = kp.sign(&crate::engine::block_hash(&header_a)).to_vec();
+        header_b.proposer_signature = kp.sign(&crate::engine::block_hash(&header_b)).to_vec();
 
         let evidence = check_double_sign(&header_a, &header_b);
         assert!(evidence.is_some());

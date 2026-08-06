@@ -127,7 +127,11 @@ fn read_sample(engine: &ConsensusEngine, contract: &[u8; 32]) -> Option<Sample> 
     let store: &dyn solen_storage::StateStore = &**guard;
     let pool = read_u128(store, &cs_key(contract, b"total_pooled_solen"))?;
     let supply = read_u128(store, &cs_key(contract, b"total_supply"))?;
-    Some(Sample { ts_ms: now_ms(), pool, supply })
+    Some(Sample {
+        ts_ms: now_ms(),
+        pool,
+        supply,
+    })
 }
 
 fn parse_addr(hex: &str) -> Option<[u8; 32]> {
@@ -215,9 +219,7 @@ fn rate_f64(s: &Sample) -> f64 {
     (s.pool as f64) / (s.supply as f64)
 }
 
-pub async fn get_stsolen_apy(
-    State(state): State<crate::api::ApiState>,
-) -> Json<ApyResponse> {
+pub async fn get_stsolen_apy(State(state): State<crate::api::ApiState>) -> Json<ApyResponse> {
     let samples = state.stsolen_apy.clone();
     let latest = match samples.latest() {
         Some(s) => s,

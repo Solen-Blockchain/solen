@@ -66,7 +66,14 @@ impl RocksStore {
             // Exclude non-execution keys from the state root.
             // Block storage and chain metadata differ across validators
             // based on timing, which would cause false state divergence.
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") || k.starts_with(b"__last_attestation__") {
+            if k.starts_with(b"block/")
+                || k.starts_with(b"__chain_meta__")
+                || k.starts_with(b"__chain_id__")
+                || k.starts_with(b"slash/")
+                || k.starts_with(b"source/")
+                || k.starts_with(b"__finalized_checkpoint__")
+                || k.starts_with(b"__last_attestation__")
+            {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();
@@ -131,7 +138,9 @@ impl Drop for CheckpointStore {
 
 impl StateStore for CheckpointStore {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.db.get(key).map_err(|e| StorageError::Backend(e.to_string()))
+        self.db
+            .get(key)
+            .map_err(|e| StorageError::Backend(e.to_string()))
     }
 
     fn put(&mut self, _key: &[u8], _value: &[u8]) -> Result<(), StorageError> {
@@ -149,7 +158,14 @@ impl StateStore for CheckpointStore {
                 Ok(kv) => kv,
                 Err(_) => continue, // Skip corrupted entries.
             };
-            if k.starts_with(b"block/") || k.starts_with(b"__chain_meta__") || k.starts_with(b"__chain_id__") || k.starts_with(b"slash/") || k.starts_with(b"source/") || k.starts_with(b"__finalized_checkpoint__") || k.starts_with(b"__last_attestation__") {
+            if k.starts_with(b"block/")
+                || k.starts_with(b"__chain_meta__")
+                || k.starts_with(b"__chain_id__")
+                || k.starts_with(b"slash/")
+                || k.starts_with(b"source/")
+                || k.starts_with(b"__finalized_checkpoint__")
+                || k.starts_with(b"__last_attestation__")
+            {
                 continue;
             }
             let mut hasher = blake3::Hasher::new();
@@ -165,7 +181,9 @@ impl StateStore for CheckpointStore {
         let mut mem = crate::memory::MemoryStore::new();
         for item in self.db.iterator(IteratorMode::Start) {
             match item {
-                Ok((k, v)) => { let _ = mem.put(&k, &v); }
+                Ok((k, v)) => {
+                    let _ = mem.put(&k, &v);
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "RocksDB iteration error in checkpoint snapshot — skipping entry");
                 }
@@ -179,7 +197,8 @@ impl StateStore for CheckpointStore {
     }
 
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        Ok(self.db
+        Ok(self
+            .db
             .prefix_iterator(prefix)
             .filter_map(|item| item.ok())
             .take_while(|(k, _)| k.starts_with(prefix))
@@ -188,7 +207,8 @@ impl StateStore for CheckpointStore {
     }
 
     fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        Ok(self.db
+        Ok(self
+            .db
             .iterator(IteratorMode::Start)
             .filter_map(|item| item.ok())
             .map(|(k, v)| (k.to_vec(), v.to_vec()))
@@ -299,11 +319,14 @@ impl StateStore for RocksStore {
             batch.put(&k, &v);
             n += 1;
             if batch.len() >= 10_000 {
-                self.db.write(std::mem::take(&mut batch))
+                self.db
+                    .write(std::mem::take(&mut batch))
                     .map_err(|e| StorageError::Backend(e.to_string()))?;
             }
         }
-        self.db.write(batch).map_err(|e| StorageError::Backend(e.to_string()))?;
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         self.invalidate_root_cache();
         info!(path = %dir.display(), entries = n, "restored state from local RocksDB checkpoint");
         Ok(())
@@ -320,7 +343,9 @@ impl StateStore for RocksStore {
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
             match item {
-                Ok((k, v)) => { let _ = mem.put(&k, &v); }
+                Ok((k, v)) => {
+                    let _ = mem.put(&k, &v);
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "RocksDB iteration error in snapshot fallback — skipping entry");
                 }
@@ -449,8 +474,14 @@ mod tests {
         // Restore wholesale from the checkpoint — divergence is undone.
         store.restore_from_checkpoint(&ckpt_dir).unwrap();
         assert_eq!(store.state_root(), root_at_checkpoint, "root restored");
-        assert_eq!(store.get(&0u32.to_le_bytes()).unwrap(), Some(0u32.to_le_bytes().to_vec()));
-        assert_eq!(store.get(&49u32.to_le_bytes()).unwrap(), Some((49u32 * 7).to_le_bytes().to_vec()));
+        assert_eq!(
+            store.get(&0u32.to_le_bytes()).unwrap(),
+            Some(0u32.to_le_bytes().to_vec())
+        );
+        assert_eq!(
+            store.get(&49u32.to_le_bytes()).unwrap(),
+            Some((49u32 * 7).to_le_bytes().to_vec())
+        );
         // Keys created after the checkpoint are gone.
         assert_eq!(store.get(&60u32.to_le_bytes()).unwrap(), None);
     }

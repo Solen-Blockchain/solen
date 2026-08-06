@@ -50,17 +50,14 @@ impl SmartAccountBuilder {
 
     /// Add a guardian for recovery.
     pub fn with_guardian(mut self, guardian_id: AccountId) -> Self {
-        self.auth_methods
-            .push(AuthMethod::Guardian { guardian_id });
+        self.auth_methods.push(AuthMethod::Guardian { guardian_id });
         self
     }
 
     /// Add threshold (multi-sig) authentication.
     pub fn with_threshold(mut self, signers: Vec<[u8; 32]>, threshold: u16) -> Self {
-        self.auth_methods.push(AuthMethod::Threshold {
-            signers,
-            threshold,
-        });
+        self.auth_methods
+            .push(AuthMethod::Threshold { signers, threshold });
         self
     }
 
@@ -96,9 +93,7 @@ mod tests {
         let kp = Keypair::generate();
         let id = [1u8; 32];
 
-        let account = SmartAccountBuilder::new()
-            .with_keypair(&kp)
-            .build(id);
+        let account = SmartAccountBuilder::new().with_keypair(&kp).build(id);
 
         assert_eq!(account.id, id);
         assert_eq!(account.auth_methods.len(), 1);

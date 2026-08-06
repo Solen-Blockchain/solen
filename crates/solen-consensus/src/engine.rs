@@ -181,7 +181,10 @@ struct RollbackJournal {
 
 impl RollbackJournal {
     fn new(cap: usize) -> Self {
-        Self { entries: std::collections::VecDeque::new(), cap: cap.max(1) }
+        Self {
+            entries: std::collections::VecDeque::new(),
+            cap: cap.max(1),
+        }
     }
 
     /// Record block `height`'s reverse-delta. A non-contiguous height (after a
@@ -298,14 +301,8 @@ pub struct ConsensusEngine {
 
 impl ConsensusEngine {
     /// Create with a single validator (backward compatible).
-    pub fn new(
-        config: EngineConfig,
-        store: Box<dyn StateStore>,
-        mempool: Mempool,
-    ) -> Self {
-        let validator_set = ValidatorSet::new(vec![
-            ValidatorInfo::new(config.validator_id, 1000),
-        ]);
+    pub fn new(config: EngineConfig, store: Box<dyn StateStore>, mempool: Mempool) -> Self {
+        let validator_set = ValidatorSet::new(vec![ValidatorInfo::new(config.validator_id, 1000)]);
         Self::with_validators(config, store, mempool, validator_set)
     }
 
@@ -346,7 +343,11 @@ impl ConsensusEngine {
                 operations: vec![],
             };
             chain.push(placeholder);
-            info!(height = restored_height, epoch = restored_epoch, "restored chain height from state");
+            info!(
+                height = restored_height,
+                epoch = restored_epoch,
+                "restored chain height from state"
+            );
         }
 
         let mut epoch_manager = EpochManager::new();
@@ -376,7 +377,9 @@ impl ConsensusEngine {
             pending_reward_receipts: Arc::new(RwLock::new(Vec::new())),
             intent_pool: Arc::new(IntentPool::new(10_000)),
             epoch_seed: Arc::new(RwLock::new([0u8; 32])), // genesis epoch uses round-robin
-            finalized_checkpoints: Arc::new(RwLock::new(crate::checkpoint::FinalizedCheckpointStore::new())),
+            finalized_checkpoints: Arc::new(RwLock::new(
+                crate::checkpoint::FinalizedCheckpointStore::new(),
+            )),
             proof_registry: {
                 let mut reg = ProofVerifierRegistry::new();
                 reg.register_verifier(Arc::new(solen_execution::proof::MockVerifier));
@@ -475,18 +478,22 @@ impl ConsensusEngine {
     /// Check if we already attested at this height (crash recovery).
     pub fn last_attested_block(&self) -> Option<(u64, Hash)> {
         let store = self.store.read().unwrap();
-        store.get(b"__last_attestation__").ok().flatten().and_then(|data| {
-            if data.len() >= 40 {
-                let mut h = [0u8; 8];
-                h.copy_from_slice(&data[..8]);
-                let height = u64::from_le_bytes(h);
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&data[8..40]);
-                Some((height, hash))
-            } else {
-                None
-            }
-        })
+        store
+            .get(b"__last_attestation__")
+            .ok()
+            .flatten()
+            .and_then(|data| {
+                if data.len() >= 40 {
+                    let mut h = [0u8; 8];
+                    h.copy_from_slice(&data[..8]);
+                    let height = u64::from_le_bytes(h);
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&data[8..40]);
+                    Some((height, hash))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Current epoch seed for proposer selection randomization.
@@ -495,14 +502,19 @@ impl ConsensusEngine {
     }
 
     /// Finalized checkpoint store.
-    pub fn finalized_checkpoints(&self) -> Arc<RwLock<crate::checkpoint::FinalizedCheckpointStore>> {
+    pub fn finalized_checkpoints(
+        &self,
+    ) -> Arc<RwLock<crate::checkpoint::FinalizedCheckpointStore>> {
         self.finalized_checkpoints.clone()
     }
 
     /// Get the pending checkpoint info for broadcasting our attestation.
     pub fn pending_checkpoint(&self) -> Option<(u64, Hash, Hash)> {
         let cp_store = self.finalized_checkpoints.read().unwrap();
-        cp_store.pending.as_ref().map(|p| (p.height, p.block_hash, p.state_root))
+        cp_store
+            .pending
+            .as_ref()
+            .map(|p| (p.height, p.block_hash, p.state_root))
     }
 
     /// Add a checkpoint attestation from a validator.
@@ -578,7 +590,9 @@ impl ConsensusEngine {
     /// Returns true if the validator appears to be partitioned from the network
     /// (too many consecutive force-finalizations without quorum).
     pub fn is_likely_partitioned(&self) -> bool {
-        self.consecutive_force_finalizes.load(std::sync::atomic::Ordering::Relaxed) > 3
+        self.consecutive_force_finalizes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 3
     }
 
     /// While partitioned, returns true at most once per `PARTITION_PROBE_INTERVAL`
@@ -606,18 +620,21 @@ impl ConsensusEngine {
 
     /// Reset partition state — called when connectivity is restored.
     pub fn reset_partition_state(&self) {
-        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_force_finalizes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         *self.last_partition_probe_at.write().unwrap() = None;
     }
 
     /// Signal that the node needs a full snapshot resync.
     pub fn request_resync(&self) {
-        self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.needs_resync
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Check and clear the resync flag.
     pub fn take_resync_request(&self) -> bool {
-        self.needs_resync.swap(false, std::sync::atomic::Ordering::Relaxed)
+        self.needs_resync
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Peek whether a resync has been requested, without clearing it. Used by
@@ -634,7 +651,8 @@ impl ConsensusEngine {
     }
 
     pub fn set_resyncing(&self, v: bool) {
-        self.resyncing.store(v, std::sync::atomic::Ordering::Relaxed);
+        self.resyncing
+            .store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Reset the engine to a specific height/epoch after a snapshot restore.
@@ -649,8 +667,10 @@ impl ConsensusEngine {
         self.v2_revotes.lock().unwrap().clear();
         self.v2_invalid.write().unwrap().clear();
         self.mempool.clear();
-        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_force_finalizes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_sync_reverts
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         *self.last_partition_probe_at.write().unwrap() = None;
         *self.dropped_block_height.write().unwrap() = None;
         // The journal can't span a snapshot discontinuity.
@@ -681,7 +701,11 @@ impl ConsensusEngine {
                     timestamp_ms: 0,
                     proposer_signature: vec![],
                 },
-                result: BlockResult { state_root: [0u8; 32], receipts: vec![], gas_used: 0 },
+                result: BlockResult {
+                    state_root: [0u8; 32],
+                    receipts: vec![],
+                    gas_used: 0,
+                },
                 attestations: vec![],
                 operations: vec![],
             });
@@ -748,7 +772,10 @@ impl ConsensusEngine {
         match self.rollback_journal.read().unwrap().min_rollback_target() {
             Some(min) if target >= min => {}
             _ => {
-                warn!(target, tip, "rollback target outside journal range — cannot roll back in place");
+                warn!(
+                    target,
+                    tip, "rollback target outside journal range — cannot roll back in place"
+                );
                 return false;
             }
         }
@@ -800,7 +827,8 @@ impl ConsensusEngine {
         self.pending_attestations.write().unwrap().clear();
         self.early_attestations.write().unwrap().clear();
         *self.dropped_block_height.write().unwrap() = None;
-        self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_force_finalizes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let target_epoch = target / crate::epoch::EPOCH_LENGTH;
         {
@@ -812,7 +840,11 @@ impl ConsensusEngine {
             save_chain_meta(store.as_mut(), target, target_epoch);
         }
 
-        info!(from = tip, to = target, "rolled back to common ancestor in place (no snapshot)");
+        info!(
+            from = tip,
+            to = target,
+            "rolled back to common ancestor in place (no snapshot)"
+        );
         true
     }
 
@@ -962,7 +994,8 @@ impl ConsensusEngine {
             // Resync is the safe fallback; with the finalize-mismatch fix a single
             // resyncing node no longer halts the fleet.
             warn!("store still drifted from finalized tip after undo — requesting resync to avoid proposing a divergent block");
-            self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.needs_resync
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -999,7 +1032,9 @@ impl ConsensusEngine {
                 };
                 match store.get(&key) {
                     Ok(Some(data)) => {
-                        if let Ok(account) = borsh::from_slice::<solen_types::account::Account>(&data) {
+                        if let Ok(account) =
+                            borsh::from_slice::<solen_types::account::Account>(&data)
+                        {
                             op.nonce >= account.nonce
                         } else {
                             true
@@ -1047,7 +1082,9 @@ impl ConsensusEngine {
         // pending for at least 2 blocks (giving external solvers priority).
         let pending = self.intent_pool.pending_intents();
         if !pending.is_empty() {
-            let solver = DirectTransferSolver { id: self.config.validator_id };
+            let solver = DirectTransferSolver {
+                id: self.config.validator_id,
+            };
             let current_height = self.height();
 
             for intent in &pending {
@@ -1059,7 +1096,8 @@ impl ConsensusEngine {
                 } else {
                     // Only use built-in solver if intent has been pending for > 2 blocks.
                     // This gives external solvers a fair window to submit solutions.
-                    let blocks_pending = current_height.saturating_sub(intent.expiry_height.saturating_sub(500));
+                    let blocks_pending =
+                        current_height.saturating_sub(intent.expiry_height.saturating_sub(500));
                     if blocks_pending >= 2 {
                         solver.solve(intent)
                     } else {
@@ -1074,7 +1112,7 @@ impl ConsensusEngine {
                     //       + num_constraints[4] + encoded_constraints
                     let mut args = Vec::new();
                     args.extend_from_slice(&intent.id.to_le_bytes()); // intent_id[8]
-                    args.extend_from_slice(&sol.solver);              // solver[32]
+                    args.extend_from_slice(&sol.solver); // solver[32]
                     args.extend_from_slice(&sol.claimed_tip.to_le_bytes()); // claimed_tip[16]
 
                     let mut transfer_count: u32 = 0;
@@ -1083,7 +1121,9 @@ impl ConsensusEngine {
 
                     for op in &sol.operations {
                         for action in &op.actions {
-                            if let solen_types::transaction::Action::Transfer { to, amount } = action {
+                            if let solen_types::transaction::Action::Transfer { to, amount } =
+                                action
+                            {
                                 args.extend_from_slice(to);
                                 args.extend_from_slice(&amount.to_le_bytes());
                                 transfer_count += 1;
@@ -1092,7 +1132,7 @@ impl ConsensusEngine {
                     }
 
                     // Patch transfer count.
-                    args[count_pos..count_pos+4].copy_from_slice(&transfer_count.to_le_bytes());
+                    args[count_pos..count_pos + 4].copy_from_slice(&transfer_count.to_le_bytes());
 
                     // Encode constraints so the system call can verify them.
                     // Format: num_constraints[4] + (type[1] + constraint_data)*N
@@ -1105,17 +1145,27 @@ impl ConsensusEngine {
                     for c in &intent.constraints {
                         use solen_intents::types::Constraint;
                         match c {
-                            Constraint::MinBalance { account, min_amount } => {
+                            Constraint::MinBalance {
+                                account,
+                                min_amount,
+                            } => {
                                 args.push(0);
                                 args.extend_from_slice(account);
                                 args.extend_from_slice(&min_amount.to_le_bytes());
                             }
-                            Constraint::MaxSpend { account, max_amount } => {
+                            Constraint::MaxSpend {
+                                account,
+                                max_amount,
+                            } => {
                                 args.push(1);
                                 args.extend_from_slice(account);
                                 args.extend_from_slice(&max_amount.to_le_bytes());
                             }
-                            Constraint::RequireTransfer { from, to, min_amount } => {
+                            Constraint::RequireTransfer {
+                                from,
+                                to,
+                                min_amount,
+                            } => {
                                 args.push(2);
                                 args.extend_from_slice(from);
                                 args.extend_from_slice(to);
@@ -1129,8 +1179,11 @@ impl ConsensusEngine {
                                 args.extend_from_slice(method_bytes);
                             }
                             Constraint::CrossChainSwap {
-                                input_amount, min_output, destination_chain,
-                                destination_address, output_token,
+                                input_amount,
+                                min_output,
+                                destination_chain,
+                                destination_address,
+                                output_token,
                             } => {
                                 args.push(4); // type 4 = CrossChainSwap
                                 args.extend_from_slice(&input_amount.to_le_bytes());
@@ -1182,7 +1235,8 @@ impl ConsensusEngine {
         // (recorded on finalization, keeping the journal aligned with the chain).
         let (result, revert) = {
             let mut store = self.store.write().unwrap();
-            self.executor.execute_block_journaled(store.as_mut(), &ops, height)
+            self.executor
+                .execute_block_journaled(store.as_mut(), &ops, height)
         };
 
         let epoch = {
@@ -1241,14 +1295,22 @@ impl ConsensusEngine {
             };
 
             self.chain.write().unwrap().push(block.clone());
-            self.rollback_journal.write().unwrap().record(height, revert);
+            self.rollback_journal
+                .write()
+                .unwrap()
+                .record(height, revert);
             self.persist_block_and_meta(&block);
             self.emit_block_events(&block);
             self.mempool.remove_finalized(&block.operations);
 
             self.try_epoch_transition(height);
 
-            info!(height, ops = op_count, epoch, "block finalized (single validator)");
+            info!(
+                height,
+                ops = op_count,
+                epoch,
+                "block finalized (single validator)"
+            );
 
             ProducedBlock {
                 finalized: Some(block),
@@ -1263,28 +1325,46 @@ impl ConsensusEngine {
             // and cast our self-vote. v2_record_vote enqueues a revote for the
             // node layer to broadcast.
             if self.fc_v2_active(height) {
-                self.v2_blocks.write().unwrap().entry(height).or_default().insert(
-                    bh,
-                    PendingBlock {
-                        header: header.clone(),
-                        operations: ops.clone(),
-                        proposed_at: std::time::Instant::now(),
-                        already_executed: true,
-                        result: Some(result),
-                        revert: Some(revert),
-                        mismatch_count: 0,
-                    },
-                );
+                self.v2_blocks
+                    .write()
+                    .unwrap()
+                    .entry(height)
+                    .or_default()
+                    .insert(
+                        bh,
+                        PendingBlock {
+                            header: header.clone(),
+                            operations: ops.clone(),
+                            proposed_at: std::time::Instant::now(),
+                            already_executed: true,
+                            result: Some(result),
+                            revert: Some(revert),
+                            mismatch_count: 0,
+                        },
+                    );
                 self.persist_last_attestation(height, &bh);
                 // Cast our self-vote and ENQUEUE it for the node layer to
                 // broadcast (v2_reevaluate only enqueues on a vote *change*, but
                 // here we're the proposer casting a fresh vote for our own block).
-                self.v2_votes.write().unwrap().entry(height).or_default()
+                self.v2_votes
+                    .write()
+                    .unwrap()
+                    .entry(height)
+                    .or_default()
                     .insert(self.config.validator_id, bh);
                 self.v2_revotes.lock().unwrap().push((height, bh));
                 self.v2_reevaluate(height);
-                info!(height, ops = op_count, epoch, "block proposed (v2), waiting for attestations");
-                return ProducedBlock { finalized: None, header, operations: ops };
+                info!(
+                    height,
+                    ops = op_count,
+                    epoch,
+                    "block proposed (v2), waiting for attestations"
+                );
+                return ProducedBlock {
+                    finalized: None,
+                    header,
+                    operations: ops,
+                };
             }
 
             // Store as pending, self-attest,
@@ -1308,7 +1388,12 @@ impl ConsensusEngine {
             // Self-attest.
             self.accept_attestation(self.config.validator_id, height, bh);
 
-            info!(height, ops = op_count, epoch, "block proposed, waiting for attestations");
+            info!(
+                height,
+                ops = op_count,
+                epoch,
+                "block proposed, waiting for attestations"
+            );
 
             ProducedBlock {
                 finalized: None,
@@ -1435,13 +1520,11 @@ impl ConsensusEngine {
     /// store as pending. Execution happens in `finalize_pending_block`
     /// after quorum is reached. This prevents state corruption from
     /// rejected blocks.
-    pub fn accept_block(
-        &self,
-        header: &BlockHeader,
-        operations: &[UserOperation],
-    ) -> bool {
+    pub fn accept_block(&self, header: &BlockHeader, operations: &[UserOperation]) -> bool {
         // Don't accept blocks while a snapshot restore is in progress.
-        if self.is_resyncing() { return false; }
+        if self.is_resyncing() {
+            return false;
+        }
 
         let (our_height, expected_height, fork_detected) = {
             let chain = self.chain.read().unwrap();
@@ -1685,7 +1768,9 @@ impl ConsensusEngine {
 
                 // Different block at same height from the same proposer = double-sign.
                 if is_same_proposer {
-                    if let Some(evidence) = crate::slashing::check_double_sign(&existing_header, header) {
+                    if let Some(evidence) =
+                        crate::slashing::check_double_sign(&existing_header, header)
+                    {
                         warn!(
                             height = header.height,
                             proposer = ?&header.proposer[..4],
@@ -1704,9 +1789,13 @@ impl ConsensusEngine {
                 let order = vs.proposer_order_for_height(header.height, &seed);
                 drop(vs);
 
-                let existing_rank = order.iter().position(|id| *id == existing_header.proposer)
+                let existing_rank = order
+                    .iter()
+                    .position(|id| *id == existing_header.proposer)
                     .unwrap_or(usize::MAX);
-                let new_rank = order.iter().position(|id| *id == header.proposer)
+                let new_rank = order
+                    .iter()
+                    .position(|id| *id == header.proposer)
                     .unwrap_or(usize::MAX);
 
                 if new_rank < existing_rank {
@@ -1733,7 +1822,10 @@ impl ConsensusEngine {
 
                     // Remove old pending block and its attestations.
                     self.pending_blocks.write().unwrap().remove(&header.height);
-                    self.pending_attestations.write().unwrap().remove(&header.height);
+                    self.pending_attestations
+                        .write()
+                        .unwrap()
+                        .remove(&header.height);
                     // Fall through to accept the new block below.
                 } else {
                     debug!(
@@ -1774,7 +1866,8 @@ impl ConsensusEngine {
         let bh = block_hash(header);
         let early: Vec<(ValidatorId, u64, Hash)> = {
             let mut buf = self.early_attestations.write().unwrap();
-            let matching: Vec<_> = buf.iter()
+            let matching: Vec<_> = buf
+                .iter()
                 .filter(|(_, h, hash, _)| *h == header.height && *hash == bh)
                 .map(|(v, h, hash, _)| (*v, *h, *hash))
                 .collect();
@@ -1799,9 +1892,8 @@ impl ConsensusEngine {
         signature: &[u8; 64],
     ) -> bool {
         // Verify signature over the domain-separated attestation payload.
-        let payload = Self::attestation_signing_payload(
-            self.config.chain_id, block_height, &attested_hash,
-        );
+        let payload =
+            Self::attestation_signing_payload(self.config.chain_id, block_height, &attested_hash);
         if solen_crypto::verify(&validator_id, &payload, signature).is_err() {
             warn!(
                 height = block_height,
@@ -1816,7 +1908,7 @@ impl ConsensusEngine {
     /// Includes chain_id to prevent cross-network replay.
     pub fn attestation_signing_payload(chain_id: u64, height: u64, block_hash: &Hash) -> Vec<u8> {
         let mut payload = Vec::with_capacity(56);
-        payload.extend_from_slice(b"SOLEN_ATT");  // domain separator
+        payload.extend_from_slice(b"SOLEN_ATT"); // domain separator
         payload.extend_from_slice(&chain_id.to_le_bytes());
         payload.extend_from_slice(&height.to_le_bytes());
         payload.extend_from_slice(block_hash);
@@ -1849,15 +1941,19 @@ impl ConsensusEngine {
         let bh = block_hash(header);
         {
             let mut blocks = self.v2_blocks.write().unwrap();
-            blocks.entry(height).or_default().entry(bh).or_insert_with(|| PendingBlock {
-                header: header.clone(),
-                operations: operations.to_vec(),
-                proposed_at: std::time::Instant::now(),
-                already_executed: false,
-                result: None,
-                revert: None,
-                mismatch_count: 0,
-            });
+            blocks
+                .entry(height)
+                .or_default()
+                .entry(bh)
+                .or_insert_with(|| PendingBlock {
+                    header: header.clone(),
+                    operations: operations.to_vec(),
+                    proposed_at: std::time::Instant::now(),
+                    already_executed: false,
+                    result: None,
+                    revert: None,
+                    mismatch_count: 0,
+                });
         }
         self.v2_reevaluate(height);
     }
@@ -1903,9 +1999,14 @@ impl ConsensusEngine {
                 continue;
             }
             // Must hold the block to be a viable leader.
-            let Some(pb) = candidates.get(hash) else { continue };
+            let Some(pb) = candidates.get(hash) else {
+                continue;
+            };
             let stake = vs.stake_of(voters);
-            let rank = order.iter().position(|id| *id == pb.header.proposer).unwrap_or(usize::MAX);
+            let rank = order
+                .iter()
+                .position(|id| *id == pb.header.proposer)
+                .unwrap_or(usize::MAX);
             let better = match best {
                 None => true,
                 Some((_, bstake, brank)) => stake > bstake || (stake == bstake && rank < brank),
@@ -1941,8 +2042,13 @@ impl ConsensusEngine {
                     continue;
                 }
                 if vs.has_quorum(voters) {
-                    let have = self.v2_blocks.read().unwrap()
-                        .get(&height).map(|m| m.contains_key(h)).unwrap_or(false);
+                    let have = self
+                        .v2_blocks
+                        .read()
+                        .unwrap()
+                        .get(&height)
+                        .map(|m| m.contains_key(h))
+                        .unwrap_or(false);
                     if have {
                         winner = Some(*h);
                         break;
@@ -1971,10 +2077,20 @@ impl ConsensusEngine {
         if !we_are_validator {
             return;
         }
-        let our_vote = self.v2_votes.read().unwrap()
-            .get(&height).and_then(|m| m.get(&our_id)).copied();
+        let our_vote = self
+            .v2_votes
+            .read()
+            .unwrap()
+            .get(&height)
+            .and_then(|m| m.get(&our_id))
+            .copied();
         if our_vote != Some(leader) {
-            self.v2_votes.write().unwrap().entry(height).or_default().insert(our_id, leader);
+            self.v2_votes
+                .write()
+                .unwrap()
+                .entry(height)
+                .or_default()
+                .insert(our_id, leader);
             self.v2_revotes.lock().unwrap().push((height, leader));
             // Our own move may have completed quorum for the leader.
             let voters = self.v2_tally(height).remove(&leader).unwrap_or_default();
@@ -1988,16 +2104,34 @@ impl ConsensusEngine {
     /// Finalize a specific v2 candidate block by hash, reusing the legacy
     /// finalize path (execution + state-root verification + chain push).
     fn v2_finalize(&self, height: u64, hash: Hash) {
-        let pb = self.v2_blocks.write().unwrap()
-            .get_mut(&height).and_then(|m| m.remove(&hash));
+        let pb = self
+            .v2_blocks
+            .write()
+            .unwrap()
+            .get_mut(&height)
+            .and_then(|m| m.remove(&hash));
         let Some(pb) = pb else { return };
-        let atts: Vec<Attestation> = self.v2_votes.read().unwrap().get(&height)
-            .map(|m| m.iter().filter(|(_, h)| **h == hash)
-                .map(|(vid, _)| Attestation { validator_id: *vid, block_height: height, block_hash: hash })
-                .collect())
+        let atts: Vec<Attestation> = self
+            .v2_votes
+            .read()
+            .unwrap()
+            .get(&height)
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, h)| **h == hash)
+                    .map(|(vid, _)| Attestation {
+                        validator_id: *vid,
+                        block_height: height,
+                        block_hash: hash,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         self.pending_blocks.write().unwrap().insert(height, pb);
-        self.pending_attestations.write().unwrap().insert(height, atts);
+        self.pending_attestations
+            .write()
+            .unwrap()
+            .insert(height, atts);
         self.finalize_pending_block(height);
         // Drop v2 bookkeeping at/below the finalized height.
         self.v2_blocks.write().unwrap().retain(|h, _| *h > height);
@@ -2074,8 +2208,16 @@ impl ConsensusEngine {
                     buf.retain(|(_, _, _, t)| t.elapsed().as_secs() < EARLY_ATT_TTL_SECS);
                     if buf.len() < MAX_EARLY_ATTESTATIONS {
                         // Dedup before inserting.
-                        if !buf.iter().any(|(v, h, _, _)| *v == validator_id && *h == block_height) {
-                            buf.push((validator_id, block_height, attested_hash, std::time::Instant::now()));
+                        if !buf
+                            .iter()
+                            .any(|(v, h, _, _)| *v == validator_id && *h == block_height)
+                        {
+                            buf.push((
+                                validator_id,
+                                block_height,
+                                attested_hash,
+                                std::time::Instant::now(),
+                            ));
                         }
                     }
                     return false;
@@ -2105,8 +2247,7 @@ impl ConsensusEngine {
             let atts = self.pending_attestations.read().unwrap();
             let vs = self.validator_set.read().unwrap();
             if let Some(attestations) = atts.get(&block_height) {
-                let ids: Vec<ValidatorId> =
-                    attestations.iter().map(|a| a.validator_id).collect();
+                let ids: Vec<ValidatorId> = attestations.iter().map(|a| a.validator_id).collect();
                 vs.has_quorum(&ids)
             } else {
                 false
@@ -2154,7 +2295,10 @@ impl ConsensusEngine {
             let exec_result = {
                 let mut store = self.store.write().unwrap();
                 self.executor.execute_block_checked(
-                    store.as_mut(), &pb.operations, height, &pb.header.state_root,
+                    store.as_mut(),
+                    &pb.operations,
+                    height,
+                    &pb.header.state_root,
                 )
             };
 
@@ -2182,7 +2326,12 @@ impl ConsensusEngine {
                         theirs = ?&pb.header.state_root[..4],
                         "state root mismatch on finalization — rejected invalid block, awaiting backup proposer"
                     );
-                    self.v2_invalid.write().unwrap().entry(height).or_default().insert(bad);
+                    self.v2_invalid
+                        .write()
+                        .unwrap()
+                        .entry(height)
+                        .or_default()
+                        .insert(bad);
                     // Retract our own vote for the bad hash so it loses our quorum
                     // weight; every honest node does the same, so it can never be
                     // re-selected as the v2 leader.
@@ -2201,7 +2350,8 @@ impl ConsensusEngine {
                     theirs = ?&pb.header.state_root[..4],
                     "state root mismatch on finalization — reverted, requesting snapshot resync"
                 );
-                self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.needs_resync
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             };
 
@@ -2216,7 +2366,10 @@ impl ConsensusEngine {
         };
 
         self.chain.write().unwrap().push(block.clone());
-        self.rollback_journal.write().unwrap().record(height, block_revert);
+        self.rollback_journal
+            .write()
+            .unwrap()
+            .record(height, block_revert);
         self.persist_block_and_meta(&block);
         self.emit_block_events(&block);
         // We advanced past `height`; execution-invalid markers at/below it are now
@@ -2240,7 +2393,9 @@ impl ConsensusEngine {
             if let Some(designated_id) = designated {
                 if designated_id != block.header.proposer {
                     let mut vs = self.validator_set.write().unwrap();
-                    if let Some(evidence) = crate::slashing::record_missed_block(&mut vs, &designated_id) {
+                    if let Some(evidence) =
+                        crate::slashing::record_missed_block(&mut vs, &designated_id)
+                    {
                         drop(vs);
                         self.process_slashing(&evidence);
                     }
@@ -2259,7 +2414,8 @@ impl ConsensusEngine {
         // Only reset force-finalization counter if we actually had quorum
         // (attestations present). Force-finalized blocks have no attestations.
         if had_quorum_attestations {
-            self.consecutive_force_finalizes.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.consecutive_force_finalizes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
         info!(
@@ -2517,7 +2673,11 @@ impl ConsensusEngine {
 
     /// Load persisted blocks from the state store (for indexer replay).
     /// Loads at most `max_blocks` starting from `from_height`.
-    pub fn load_persisted_blocks_range(&self, from_height: u64, max_blocks: usize) -> Vec<FinalizedBlock> {
+    pub fn load_persisted_blocks_range(
+        &self,
+        from_height: u64,
+        max_blocks: usize,
+    ) -> Vec<FinalizedBlock> {
         let store = self.store.read().unwrap();
         let mut blocks = Vec::new();
         let mut height = from_height;
@@ -2654,7 +2814,10 @@ impl ConsensusEngine {
         let exec_result = {
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_checked(
-                store.as_mut(), operations, height, &header.state_root,
+                store.as_mut(),
+                operations,
+                height,
+                &header.state_root,
             )
         };
 
@@ -2682,13 +2845,16 @@ impl ConsensusEngine {
                     consecutive = n,
                     "stranded on a forked tip (canonical blocks won't apply) — requesting resync"
                 );
-                self.needs_resync.store(true, std::sync::atomic::Ordering::Relaxed);
-                self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.needs_resync
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.consecutive_sync_reverts
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
             return false;
         };
         // A synced block applied cleanly — we're tracking canonical, not stranded.
-        self.consecutive_sync_reverts.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_sync_reverts
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Use synced receipts if available (they include user tx events).
         // Fall back to execution receipts (which only have epoch rewards).
@@ -2712,7 +2878,10 @@ impl ConsensusEngine {
         };
 
         self.chain.write().unwrap().push(block.clone());
-        self.rollback_journal.write().unwrap().record(height, revert);
+        self.rollback_journal
+            .write()
+            .unwrap()
+            .record(height, revert);
         self.persist_block_and_meta(&block);
 
         // Advance epoch counter (rewards already handled by executor).
@@ -2736,7 +2905,8 @@ impl ConsensusEngine {
             };
 
             // Build the set of active staking validators.
-            let active_ids: std::collections::HashSet<_> = staking.validators
+            let active_ids: std::collections::HashSet<_> = staking
+                .validators
                 .iter()
                 .filter(|sv| sv.is_active)
                 .map(|sv| sv.id)
@@ -2747,23 +2917,30 @@ impl ConsensusEngine {
             // than honest validators can detect and respond.
             // Exception: during bootstrapping (< 4 validators), allow unlimited changes.
             let active_count = vs.active_count();
-            let current_total_stake: u128 = vs.all().iter()
+            let current_total_stake: u128 = vs
+                .all()
+                .iter()
                 .filter(|v| v.is_active())
                 .map(|v| v.stake)
                 .sum();
-            let max_stake_change = if active_count >= 4 { current_total_stake / 3 } else { u128::MAX };
+            let max_stake_change = if active_count >= 4 {
+                current_total_stake / 3
+            } else {
+                u128::MAX
+            };
             let mut stake_changed: u128 = 0;
 
             // Add new validators and reactivate unjailed ones.
             for sv in &staking.validators {
-                if !sv.is_active { continue; }
+                if !sv.is_active {
+                    continue;
+                }
                 if let Some(v) = vs.get_mut(&sv.id) {
                     // Update stake and reactivate if unjailed on-chain.
                     let old_stake = v.stake;
                     v.stake = sv.total_stake();
-                    stake_changed = stake_changed.saturating_add(
-                        (v.stake as i128 - old_stake as i128).unsigned_abs()
-                    );
+                    stake_changed = stake_changed
+                        .saturating_add((v.stake as i128 - old_stake as i128).unsigned_abs());
                     if !v.is_active() {
                         v.status = crate::validator::ValidatorStatus::Active;
                         v.missed_blocks = 0;
@@ -2776,7 +2953,9 @@ impl ConsensusEngine {
                 } else {
                     // New validator — check if adding them exceeds the change limit.
                     let new_stake = sv.total_stake();
-                    if stake_changed.saturating_add(new_stake) > max_stake_change && max_stake_change > 0 {
+                    if stake_changed.saturating_add(new_stake) > max_stake_change
+                        && max_stake_change > 0
+                    {
                         tracing::warn!(
                             validator = ?&sv.id[..4],
                             stake = new_stake,
@@ -2796,7 +2975,9 @@ impl ConsensusEngine {
             }
 
             // Remove validators that exited from staking (also bounded by change limit).
-            let to_remove: Vec<_> = vs.all().iter()
+            let to_remove: Vec<_> = vs
+                .all()
+                .iter()
                 .filter(|v| !active_ids.contains(&v.id))
                 .map(|v| (v.id, v.stake))
                 .collect();
@@ -2880,7 +3061,8 @@ impl ConsensusEngine {
                     // agreed on-chain state → identical on every node and
                     // restart-safe (no in-memory reset, no history lookback).
                     let store = self.store.read().unwrap();
-                    solen_system_contracts::epoch_randomness::EpochRandomness::load(store.as_ref()).seed
+                    solen_system_contracts::epoch_randomness::EpochRandomness::load(store.as_ref())
+                        .seed
                 } else {
                     // Legacy path: blake3 of the boundary block's agreed state_root.
                     solen_crypto::blake3_hash(&last_block.header.state_root)
@@ -2905,12 +3087,24 @@ impl ConsensusEngine {
         let mut atts = self.pending_attestations.write().unwrap();
         atts.retain(|h, _| *h > current_height);
         // v2 fork-choice candidates + votes at/below the synced height are stale.
-        self.v2_blocks.write().unwrap().retain(|h, _| *h > current_height);
-        self.v2_votes.write().unwrap().retain(|h, _| *h > current_height);
-        self.v2_invalid.write().unwrap().retain(|h, _| *h > current_height);
+        self.v2_blocks
+            .write()
+            .unwrap()
+            .retain(|h, _| *h > current_height);
+        self.v2_votes
+            .write()
+            .unwrap()
+            .retain(|h, _| *h > current_height);
+        self.v2_invalid
+            .write()
+            .unwrap()
+            .retain(|h, _| *h > current_height);
         let cleared = before - pending.len();
         if cleared > 0 {
-            info!(cleared, current_height, "cleared stale pending blocks after sync");
+            info!(
+                cleared,
+                current_height, "cleared stale pending blocks after sync"
+            );
         }
     }
 
@@ -2951,7 +3145,11 @@ impl ConsensusEngine {
         for height in stale_heights {
             // Double-check: only finalize the NEXT expected block.
             if height != self.height() + 1 {
-                debug!(height, our_height = self.height(), "skipping stale pending block");
+                debug!(
+                    height,
+                    our_height = self.height(),
+                    "skipping stale pending block"
+                );
                 continue;
             }
 
@@ -2969,7 +3167,10 @@ impl ConsensusEngine {
             };
 
             if should_drop {
-                info!(height, "dropping own block — other validators have a different block at this height");
+                info!(
+                    height,
+                    "dropping own block — other validators have a different block at this height"
+                );
                 self.pending_blocks.write().unwrap().remove(&height);
                 // Signal that we need sync by storing the dropped height.
                 *self.dropped_block_height.write().unwrap() = Some(height);
@@ -2982,7 +3183,8 @@ impl ConsensusEngine {
             // force-finalizing divergent chains.
             {
                 let atts = self.pending_attestations.read().unwrap();
-                let att_ids: Vec<_> = atts.get(&height)
+                let att_ids: Vec<_> = atts
+                    .get(&height)
                     .map(|a| a.iter().map(|att| att.validator_id).collect())
                     .unwrap_or_default();
                 let att_count = att_ids.len();
@@ -2997,7 +3199,10 @@ impl ConsensusEngine {
                 // Allow the first few blocks (height <= 3) without quorum to bootstrap
                 // the chain — peers need time to connect and exchange blocks.
                 if active_count > 1 && !has_quorum_stake && height > 3 {
-                    let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let force_count = self
+                        .consecutive_force_finalizes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     if force_count > 2 {
                         warn!(
                             height,
@@ -3018,7 +3223,10 @@ impl ConsensusEngine {
                 }
             }
 
-            let force_count = self.consecutive_force_finalizes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let force_count = self
+                .consecutive_force_finalizes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
 
             // If we've force-finalized too many blocks in a row, we're likely
             // partitioned from the network. Stop finalizing to prevent divergence.
@@ -3033,7 +3241,10 @@ impl ConsensusEngine {
                 continue;
             }
 
-            warn!(height, force_count, "quorum timeout — force-finalizing block");
+            warn!(
+                height,
+                force_count, "quorum timeout — force-finalizing block"
+            );
             self.finalize_pending_block(height);
             count += 1;
         }
@@ -3097,8 +3308,7 @@ impl ConsensusEngine {
 pub fn block_hash(header: &BlockHeader) -> Hash {
     let mut h = header.clone();
     h.proposer_signature = vec![];
-    let data = serde_json::to_vec(&h)
-        .expect("block header serialization must not fail");
+    let data = serde_json::to_vec(&h).expect("block header serialization must not fail");
     blake3_hash(&data)
 }
 
@@ -3127,7 +3337,6 @@ fn compute_receipts_root(result: &BlockResult) -> Hash {
         }
     }
 }
-
 
 /// Credit an account balance by the given amount.
 fn credit_account(store: &mut dyn StateStore, account_id: &[u8; 32], amount: u128) {
@@ -3301,7 +3510,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 500 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 500,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -3452,7 +3664,11 @@ mod tests {
         // against the captured values rather than hardcoded transfer math).
         let alice_at_target = engine_balance(&engine, &alice);
         let bob_at_target = engine_balance(&engine, &bob);
-        assert_eq!(bob_at_target, 1_000 + 800, "bob receives transfers (no fees on the recipient)");
+        assert_eq!(
+            bob_at_target,
+            1_000 + 800,
+            "bob receives transfers (no fees on the recipient)"
+        );
 
         // Three more blocks form the "forked suffix" to undo.
         produce_transfer(2, 100);
@@ -3468,14 +3684,25 @@ mod tests {
         // Roll back in place to the common ancestor.
         assert!(engine.rollback_to_height(target_h, &target_root));
         assert_eq!(engine.height(), target_h);
-        assert_eq!(engine.get_block(target_h).unwrap().header.state_root, target_root);
+        assert_eq!(
+            engine.get_block(target_h).unwrap().header.state_root,
+            target_root
+        );
         {
             let store = engine.store();
             let store = store.read().unwrap();
             assert_eq!(store.state_root(), target_root, "live store root restored");
         }
-        assert_eq!(engine_balance(&engine, &alice), alice_at_target, "alice balance restored");
-        assert_eq!(engine_balance(&engine, &bob), bob_at_target, "bob balance restored");
+        assert_eq!(
+            engine_balance(&engine, &alice),
+            alice_at_target,
+            "alice balance restored"
+        );
+        assert_eq!(
+            engine_balance(&engine, &bob),
+            bob_at_target,
+            "bob balance restored"
+        );
         // The forked suffix blocks are gone from the chain.
         assert!(engine.get_block(target_h + 1).is_none());
 
@@ -3503,7 +3730,10 @@ mod tests {
         let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
-        let config = EngineConfig { validator_id: ids[0], ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let head_h = engine.height();
@@ -3570,7 +3800,11 @@ mod tests {
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
         // v2 active from height 0.
-        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let head_h = engine.height();
@@ -3624,9 +3858,17 @@ mod tests {
         engine.accept_attestation(ids[3], next_h, hash_a);
         engine.accept_attestation(ids[4], next_h, hash_a);
 
-        assert_eq!(engine.height(), next_h, "vote-change converged -> block A finalized");
+        assert_eq!(
+            engine.height(),
+            next_h,
+            "vote-change converged -> block A finalized"
+        );
         let finalized = engine.get_block(next_h).unwrap();
-        assert_eq!(block_hash(&finalized.header), hash_a, "the converged hash finalized");
+        assert_eq!(
+            block_hash(&finalized.header),
+            hash_a,
+            "the converged hash finalized"
+        );
     }
 
     /// Regression for the 2026-07-16 mainnet halt. A proposer emits a block whose
@@ -3644,7 +3886,11 @@ mod tests {
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
         // We are ids[0], an honest validator; v2 active from height 0.
-        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let head_h = engine.height();
@@ -3676,7 +3922,10 @@ mod tests {
         // it's an empty block (real root == empty_root) but the header lies [7;32].
         let bad_block = make_block(1, [7u8; 32]);
         let bad_hash = block_hash(&bad_block);
-        assert!(engine.accept_block(&bad_block, &[]), "bad block accepted as candidate (header valid)");
+        assert!(
+            engine.accept_block(&bad_block, &[]),
+            "bad block accepted as candidate (header valid)"
+        );
 
         // The honest majority BLIND-attests the header — incl. us — to quorum (4/5).
         engine.accept_attestation(ids[0], next_h, bad_hash);
@@ -3699,14 +3948,24 @@ mod tests {
         let good_block = make_block(2, empty_root);
         let good_hash = block_hash(&good_block);
         assert_ne!(bad_hash, good_hash);
-        assert!(engine.accept_block(&good_block, &[]), "valid backup block accepted");
+        assert!(
+            engine.accept_block(&good_block, &[]),
+            "valid backup block accepted"
+        );
         engine.accept_attestation(ids[0], next_h, good_hash);
         engine.accept_attestation(ids[1], next_h, good_hash);
         engine.accept_attestation(ids[2], next_h, good_hash);
         engine.accept_attestation(ids[3], next_h, good_hash);
 
-        assert_eq!(engine.height(), next_h, "backup's valid block finalized — chain advanced, no halt");
-        assert_eq!(block_hash(&engine.get_block(next_h).unwrap().header), good_hash);
+        assert_eq!(
+            engine.height(),
+            next_h,
+            "backup's valid block finalized — chain advanced, no halt"
+        );
+        assert_eq!(
+            block_hash(&engine.get_block(next_h).unwrap().header),
+            good_hash
+        );
     }
 
     /// Root-cause regression for the 2026-07-16 divergence: the produce path
@@ -3721,7 +3980,11 @@ mod tests {
         let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
-        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         // Establish a real finalized tip: produce an empty block 1 and finalize it
@@ -3730,7 +3993,11 @@ mod tests {
         let hash1 = block_hash(&p1.header);
         engine.accept_attestation(ids[1], 1, hash1);
         engine.accept_attestation(ids[2], 1, hash1);
-        assert_eq!(engine.height(), 1, "block 1 finalized — we have a finalized tip");
+        assert_eq!(
+            engine.height(),
+            1,
+            "block 1 finalized — we have a finalized tip"
+        );
         let tip_root = engine.store().read().unwrap().state_root();
 
         // Simulate a superseded produce attempt at height 2 that eager-committed a
@@ -3743,7 +4010,10 @@ mod tests {
             store.commit_root();
         }
         let drifted_root = engine.store().read().unwrap().state_root();
-        assert_ne!(drifted_root, tip_root, "store drifted from finalized tip (leaked eager-commit)");
+        assert_ne!(
+            drifted_root, tip_root,
+            "store drifted from finalized tip (leaked eager-commit)"
+        );
 
         // Stash the matching pending block with its reverse-delta, as produce would.
         let mut header = BlockHeader {
@@ -3762,18 +4032,24 @@ mod tests {
         let mut revert: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
             std::collections::HashMap::new();
         revert.insert(leaked_key.clone(), None); // undo = delete (no prior value)
-        engine.v2_blocks.write().unwrap().entry(2).or_default().insert(
-            bh,
-            PendingBlock {
-                header,
-                operations: vec![],
-                proposed_at: std::time::Instant::now(),
-                already_executed: true,
-                result: None,
-                revert: Some(revert),
-                mismatch_count: 0,
-            },
-        );
+        engine
+            .v2_blocks
+            .write()
+            .unwrap()
+            .entry(2)
+            .or_default()
+            .insert(
+                bh,
+                PendingBlock {
+                    header,
+                    operations: vec![],
+                    proposed_at: std::time::Instant::now(),
+                    already_executed: true,
+                    result: None,
+                    revert: Some(revert),
+                    mismatch_count: 0,
+                },
+            );
 
         // Producing must first restore the store to the finalized tip.
         let _ = engine.produce_block();
@@ -3783,7 +4059,13 @@ mod tests {
             "produce restored the store to the finalized tip before building the next block"
         );
         assert!(
-            engine.store().read().unwrap().get(&leaked_key).unwrap().is_none(),
+            engine
+                .store()
+                .read()
+                .unwrap()
+                .get(&leaked_key)
+                .unwrap()
+                .is_none(),
             "the leaked eager-commit write was undone"
         );
     }
@@ -3797,22 +4079,36 @@ mod tests {
         let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
-        let config = EngineConfig { validator_id: ids[0], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let produced = engine.produce_block();
-        assert!(produced.finalized.is_none(), "multi-validator: not finalized on production");
+        assert!(
+            produced.finalized.is_none(),
+            "multi-validator: not finalized on production"
+        );
         assert_eq!(engine.height(), 0);
         let h = produced.header.height;
         let bh = block_hash(&produced.header);
 
         // Our self-vote is queued for the node layer to broadcast.
-        assert!(engine.take_v2_revotes().contains(&(h, bh)), "self-vote enqueued");
+        assert!(
+            engine.take_v2_revotes().contains(&(h, bh)),
+            "self-vote enqueued"
+        );
 
         // Peers attest -> 3/3 -> finalize (quorum needs all 3 in a 3-set).
         engine.accept_attestation(ids[1], h, bh);
         engine.accept_attestation(ids[2], h, bh);
-        assert_eq!(engine.height(), h, "produced block finalized via peer votes (v2)");
+        assert_eq!(
+            engine.height(),
+            h,
+            "produced block finalized via peer votes (v2)"
+        );
     }
 
     /// Safety: under v2 a validator's vote-change REPLACES its prior vote (never
@@ -3826,17 +4122,26 @@ mod tests {
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
         // Observer: validator_id is NOT in the set, so the engine never self-votes.
-        let config = EngineConfig { validator_id: [99u8; 32], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: [99u8; 32],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let empty_root = { engine.store().read().unwrap().state_root() };
         let next_h = engine.height() + 1;
         let make_block = |idx: usize| -> BlockHeader {
             let mut h = BlockHeader {
-                height: next_h, epoch: next_h / crate::epoch::EPOCH_LENGTH,
-                parent_hash: [0u8; 32], state_root: empty_root,
-                transactions_root: [0u8; 32], receipts_root: [0u8; 32],
-                proposer: ids[idx], timestamp_ms: 6000, proposer_signature: vec![],
+                height: next_h,
+                epoch: next_h / crate::epoch::EPOCH_LENGTH,
+                parent_hash: [0u8; 32],
+                state_root: empty_root,
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer: ids[idx],
+                timestamp_ms: 6000,
+                proposer_signature: vec![],
             };
             let bh = block_hash(&h);
             h.proposer_signature = kps[idx].sign(&bh).to_vec();
@@ -3856,7 +4161,11 @@ mod tests {
         assert_eq!(engine.height(), next_h - 1, "3/5 < quorum");
         // Duplicate vote from v1 must not inflate to 4.
         engine.accept_attestation(ids[1], next_h, hash_a);
-        assert_eq!(engine.height(), next_h - 1, "duplicate vote does not inflate quorum");
+        assert_eq!(
+            engine.height(),
+            next_h - 1,
+            "duplicate vote does not inflate quorum"
+        );
         // v1 changes to B: A drops to {v2,v3}=2, still no quorum.
         engine.accept_attestation(ids[1], next_h, hash_b);
         assert_eq!(engine.height(), next_h - 1, "vote-change moves, not adds");
@@ -3864,7 +4173,10 @@ mod tests {
         engine.accept_attestation(ids[1], next_h, hash_a);
         engine.accept_attestation(ids[4], next_h, hash_a);
         assert_eq!(engine.height(), next_h, "four distinct votes finalize");
-        assert_eq!(block_hash(&engine.get_block(next_h).unwrap().header), hash_a);
+        assert_eq!(
+            block_hash(&engine.get_block(next_h).unwrap().header),
+            hash_a
+        );
     }
 
     /// Security (H-09): under v2 a (validator-signed) attestation for an
@@ -3881,7 +4193,11 @@ mod tests {
         let mempool = Mempool::new(1000);
         // Observer engine (validator_id not in set) so it never self-votes and we
         // control exactly which heights enter v2_votes.
-        let config = EngineConfig { validator_id: [99u8; 32], fork_choice_v2_height: 0, ..Default::default() };
+        let config = EngineConfig {
+            validator_id: [99u8; 32],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let current = engine.height();
@@ -3917,7 +4233,10 @@ mod tests {
         let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
         let store = MemoryStore::new();
         let mempool = Mempool::new(1000);
-        let config = EngineConfig { validator_id: ids[0], ..Default::default() };
+        let config = EngineConfig {
+            validator_id: ids[0],
+            ..Default::default()
+        };
         let engine = ConsensusEngine::with_validators(config, Box::new(store), mempool, vs);
 
         let mk = |proposer: [u8; 32], signer: Option<&Keypair>| -> BlockHeader {
@@ -3975,12 +4294,21 @@ mod tests {
         };
         // Empty block at height 1 whose state_root matches the unchanged store, so
         // the only thing under test is the auth gate (not the root check).
-        let build = |engine: &ConsensusEngine, signer: Option<&Keypair>, proposer: [u8; 32]| -> BlockHeader {
+        let build = |engine: &ConsensusEngine,
+                     signer: Option<&Keypair>,
+                     proposer: [u8; 32]|
+         -> BlockHeader {
             let empty_root = engine.store().read().unwrap().state_root();
             let mut h = BlockHeader {
-                height: 1, epoch: 0, parent_hash: [0u8; 32], state_root: empty_root,
-                transactions_root: [0u8; 32], receipts_root: [0u8; 32],
-                proposer, timestamp_ms: 6000, proposer_signature: vec![],
+                height: 1,
+                epoch: 0,
+                parent_hash: [0u8; 32],
+                state_root: empty_root,
+                transactions_root: [0u8; 32],
+                receipts_root: [0u8; 32],
+                proposer,
+                timestamp_ms: 6000,
+                proposer_signature: vec![],
             };
             if let Some(kp) = signer {
                 let bh = block_hash(&h);
@@ -3993,23 +4321,39 @@ mod tests {
         // validator-signed block applies.
         let eng = make_engine(true);
         let forged = build(&eng, None, ids[1]); // valid proposer id, NO signature
-        assert!(!eng.replay_synced_block(&forged, &[], vec![]), "unsigned synced block must be rejected");
-        assert_eq!(eng.height(), 0, "rejected forgery must not advance the chain");
+        assert!(
+            !eng.replay_synced_block(&forged, &[], vec![]),
+            "unsigned synced block must be rejected"
+        );
+        assert_eq!(
+            eng.height(),
+            0,
+            "rejected forgery must not advance the chain"
+        );
         let signed = build(&eng, Some(&kps[1]), ids[1]);
-        assert!(eng.replay_synced_block(&signed, &[], vec![]), "validator-signed synced block must apply");
+        assert!(
+            eng.replay_synced_block(&signed, &[], vec![]),
+            "validator-signed synced block must apply"
+        );
         assert_eq!(eng.height(), 1);
 
         // Flag ON: a block signed by a NON-validator key is rejected.
         let eng2 = make_engine(true);
         let outsider = Keypair::generate();
         let foreign = build(&eng2, Some(&outsider), outsider.public_key());
-        assert!(!eng2.replay_synced_block(&foreign, &[], vec![]), "non-validator-signed synced block must be rejected");
+        assert!(
+            !eng2.replay_synced_block(&foreign, &[], vec![]),
+            "non-validator-signed synced block must be rejected"
+        );
         assert_eq!(eng2.height(), 0);
 
         // Flag OFF: legacy behavior — the unsigned block is accepted (the bug).
         let eng3 = make_engine(false);
         let forged3 = build(&eng3, None, ids[1]);
-        assert!(eng3.replay_synced_block(&forged3, &[], vec![]), "with flag off, legacy path accepts unauthenticated block");
+        assert!(
+            eng3.replay_synced_block(&forged3, &[], vec![]),
+            "with flag off, legacy path accepts unauthenticated block"
+        );
         assert_eq!(eng3.height(), 1);
     }
 
@@ -4041,7 +4385,10 @@ mod tests {
         let vs = vs.read().unwrap();
         let v = vs.all().iter().find(|v| v.id == offender).unwrap();
         assert_eq!(v.stake, stake_before, "stake must not change locally");
-        assert!(v.is_active(), "status must remain Active locally (jail only via finalized on-chain slash)");
+        assert!(
+            v.is_active(),
+            "status must remain Active locally (jail only via finalized on-chain slash)"
+        );
     }
 
     #[test]
@@ -4051,7 +4398,10 @@ mod tests {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 100 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 100,
+            }],
             max_fee: 1000,
             signature: vec![],
         };
@@ -4064,6 +4414,10 @@ mod tests {
         // target >= tip is rejected without mutating.
         assert!(!engine.rollback_to_height(h, &root));
         assert!(!engine.rollback_to_height(h + 5, &root));
-        assert_eq!(engine.height(), h, "height unchanged after rejected rollback");
+        assert_eq!(
+            engine.height(),
+            h,
+            "height unchanged after rejected rollback"
+        );
     }
 }

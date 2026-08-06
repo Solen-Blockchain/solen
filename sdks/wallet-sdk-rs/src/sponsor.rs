@@ -105,7 +105,10 @@ mod tests {
         let mut policy = SponsorshipPolicy::new(aid(99));
         policy.max_gas_per_op = 500;
         let op = op_with_call(aid(10));
-        assert_eq!(policy.check(&op, 1000), SponsorshipDecision::DeniedGasTooHigh);
+        assert_eq!(
+            policy.check(&op, 1000),
+            SponsorshipDecision::DeniedGasTooHigh
+        );
     }
 
     #[test]

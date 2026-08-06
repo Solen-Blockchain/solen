@@ -7,7 +7,9 @@ use tracing::debug;
 
 use solen_types::encoding::{account_to_base58, hex_encode};
 
-use crate::store::{IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx};
+use crate::store::{
+    IndexStore, IndexedBatch, IndexedBlock, IndexedEvent, IndexedIntent, IndexedRollup, IndexedTx,
+};
 
 fn u64_from_le_hex(hex_str: &str) -> Result<u64, ()> {
     if hex_str.len() != 16 {
@@ -37,8 +39,13 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
     // Track proposer stats.
     let proposer_hex = account_to_base58(&block.header.proposer);
     if block.header.proposer != [0u8; 32] {
-        *store.blocks_proposed.entry(proposer_hex.clone()).or_insert(0) += 1;
-        store.last_proposed.insert(proposer_hex, block.header.height);
+        *store
+            .blocks_proposed
+            .entry(proposer_hex.clone())
+            .or_insert(0) += 1;
+        store
+            .last_proposed
+            .insert(proposer_hex, block.header.height);
     }
 
     store.add_block(block_summary);
@@ -89,9 +96,7 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
             // Track token holders: mint/transfer events from contracts
             // have recipient[32 bytes] in event data.
-            if (event.topic == "mint" || event.topic == "transfer")
-                && event.data.len() >= 64
-            {
+            if (event.topic == "mint" || event.topic == "transfer") && event.data.len() >= 64 {
                 // First 64 hex chars = 32 bytes = recipient account ID.
                 if let Ok(recipient_bytes) = solen_types::encoding::hex_decode(&event.data[..64]) {
                     if recipient_bytes.len() == 32 {
@@ -163,10 +168,13 @@ pub fn index_block(store: &mut IndexStore, block: &FinalizedBlock) {
 
             // Track batch submissions.
             // Event: topic=batch_verified, data=rollup_id[8]+batch_index[8]+state_root[32]+data_hash[32]
-            if (event.topic == "batch_verified" || event.topic == "batch_submitted") && event.data.len() >= 160 {
-                if let (Ok(rollup_id), Ok(batch_index)) =
-                    (u64_from_le_hex(&event.data[..16]), u64_from_le_hex(&event.data[16..32]))
-                {
+            if (event.topic == "batch_verified" || event.topic == "batch_submitted")
+                && event.data.len() >= 160
+            {
+                if let (Ok(rollup_id), Ok(batch_index)) = (
+                    u64_from_le_hex(&event.data[..16]),
+                    u64_from_le_hex(&event.data[16..32]),
+                ) {
                     store.add_rollup_batch(IndexedBatch {
                         rollup_id,
                         batch_index,
@@ -283,7 +291,10 @@ pub async fn run_indexer(
             }
         }
         if total_replayed > 0 {
-            tracing::info!(blocks = total_replayed, "replayed persisted blocks into indexer");
+            tracing::info!(
+                blocks = total_replayed,
+                "replayed persisted blocks into indexer"
+            );
         }
     }
 

@@ -185,7 +185,10 @@ impl GenesisConfig {
                 info!(name = %a.name, address = account_to_base58(&id), balance = a.balance, "genesis account (no auth)");
                 continue;
             } else {
-                anyhow::bail!("account '{}' needs seed_hex, public_key_hex, or id_hex", a.name);
+                anyhow::bail!(
+                    "account '{}' needs seed_hex, public_key_hex, or id_hex",
+                    a.name
+                );
             };
 
             // Account ID IS the public key.
@@ -329,7 +332,8 @@ impl GenesisConfig {
         // Includes both account balances and staked amounts (which are
         // deducted from balances but tracked in the staking contract).
         let total_staked: u128 = self.validators.iter().map(|v| v.stake).sum();
-        let total_supply: u128 = genesis_accounts.iter().map(|a| a.balance).sum::<u128>() + total_staked;
+        let total_supply: u128 =
+            genesis_accounts.iter().map(|a| a.balance).sum::<u128>() + total_staked;
         let _ = store.put(b"__total_supply__", &total_supply.to_le_bytes());
         info!(total_supply, total_staked, "total supply stored");
 
@@ -372,7 +376,10 @@ impl GenesisConfig {
             let mut gov = solen_system_contracts::governance::GovernanceContract::new();
             gov.voting_period = self.governance_voting_period;
             gov.save(store);
-            info!(voting_period = self.governance_voting_period, "governance initialized");
+            info!(
+                voting_period = self.governance_voting_period,
+                "governance initialized"
+            );
         }
 
         info!(
@@ -507,7 +514,10 @@ pub fn resolve_validator_pubkey(v: &ValidatorConfig) -> Result<[u8; 32]> {
     } else if let Some(pk_hex) = &v.public_key_hex {
         hex_decode_32(pk_hex)
     } else {
-        anyhow::bail!("validator '{}' needs either seed_hex or public_key_hex", v.name)
+        anyhow::bail!(
+            "validator '{}' needs either seed_hex or public_key_hex",
+            v.name
+        )
     }
 }
 

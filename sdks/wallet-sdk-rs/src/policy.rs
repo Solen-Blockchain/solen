@@ -107,8 +107,7 @@ mod tests {
 
     #[test]
     fn allow_within_limits() {
-        let engine = PolicyEngine::new()
-            .add_rule(PolicyRule::MaxPerTransaction(1000));
+        let engine = PolicyEngine::new().add_rule(PolicyRule::MaxPerTransaction(1000));
 
         assert_eq!(
             engine.evaluate(&transfer_op(aid(2), 500)),
@@ -118,8 +117,7 @@ mod tests {
 
     #[test]
     fn deny_over_limit() {
-        let engine = PolicyEngine::new()
-            .add_rule(PolicyRule::MaxPerTransaction(100));
+        let engine = PolicyEngine::new().add_rule(PolicyRule::MaxPerTransaction(100));
 
         assert!(matches!(
             engine.evaluate(&transfer_op(aid(2), 500)),
@@ -138,8 +136,7 @@ mod tests {
 
     #[test]
     fn allowed_recipients() {
-        let engine = PolicyEngine::new()
-            .add_rule(PolicyRule::AllowedRecipients(vec![aid(2)]));
+        let engine = PolicyEngine::new().add_rule(PolicyRule::AllowedRecipients(vec![aid(2)]));
 
         assert_eq!(
             engine.evaluate(&transfer_op(aid(2), 100)),

@@ -121,7 +121,8 @@ impl<'a> StateStore for OverlayStore<'a> {
     }
 
     fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+            std::collections::BTreeMap::new();
         // Start with base.
         for (k, v) in self.base.scan_prefix(prefix)? {
             if !self.deletes.contains(&k) {
@@ -130,14 +131,17 @@ impl<'a> StateStore for OverlayStore<'a> {
         }
         // Overlay writes on top.
         for (k, v) in self.writes.range(prefix.to_vec()..) {
-            if !k.starts_with(prefix) { break; }
+            if !k.starts_with(prefix) {
+                break;
+            }
             results.insert(k.clone(), v.clone());
         }
         Ok(results.into_iter().collect())
     }
 
     fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+            std::collections::BTreeMap::new();
         for (k, v) in self.base.scan_all()? {
             if !self.deletes.contains(&k) {
                 results.insert(k, v);
@@ -184,9 +188,17 @@ mod tests {
 
         ov.restore_savepoint(sp);
 
-        assert_eq!(ov.get(b"a").unwrap(), Some(b"1".to_vec()), "op1 write survives");
+        assert_eq!(
+            ov.get(b"a").unwrap(),
+            Some(b"1".to_vec()),
+            "op1 write survives"
+        );
         assert_eq!(ov.get(b"b").unwrap(), None, "op2 write reverted");
-        assert_eq!(ov.get(b"x").unwrap(), Some(b"base".to_vec()), "op2 delete reverted");
+        assert_eq!(
+            ov.get(b"x").unwrap(),
+            Some(b"base".to_vec()),
+            "op2 delete reverted"
+        );
     }
 
     #[test]

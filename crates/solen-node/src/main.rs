@@ -339,432 +339,498 @@ async fn main() -> anyhow::Result<()> {
     // worker thread as allowed to block (and to drop that runtime) — so an
     // unreachable seed now yields a normal error instead of crashing the node.
     tokio::task::block_in_place(|| -> anyhow::Result<()> {
-    let snapshot_source: Option<String> = if cli.snapshot.is_some() {
-        cli.snapshot.clone()
-    } else if store.is_empty() && !cli.bootstrap.is_empty() {
-        // Auto-discover snapshot from seed nodes.
-        // Security: query chain status from ALL reachable seeds first,
-        // verify they agree on the state root before downloading a snapshot.
-        info!("empty store — attempting snapshot sync from seed nodes...");
+        let snapshot_source: Option<String> = if cli.snapshot.is_some() {
+            cli.snapshot.clone()
+        } else if store.is_empty() && !cli.bootstrap.is_empty() {
+            // Auto-discover snapshot from seed nodes.
+            // Security: query chain status from ALL reachable seeds first,
+            // verify they agree on the state root before downloading a snapshot.
+            info!("empty store — attempting snapshot sync from seed nodes...");
 
-        // Build RPC URLs from bootstrap peers.
-        // For testnet/mainnet, try both the public endpoint AND individual peer IPs.
-        let seed_rpc_urls: Vec<String> = {
-            let mut urls = std::collections::HashSet::new();
-            // Add the public RPC endpoint.
-            match net {
-                Network::Testnet => { urls.insert("https://testnet-rpc.solenchain.io".to_string()); }
-                Network::Mainnet => { urls.insert("https://rpc.solenchain.io".to_string()); }
-                _ => {}
-            }
-            // Also try individual peer IPs (extract from multiaddr).
-            for addr in &cli.bootstrap {
-                let ip = addr.split('/').find(|s| {
-                    // Match IPv4 addresses, not DNS names.
-                    s.split('.').count() == 4 && s.split('.').all(|p| p.parse::<u8>().is_ok())
-                });
-                if let Some(ip) = ip {
-                    let peer_rpc_port = match net {
-                        Network::Testnet => 19944,
-                        Network::Mainnet => 9944,
-                        _ => rpc_port,
-                    };
-                    urls.insert(format!("http://{}:{}", ip, peer_rpc_port));
+            // Build RPC URLs from bootstrap peers.
+            // For testnet/mainnet, try both the public endpoint AND individual peer IPs.
+            let seed_rpc_urls: Vec<String> = {
+                let mut urls = std::collections::HashSet::new();
+                // Add the public RPC endpoint.
+                match net {
+                    Network::Testnet => {
+                        urls.insert("https://testnet-rpc.solenchain.io".to_string());
+                    }
+                    Network::Mainnet => {
+                        urls.insert("https://rpc.solenchain.io".to_string());
+                    }
+                    _ => {}
                 }
-            }
-            urls.into_iter().collect()
-        };
-        info!(urls = ?seed_rpc_urls, "snapshot seed RPC URLs");
+                // Also try individual peer IPs (extract from multiaddr).
+                for addr in &cli.bootstrap {
+                    let ip = addr.split('/').find(|s| {
+                        // Match IPv4 addresses, not DNS names.
+                        s.split('.').count() == 4 && s.split('.').all(|p| p.parse::<u8>().is_ok())
+                    });
+                    if let Some(ip) = ip {
+                        let peer_rpc_port = match net {
+                            Network::Testnet => 19944,
+                            Network::Mainnet => 9944,
+                            _ => rpc_port,
+                        };
+                        urls.insert(format!("http://{}:{}", ip, peer_rpc_port));
+                    }
+                }
+                urls.into_iter().collect()
+            };
+            info!(urls = ?seed_rpc_urls, "snapshot seed RPC URLs");
 
-        // Step 1: Query chain status from all seeds to get consensus on state root.
-        let status_body = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1,
-            "method": "solen_chainStatus", "params": []
-        });
-        let mut state_roots: Vec<(String, u64, String)> = Vec::new(); // (url, height, state_root)
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap();
+            // Step 1: Query chain status from all seeds to get consensus on state root.
+            let status_body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "solen_chainStatus", "params": []
+            });
+            let mut state_roots: Vec<(String, u64, String)> = Vec::new(); // (url, height, state_root)
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap();
 
-        for url in &seed_rpc_urls {
-            match client.post(url).header("Content-Type", "application/json")
-                .body(status_body.to_string()).send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(json) = resp.json::<serde_json::Value>() {
-                        if let (Some(h), Some(sr)) = (
-                            json["result"]["height"].as_u64(),
-                            json["result"]["state_root"].as_str()
-                                .or(json["result"]["latest_state_root"].as_str()),
-                        ) {
-                            info!(url = %url, height = h, state_root = %sr, "seed status");
-                            state_roots.push((url.clone(), h, sr.to_string()));
+            for url in &seed_rpc_urls {
+                match client
+                    .post(url)
+                    .header("Content-Type", "application/json")
+                    .body(status_body.to_string())
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            if let (Some(h), Some(sr)) = (
+                                json["result"]["height"].as_u64(),
+                                json["result"]["state_root"]
+                                    .as_str()
+                                    .or(json["result"]["latest_state_root"].as_str()),
+                            ) {
+                                info!(url = %url, height = h, state_root = %sr, "seed status");
+                                state_roots.push((url.clone(), h, sr.to_string()));
+                            }
                         }
                     }
-                }
-                _ => { info!(url = %url, "seed not reachable"); }
-            }
-        }
-
-        // Step 2: Verify seeds agree. Require at least 2 seeds to agree on state root,
-        // or accept a single seed only for devnet.
-        let mut found = None;
-        if !state_roots.is_empty() {
-            // Find the most common state root among the highest-height responses.
-            let max_height = state_roots.iter().map(|(_, h, _)| *h).max().unwrap_or(0);
-            let at_max: Vec<_> = state_roots.iter()
-                .filter(|(_, h, _)| max_height.saturating_sub(*h) <= 10) // within 10 blocks
-                .collect();
-
-            let mut root_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-            for (_, _, sr) in &at_max {
-                *root_counts.entry(sr.as_str()).or_insert(0) += 1;
-            }
-
-            let (consensus_root, count) = root_counts.iter()
-                .max_by_key(|(_, c)| *c)
-                .map(|(r, c)| (r.to_string(), *c))
-                .unwrap_or_default();
-
-            // Require 2+ agreeing seeds when multiple are available.
-            // Fall back to 1 if only 1 unique URL was reachable.
-            let need_consensus = if matches!(net, Network::Mainnet) && state_roots.len() > 1 { 2 } else { 1 };
-
-            if count >= need_consensus {
-                info!(
-                    state_root = %consensus_root,
-                    agreeing_seeds = count,
-                    total_seeds = state_roots.len(),
-                    "seed consensus verified"
-                );
-
-                // Step 3: Verify the finalized checkpoint via lightweight metadata
-                // and select a seed URL. The actual download happens in the unified
-                // snapshot-load path below, which fetches via chunked transfer.
-                //
-                // We deliberately do NOT download here with the single-call
-                // `solen_getSnapshot`: a full mainnet snapshot base64-encodes well
-                // past the RPC max response body size (100 MB), so the single call
-                // always fails and the node would silently fall back to genesis
-                // block-sync. `getSnapshotMeta` returns the state root + finalized
-                // checkpoint (cheap), which is all we need to validate before
-                // streaming the body in 4 MB chunks.
-                let meta_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "solen_getSnapshotMeta", "params": []
-                });
-
-                // Build the trusted genesis validator set (public_key -> stake)
-                // for verifying snapshot checkpoint attestations. The genesis keys
-                // are the ONLY validator set we can trust without already having a
-                // snapshot, so they anchor long-range-attack protection: a forged
-                // snapshot cannot fabricate a checkpoint carrying valid signatures
-                // from a 2/3 stake supermajority of these keys.
-                //
-                // This assumes the active validator set still descends from genesis
-                // (true on Solen mainnet: all 11 active validators are the genesis
-                // validators). If staking ever rotates the set away from genesis,
-                // this must evolve to track validator-set changes through a verified
-                // epoch/header chain rather than trusting genesis alone.
-                let genesis_vset: Vec<([u8; 32], u128)> = {
-                    let mut vs = Vec::with_capacity(genesis.validators.len());
-                    for v in &genesis.validators {
-                        let pk = if let Some(seed_hex) = &v.seed_hex {
-                            let bytes = hex_decode(seed_hex)?;
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&bytes);
-                            Keypair::from_seed(&arr).public_key()
-                        } else if let Some(pk_hex) = &v.public_key_hex {
-                            let bytes = hex_decode(pk_hex)?;
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&bytes);
-                            arr
-                        } else {
-                            anyhow::bail!("validator '{}' needs seed_hex or public_key_hex", v.name);
-                        };
-                        vs.push((pk, v.stake));
+                    _ => {
+                        info!(url = %url, "seed not reachable");
                     }
-                    vs
+                }
+            }
+
+            // Step 2: Verify seeds agree. Require at least 2 seeds to agree on state root,
+            // or accept a single seed only for devnet.
+            let mut found = None;
+            if !state_roots.is_empty() {
+                // Find the most common state root among the highest-height responses.
+                let max_height = state_roots.iter().map(|(_, h, _)| *h).max().unwrap_or(0);
+                let at_max: Vec<_> = state_roots
+                    .iter()
+                    .filter(|(_, h, _)| max_height.saturating_sub(*h) <= 10) // within 10 blocks
+                    .collect();
+
+                let mut root_counts: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (_, _, sr) in &at_max {
+                    *root_counts.entry(sr.as_str()).or_insert(0) += 1;
+                }
+
+                let (consensus_root, count) = root_counts
+                    .iter()
+                    .max_by_key(|(_, c)| *c)
+                    .map(|(r, c)| (r.to_string(), *c))
+                    .unwrap_or_default();
+
+                // Require 2+ agreeing seeds when multiple are available.
+                // Fall back to 1 if only 1 unique URL was reachable.
+                let need_consensus = if matches!(net, Network::Mainnet) && state_roots.len() > 1 {
+                    2
+                } else {
+                    1
                 };
 
-                for (url, _, _) in &at_max {
-                    info!(url = %url, "fetching snapshot metadata...");
-                    match client.post(url.as_str())
-                        .header("Content-Type", "application/json")
-                        .body(meta_body.to_string()).send()
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            if let Ok(json) = resp.json::<serde_json::Value>() {
-                                let snap_root = json["result"]["state_root"].as_str().unwrap_or("");
+                if count >= need_consensus {
+                    info!(
+                        state_root = %consensus_root,
+                        agreeing_seeds = count,
+                        total_seeds = state_roots.len(),
+                        "seed consensus verified"
+                    );
 
-                                // The merkle root is re-verified against the header in
-                                // restore_snapshot() after decompression; here we only
-                                // log if the (possibly cached) snapshot root differs.
-                                if !snap_root.is_empty() && snap_root != consensus_root {
-                                    info!(
-                                        snap_root,
-                                        consensus_root = %consensus_root,
-                                        "snapshot root differs from consensus (may be cached) — will verify after restore"
-                                    );
-                                }
+                    // Step 3: Verify the finalized checkpoint via lightweight metadata
+                    // and select a seed URL. The actual download happens in the unified
+                    // snapshot-load path below, which fetches via chunked transfer.
+                    //
+                    // We deliberately do NOT download here with the single-call
+                    // `solen_getSnapshot`: a full mainnet snapshot base64-encodes well
+                    // past the RPC max response body size (100 MB), so the single call
+                    // always fails and the node would silently fall back to genesis
+                    // block-sync. `getSnapshotMeta` returns the state root + finalized
+                    // checkpoint (cheap), which is all we need to validate before
+                    // streaming the body in 4 MB chunks.
+                    let meta_body = serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "solen_getSnapshotMeta", "params": []
+                    });
 
-                                // Verify the finalized checkpoint if present. The
-                                // checkpoint sits at cp_height <= the snapshot height, so
-                                // its state_root legitimately differs from the snapshot tip
-                                // root (snap_root) whenever state changed after it — so we do
-                                // NOT compare the two (that was the old bug that rejected
-                                // every real snapshot). Instead we cryptographically verify
-                                // that a 2/3 stake supermajority of the trusted GENESIS
-                                // validators actually signed this checkpoint. Combined with
-                                // the post-restore merkle re-derivation of snap_root, this
-                                // means a forged snapshot cannot be accepted unless the
-                                // attacker also holds 2/3 of the genesis signing keys.
-                                let checkpoint_valid = if let Some(cp) = json["result"]["checkpoint"].as_object() {
-                                    let cp_state_root = cp.get("state_root")
-                                        .and_then(|v| v.as_str()).unwrap_or("");
-                                    let cp_block_hash = cp.get("block_hash")
-                                        .and_then(|v| v.as_str()).unwrap_or("");
-                                    let cp_height = cp.get("height")
-                                        .and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let attestations = cp.get("attestations")
-                                        .and_then(|v| v.as_array());
+                    // Build the trusted genesis validator set (public_key -> stake)
+                    // for verifying snapshot checkpoint attestations. The genesis keys
+                    // are the ONLY validator set we can trust without already having a
+                    // snapshot, so they anchor long-range-attack protection: a forged
+                    // snapshot cannot fabricate a checkpoint carrying valid signatures
+                    // from a 2/3 stake supermajority of these keys.
+                    //
+                    // This assumes the active validator set still descends from genesis
+                    // (true on Solen mainnet: all 11 active validators are the genesis
+                    // validators). If staking ever rotates the set away from genesis,
+                    // this must evolve to track validator-set changes through a verified
+                    // epoch/header chain rather than trusting genesis alone.
+                    let genesis_vset: Vec<([u8; 32], u128)> = {
+                        let mut vs = Vec::with_capacity(genesis.validators.len());
+                        for v in &genesis.validators {
+                            let pk = if let Some(seed_hex) = &v.seed_hex {
+                                let bytes = hex_decode(seed_hex)?;
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&bytes);
+                                Keypair::from_seed(&arr).public_key()
+                            } else if let Some(pk_hex) = &v.public_key_hex {
+                                let bytes = hex_decode(pk_hex)?;
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&bytes);
+                                arr
+                            } else {
+                                anyhow::bail!(
+                                    "validator '{}' needs seed_hex or public_key_hex",
+                                    v.name
+                                );
+                            };
+                            vs.push((pk, v.stake));
+                        }
+                        vs
+                    };
 
-                                    // Rebuild the exact message the validators signed:
-                                    // signing_message(height, block_hash, state_root).
-                                    let signing_msg = match (hex_decode(cp_block_hash), hex_decode(cp_state_root)) {
-                                        (Ok(bh), Ok(sr)) if bh.len() == 32 && sr.len() == 32 => {
-                                            let mut bha = [0u8; 32]; bha.copy_from_slice(&bh);
-                                            let mut sra = [0u8; 32]; sra.copy_from_slice(&sr);
-                                            Some(solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                    for (url, _, _) in &at_max {
+                        info!(url = %url, "fetching snapshot metadata...");
+                        match client
+                            .post(url.as_str())
+                            .header("Content-Type", "application/json")
+                            .body(meta_body.to_string())
+                            .send()
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                if let Ok(json) = resp.json::<serde_json::Value>() {
+                                    let snap_root =
+                                        json["result"]["state_root"].as_str().unwrap_or("");
+
+                                    // The merkle root is re-verified against the header in
+                                    // restore_snapshot() after decompression; here we only
+                                    // log if the (possibly cached) snapshot root differs.
+                                    if !snap_root.is_empty() && snap_root != consensus_root {
+                                        info!(
+                                            snap_root,
+                                            consensus_root = %consensus_root,
+                                            "snapshot root differs from consensus (may be cached) — will verify after restore"
+                                        );
+                                    }
+
+                                    // Verify the finalized checkpoint if present. The
+                                    // checkpoint sits at cp_height <= the snapshot height, so
+                                    // its state_root legitimately differs from the snapshot tip
+                                    // root (snap_root) whenever state changed after it — so we do
+                                    // NOT compare the two (that was the old bug that rejected
+                                    // every real snapshot). Instead we cryptographically verify
+                                    // that a 2/3 stake supermajority of the trusted GENESIS
+                                    // validators actually signed this checkpoint. Combined with
+                                    // the post-restore merkle re-derivation of snap_root, this
+                                    // means a forged snapshot cannot be accepted unless the
+                                    // attacker also holds 2/3 of the genesis signing keys.
+                                    let checkpoint_valid = if let Some(cp) =
+                                        json["result"]["checkpoint"].as_object()
+                                    {
+                                        let cp_state_root = cp
+                                            .get("state_root")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let cp_block_hash = cp
+                                            .get("block_hash")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let cp_height =
+                                            cp.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let attestations =
+                                            cp.get("attestations").and_then(|v| v.as_array());
+
+                                        // Rebuild the exact message the validators signed:
+                                        // signing_message(height, block_hash, state_root).
+                                        let signing_msg = match (
+                                            hex_decode(cp_block_hash),
+                                            hex_decode(cp_state_root),
+                                        ) {
+                                            (Ok(bh), Ok(sr))
+                                                if bh.len() == 32 && sr.len() == 32 =>
+                                            {
+                                                let mut bha = [0u8; 32];
+                                                bha.copy_from_slice(&bh);
+                                                let mut sra = [0u8; 32];
+                                                sra.copy_from_slice(&sr);
+                                                Some(solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
                                                 cp_height, &bha, &sra,
                                             ))
-                                        }
-                                        _ => None,
-                                    };
-
-                                    match (signing_msg, attestations) {
-                                        (Some(msg), Some(atts)) => {
-                                            // Sum the genesis stake of every distinct genesis
-                                            // validator whose signature over this checkpoint
-                                            // verifies. Dedupe so a repeated attester (or a
-                                            // proposer self-attestation) can't be double-counted.
-                                            let mut counted: Vec<[u8; 32]> = Vec::new();
-                                            for att in atts {
-                                                let (vb58, sig_hex) = match att.as_array() {
-                                                    Some(p) => (
-                                                        p.first().and_then(|x| x.as_str()).unwrap_or(""),
-                                                        p.get(1).and_then(|x| x.as_str()).unwrap_or(""),
-                                                    ),
-                                                    None => continue,
-                                                };
-                                                // Match attester to a genesis validator by base58(pubkey).
-                                                let pk = match genesis_vset.iter()
-                                                    .find(|(pk, _)| account_to_base58(pk) == vb58)
-                                                {
-                                                    Some(e) => e.0,
-                                                    None => continue, // not a genesis validator — ignore
-                                                };
-                                                if counted.contains(&pk) {
-                                                    continue; // already counted this validator
-                                                }
-                                                let sig_bytes = match hex_decode(sig_hex) {
-                                                    Ok(b) if b.len() == 64 => b,
-                                                    _ => continue,
-                                                };
-                                                let mut sig = [0u8; 64];
-                                                sig.copy_from_slice(&sig_bytes);
-                                                if solen_crypto::verify(&pk, &msg, &sig).is_ok() {
-                                                    counted.push(pk);
-                                                }
                                             }
+                                            _ => None,
+                                        };
 
-                                            // Require a strict MAJORITY of genesis validators to
-                                            // have signed. We deliberately do NOT use a 2/3-stake
-                                            // test: checkpoints finalize on 2/3 of *current* stake,
-                                            // which has diverged from the equal genesis stakes, so a
-                                            // legitimately finalized checkpoint can carry as few as
-                                            // ~7 of 11 genesis signatures — fewer during a partition,
-                                            // when checkpoints finalize with a bare quorum, which is
-                                            // exactly when fast snapshot restore matters most. A
-                                            // majority-of-genesis-keys floor still prevents forgery
-                                            // (an attacker would need a majority of genesis signing
-                                            // keys, a compromise that would already break consensus
-                                            // directly) while tolerating those reduced signer counts.
-                                            // Primary integrity still rests on seed consensus + the
-                                            // post-restore merkle re-derivation in restore_snapshot().
-                                            let quorum = counted.len().saturating_mul(2) > genesis_vset.len();
-                                            if quorum {
-                                                info!(
+                                        match (signing_msg, attestations) {
+                                            (Some(msg), Some(atts)) => {
+                                                // Sum the genesis stake of every distinct genesis
+                                                // validator whose signature over this checkpoint
+                                                // verifies. Dedupe so a repeated attester (or a
+                                                // proposer self-attestation) can't be double-counted.
+                                                let mut counted: Vec<[u8; 32]> = Vec::new();
+                                                for att in atts {
+                                                    let (vb58, sig_hex) = match att.as_array() {
+                                                        Some(p) => (
+                                                            p.first()
+                                                                .and_then(|x| x.as_str())
+                                                                .unwrap_or(""),
+                                                            p.get(1)
+                                                                .and_then(|x| x.as_str())
+                                                                .unwrap_or(""),
+                                                        ),
+                                                        None => continue,
+                                                    };
+                                                    // Match attester to a genesis validator by base58(pubkey).
+                                                    let pk =
+                                                        match genesis_vset.iter().find(|(pk, _)| {
+                                                            account_to_base58(pk) == vb58
+                                                        }) {
+                                                            Some(e) => e.0,
+                                                            None => continue, // not a genesis validator — ignore
+                                                        };
+                                                    if counted.contains(&pk) {
+                                                        continue; // already counted this validator
+                                                    }
+                                                    let sig_bytes = match hex_decode(sig_hex) {
+                                                        Ok(b) if b.len() == 64 => b,
+                                                        _ => continue,
+                                                    };
+                                                    let mut sig = [0u8; 64];
+                                                    sig.copy_from_slice(&sig_bytes);
+                                                    if solen_crypto::verify(&pk, &msg, &sig).is_ok()
+                                                    {
+                                                        counted.push(pk);
+                                                    }
+                                                }
+
+                                                // Require a strict MAJORITY of genesis validators to
+                                                // have signed. We deliberately do NOT use a 2/3-stake
+                                                // test: checkpoints finalize on 2/3 of *current* stake,
+                                                // which has diverged from the equal genesis stakes, so a
+                                                // legitimately finalized checkpoint can carry as few as
+                                                // ~7 of 11 genesis signatures — fewer during a partition,
+                                                // when checkpoints finalize with a bare quorum, which is
+                                                // exactly when fast snapshot restore matters most. A
+                                                // majority-of-genesis-keys floor still prevents forgery
+                                                // (an attacker would need a majority of genesis signing
+                                                // keys, a compromise that would already break consensus
+                                                // directly) while tolerating those reduced signer counts.
+                                                // Primary integrity still rests on seed consensus + the
+                                                // post-restore merkle re-derivation in restore_snapshot().
+                                                let quorum = counted.len().saturating_mul(2)
+                                                    > genesis_vset.len();
+                                                if quorum {
+                                                    info!(
                                                     cp_height,
                                                     signers = counted.len(),
                                                     validators = genesis_vset.len(),
                                                     "snapshot checkpoint verified — majority of genesis validators signed"
                                                 );
-                                            } else {
-                                                warn!(
+                                                } else {
+                                                    warn!(
                                                     cp_height,
                                                     signers = counted.len(),
                                                     validators = genesis_vset.len(),
                                                     "snapshot checkpoint lacks a majority of genesis-validator signatures — trying next seed"
                                                 );
+                                                }
+                                                quorum
                                             }
-                                            quorum
+                                            _ => {
+                                                warn!("snapshot checkpoint missing/malformed signing fields — trying next seed");
+                                                false
+                                            }
                                         }
-                                        _ => {
-                                            warn!("snapshot checkpoint missing/malformed signing fields — trying next seed");
-                                            false
-                                        }
-                                    }
-                                } else {
-                                    // No checkpoint to anchor trust. On mainnet this is
-                                    // refused outright: without a checkpoint signed by a
-                                    // majority of genesis validators we cannot prove the
-                                    // snapshot's authenticity, and accepting it would let a
-                                    // malicious seed substitute fabricated state. Off mainnet
-                                    // (devnet/testnet bootstrap) we still accept on seed
-                                    // consensus + post-restore merkle, flagged loudly.
-                                    if matches!(net, Network::Mainnet) {
-                                        warn!("snapshot has no finalized checkpoint — REFUSING on mainnet (cannot verify authenticity), trying next seed");
-                                        false
                                     } else {
-                                        warn!("snapshot has no checkpoint — accepting on seed consensus only (UNVERIFIED, non-mainnet)");
-                                        true
+                                        // No checkpoint to anchor trust. On mainnet this is
+                                        // refused outright: without a checkpoint signed by a
+                                        // majority of genesis validators we cannot prove the
+                                        // snapshot's authenticity, and accepting it would let a
+                                        // malicious seed substitute fabricated state. Off mainnet
+                                        // (devnet/testnet bootstrap) we still accept on seed
+                                        // consensus + post-restore merkle, flagged loudly.
+                                        if matches!(net, Network::Mainnet) {
+                                            warn!("snapshot has no finalized checkpoint — REFUSING on mainnet (cannot verify authenticity), trying next seed");
+                                            false
+                                        } else {
+                                            warn!("snapshot has no checkpoint — accepting on seed consensus only (UNVERIFIED, non-mainnet)");
+                                            true
+                                        }
+                                    };
+
+                                    if !checkpoint_valid {
+                                        continue;
                                     }
-                                };
 
-                                if !checkpoint_valid {
-                                    continue;
+                                    info!(
+                                        url = %url,
+                                        height = json["result"]["height"].as_u64().unwrap_or(0),
+                                        "snapshot seed selected — will download via chunked transfer"
+                                    );
+                                    found = Some(url.clone());
+                                    break;
                                 }
-
-                                info!(
-                                    url = %url,
-                                    height = json["result"]["height"].as_u64().unwrap_or(0),
-                                    "snapshot seed selected — will download via chunked transfer"
-                                );
-                                found = Some(url.clone());
-                                break;
+                            }
+                            _ => {
+                                info!(url = %url, "snapshot metadata fetch failed, trying next...");
                             }
                         }
-                        _ => { info!(url = %url, "snapshot metadata fetch failed, trying next..."); }
                     }
+                } else {
+                    warn!(
+                        agreeing = count,
+                        needed = need_consensus,
+                        total = state_roots.len(),
+                        "insufficient seed consensus on state root — skipping snapshot sync"
+                    );
                 }
-            } else {
-                warn!(
-                    agreeing = count,
-                    needed = need_consensus,
-                    total = state_roots.len(),
-                    "insufficient seed consensus on state root — skipping snapshot sync"
-                );
             }
-        }
-        found
-    } else {
-        None
-    };
+            found
+        } else {
+            None
+        };
 
-    if let Some(ref snapshot_source) = snapshot_source {
-        if store.is_empty() {
-            info!(source = %snapshot_source, "loading state snapshot...");
-            let snapshot_data = if snapshot_source.starts_with("http://") || snapshot_source.starts_with("https://") {
-                // Download snapshot via JSON-RPC from the node.
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("http client failed: {e}"))?;
-                // Download via chunked transfer. A full snapshot base64-encodes
-                // past the RPC max response body size (100 MB), so the single-call
-                // solen_getSnapshot fails for any non-trivial chain — chunked (4 MB)
-                // works for any size and is the only reliable transport.
-                let snapshot_url = snapshot_source.as_str();
-                let meta_body = serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "solen_getSnapshotMeta", "params": []
-                });
-                let meta_resp = client.post(snapshot_url)
-                    .header("Content-Type", "application/json")
-                    .body(meta_body.to_string())
-                    .send()
-                    .map_err(|e| anyhow::anyhow!("snapshot meta failed: {e}"))?
-                    .text()?;
-                let meta_json: serde_json::Value = serde_json::from_str(&meta_resp)?;
-                let total_bytes = meta_json["result"]["total_bytes"].as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("snapshot meta missing total_bytes"))? as usize;
-
-                info!(total_bytes, "downloading snapshot in chunks...");
-
-                let chunk_size: usize = 4 * 1024 * 1024; // 4MB chunks
-                let mut snapshot_data = Vec::with_capacity(total_bytes);
-                let mut offset: usize = 0;
-
-                loop {
-                    let chunk_body = serde_json::json!({
+        if let Some(ref snapshot_source) = snapshot_source {
+            if store.is_empty() {
+                info!(source = %snapshot_source, "loading state snapshot...");
+                let snapshot_data = if snapshot_source.starts_with("http://")
+                    || snapshot_source.starts_with("https://")
+                {
+                    // Download snapshot via JSON-RPC from the node.
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(120))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("http client failed: {e}"))?;
+                    // Download via chunked transfer. A full snapshot base64-encodes
+                    // past the RPC max response body size (100 MB), so the single-call
+                    // solen_getSnapshot fails for any non-trivial chain — chunked (4 MB)
+                    // works for any size and is the only reliable transport.
+                    let snapshot_url = snapshot_source.as_str();
+                    let meta_body = serde_json::json!({
                         "jsonrpc": "2.0", "id": 1,
-                        "method": "solen_getSnapshotChunk",
-                        "params": [offset, chunk_size]
+                        "method": "solen_getSnapshotMeta", "params": []
                     });
-                    let chunk_resp = client.post(snapshot_url)
+                    let meta_resp = client
+                        .post(snapshot_url)
                         .header("Content-Type", "application/json")
-                        .body(chunk_body.to_string())
+                        .body(meta_body.to_string())
                         .send()
-                        .map_err(|e| anyhow::anyhow!("chunk download failed at offset {offset}: {e}"))?
+                        .map_err(|e| anyhow::anyhow!("snapshot meta failed: {e}"))?
                         .text()?;
-                    let chunk_json: serde_json::Value = serde_json::from_str(&chunk_resp)?;
+                    let meta_json: serde_json::Value = serde_json::from_str(&meta_resp)?;
+                    let total_bytes = meta_json["result"]["total_bytes"]
+                        .as_u64()
+                        .ok_or_else(|| anyhow::anyhow!("snapshot meta missing total_bytes"))?
+                        as usize;
 
-                    if let Some(err) = chunk_json["error"]["message"].as_str() {
-                        return Err(anyhow::anyhow!("chunk error: {err}"));
+                    info!(total_bytes, "downloading snapshot in chunks...");
+
+                    let chunk_size: usize = 4 * 1024 * 1024; // 4MB chunks
+                    let mut snapshot_data = Vec::with_capacity(total_bytes);
+                    let mut offset: usize = 0;
+
+                    loop {
+                        let chunk_body = serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "method": "solen_getSnapshotChunk",
+                            "params": [offset, chunk_size]
+                        });
+                        let chunk_resp = client
+                            .post(snapshot_url)
+                            .header("Content-Type", "application/json")
+                            .body(chunk_body.to_string())
+                            .send()
+                            .map_err(|e| {
+                                anyhow::anyhow!("chunk download failed at offset {offset}: {e}")
+                            })?
+                            .text()?;
+                        let chunk_json: serde_json::Value = serde_json::from_str(&chunk_resp)?;
+
+                        if let Some(err) = chunk_json["error"]["message"].as_str() {
+                            return Err(anyhow::anyhow!("chunk error: {err}"));
+                        }
+
+                        let chunk_b64 = chunk_json["result"]["data"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("chunk missing data"))?;
+                        let chunk_bytes = base64_decode(chunk_b64)?;
+                        let done = chunk_json["result"]["done"].as_bool().unwrap_or(false);
+
+                        info!(
+                            offset,
+                            chunk_len = chunk_bytes.len(),
+                            progress = format!(
+                                "{:.1}%",
+                                (offset + chunk_bytes.len()) as f64 / total_bytes as f64 * 100.0
+                            ),
+                            "downloaded chunk"
+                        );
+
+                        snapshot_data.extend_from_slice(&chunk_bytes);
+                        offset += chunk_bytes.len();
+
+                        if done || chunk_bytes.is_empty() {
+                            break;
+                        }
                     }
-
-                    let chunk_b64 = chunk_json["result"]["data"].as_str()
-                        .ok_or_else(|| anyhow::anyhow!("chunk missing data"))?;
-                    let chunk_bytes = base64_decode(chunk_b64)?;
-                    let done = chunk_json["result"]["done"].as_bool().unwrap_or(false);
 
                     info!(
-                        offset,
-                        chunk_len = chunk_bytes.len(),
-                        progress = format!("{:.1}%", (offset + chunk_bytes.len()) as f64 / total_bytes as f64 * 100.0),
-                        "downloaded chunk"
+                        total = snapshot_data.len(),
+                        "chunked snapshot download complete"
                     );
+                    snapshot_data
+                } else {
+                    // Load from file.
+                    std::fs::read(snapshot_source)
+                        .map_err(|e| anyhow::anyhow!("snapshot file read failed: {e}"))?
+                };
 
-                    snapshot_data.extend_from_slice(&chunk_bytes);
-                    offset += chunk_bytes.len();
+                let meta =
+                    solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data)
+                        .map_err(|e| anyhow::anyhow!("snapshot restore failed: {e}"))?;
 
-                    if done || chunk_bytes.is_empty() { break; }
-                }
-
-                info!(total = snapshot_data.len(), "chunked snapshot download complete");
-                snapshot_data
+                info!(
+                    height = meta.height,
+                    epoch = meta.epoch,
+                    entries = meta.entry_count,
+                    state_root = hex(&meta.state_root),
+                    "snapshot restored — will sync forward from this height"
+                );
+                snapshot_height = Some(meta.height);
             } else {
-                // Load from file.
-                std::fs::read(snapshot_source)
-                    .map_err(|e| anyhow::anyhow!("snapshot file read failed: {e}"))?
-            };
-
-            let meta = solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data)
-                .map_err(|e| anyhow::anyhow!("snapshot restore failed: {e}"))?;
-
-            info!(
-                height = meta.height,
-                epoch = meta.epoch,
-                entries = meta.entry_count,
-                state_root = hex(&meta.state_root),
-                "snapshot restored — will sync forward from this height"
-            );
-            snapshot_height = Some(meta.height);
-        } else {
-            info!("store already has data — skipping snapshot restore");
+                info!("store already has data — skipping snapshot restore");
+            }
         }
-    }
 
-    Ok(())
+        Ok(())
     })?;
 
     // --- Apply genesis if store is empty ---
     if store.is_empty() {
         genesis.apply(store.as_mut())?;
     } else if snapshot_height.is_none() {
-        info!(state_root = hex(&store.state_root()), "loaded existing state");
+        info!(
+            state_root = hex(&store.state_root()),
+            "loaded existing state"
+        );
     }
 
     // Determine expected genesis state root for fork isolation.
@@ -785,7 +851,10 @@ async fn main() -> anyhow::Result<()> {
         if data.len() == 32 {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&data);
-            info!(genesis_hash = hex(&arr), "fork isolation from persisted genesis hash");
+            info!(
+                genesis_hash = hex(&arr),
+                "fork isolation from persisted genesis hash"
+            );
             Some(arr)
         } else {
             None
@@ -794,7 +863,10 @@ async fn main() -> anyhow::Result<()> {
         // First run — compute and persist the genesis state root.
         let root = store.state_root();
         let _ = store.put(b"__genesis_hash__", &root);
-        info!(genesis_hash = hex(&root), "fork isolation — genesis hash persisted");
+        info!(
+            genesis_hash = hex(&root),
+            "fork isolation — genesis hash persisted"
+        );
         Some(root)
     };
 
@@ -867,8 +939,8 @@ async fn main() -> anyhow::Result<()> {
     // After a restart, the in-memory set is from genesis and doesn't reflect
     // validators that registered, got slashed/jailed, or changed stake on-chain.
     {
-        use solen_system_contracts::staking::StakingContract;
         use solen_consensus::validator::ValidatorInfo;
+        use solen_system_contracts::staking::StakingContract;
         let store_lock = engine.store();
         let store_guard = store_lock.read().unwrap();
         let staking = StakingContract::load(&**store_guard);
@@ -900,7 +972,8 @@ async fn main() -> anyhow::Result<()> {
         // Remove genesis validators that exited on-chain (self_stake == 0 and not in staking list).
         let on_chain_ids: std::collections::HashSet<[u8; 32]> =
             staking.validators.iter().map(|v| v.id).collect();
-        let to_remove: Vec<[u8; 32]> = vs.all()
+        let to_remove: Vec<[u8; 32]> = vs
+            .all()
             .iter()
             .filter(|v| !on_chain_ids.contains(&v.id))
             .map(|v| v.id)
@@ -983,7 +1056,8 @@ async fn main() -> anyhow::Result<()> {
             let mut sync_serve_global: (std::time::Instant, u32) = (std::time::Instant::now(), 0);
             let mut sync_fail_count: u32 = 0;
             let mut fork_mismatch_detected = false;
-            let mut bad_state_roots: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            let mut bad_state_roots: std::collections::HashSet<[u8; 32]> =
+                std::collections::HashSet::new();
             let _p2p_genesis_hash = expected_genesis_hash;
 
             while let Some(msg) = inbound_rx.recv().await {
@@ -1000,9 +1074,7 @@ async fn main() -> anyhow::Result<()> {
                         engine_for_p2p.mempool().submit(op);
                     }
                     NetworkMessage::NewBlock {
-                        header,
-                        operations,
-                        ..
+                        header, operations, ..
                     } => {
                         // Reject oversized blocks to prevent memory DoS.
                         if operations.len() > 5000 {
@@ -1017,7 +1089,10 @@ async fn main() -> anyhow::Result<()> {
                             // Block accepted from a peer — we have connectivity.
                             // Clear fork mismatch state — this peer is on the right fork.
                             if fork_mismatch_detected {
-                                tracing::info!(height = header.height, "valid block received — clearing fork mismatch state");
+                                tracing::info!(
+                                    height = header.height,
+                                    "valid block received — clearing fork mismatch state"
+                                );
                                 fork_mismatch_detected = false;
                             }
                             // Reset partition state so block production can resume.
@@ -1056,11 +1131,19 @@ async fn main() -> anyhow::Result<()> {
                                 // v2: the engine already recorded our vote on the
                                 // deterministic leader inside accept_block. Broadcast
                                 // any vote(s) it wants us to (re)cast.
-                                broadcast_v2_revotes(&engine_for_p2p, &att_kp_for_p2p, &net_for_attest);
+                                broadcast_v2_revotes(
+                                    &engine_for_p2p,
+                                    &att_kp_for_p2p,
+                                    &net_for_attest,
+                                );
                             } else {
                                 // v1: single attestation for the block we accepted.
                                 let bh = solen_consensus::engine::block_hash(&header);
-                                let att_payload = attestation_payload(engine_for_p2p.config().chain_id, header.height, &bh);
+                                let att_payload = attestation_payload(
+                                    engine_for_p2p.config().chain_id,
+                                    header.height,
+                                    &bh,
+                                );
                                 let att_sig = att_kp_for_p2p.sign(&att_payload);
                                 let att_msg = NetworkMessage::Attestation {
                                     validator_id: engine_for_p2p.validator_id(),
@@ -1100,8 +1183,12 @@ async fn main() -> anyhow::Result<()> {
                                         block_height = header.height,
                                         "live block ahead of us — requesting sync"
                                     );
-                                    syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    net_height_for_p2p.fetch_max(header.height, std::sync::atomic::Ordering::Relaxed);
+                                    syncing_for_p2p
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    net_height_for_p2p.fetch_max(
+                                        header.height,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     net_for_attest.broadcast(NetworkMessage::SyncRequest {
                                         from_height: our_h + 1,
                                         to_height: header.height,
@@ -1117,7 +1204,11 @@ async fn main() -> anyhow::Result<()> {
                         signature,
                     } => {
                         // Verify attestation signature with domain separation.
-                        let payload = attestation_payload(engine_for_p2p.config().chain_id, block_height, &block_hash);
+                        let payload = attestation_payload(
+                            engine_for_p2p.config().chain_id,
+                            block_height,
+                            &block_hash,
+                        );
                         if signature.len() == 64 {
                             let mut sig = [0u8; 64];
                             sig.copy_from_slice(&signature);
@@ -1131,7 +1222,11 @@ async fn main() -> anyhow::Result<()> {
                                 // broadcast our (possibly changed) vote so the fleet
                                 // converges.
                                 if engine_for_p2p.fc_v2_active(block_height) {
-                                    broadcast_v2_revotes(&engine_for_p2p, &att_kp_for_p2p, &net_for_attest);
+                                    broadcast_v2_revotes(
+                                        &engine_for_p2p,
+                                        &att_kp_for_p2p,
+                                        &net_for_attest,
+                                    );
                                 }
                             } else {
                                 let v_b58 = account_to_base58(&validator_id);
@@ -1148,7 +1243,10 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    NetworkMessage::StatusAnnounce { height, state_root: _sr } => {
+                    NetworkMessage::StatusAnnounce {
+                        height,
+                        state_root: _sr,
+                    } => {
                         // Track peer heights — use a set of unique heights so that
                         // repeated announcements from the same stale node don't
                         // accumulate and falsely trigger sync mode.
@@ -1172,14 +1270,16 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             let peer_h = peer_heights_for_p2p.lock().unwrap();
-                            let peers_ahead = peer_h.iter().filter(|&&h| h > our_height + 1).count();
+                            let peers_ahead =
+                                peer_h.iter().filter(|&&h| h > our_height + 1).count();
                             let total_peers = peer_h.len();
                             drop(peer_h);
 
                             // Need at least 2 UNIQUE heights ahead to enter sync.
                             // Only trust a single peer if we're at genesis (no blocks yet).
                             if peers_ahead >= 2 || (total_peers <= 1 && our_height == 0) {
-                                net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
+                                net_height_for_p2p
+                                    .fetch_max(height, std::sync::atomic::Ordering::Relaxed);
                                 syncing_for_p2p.store(true, std::sync::atomic::Ordering::Relaxed);
                                 tracing::info!(
                                     our_height,
@@ -1200,7 +1300,8 @@ async fn main() -> anyhow::Result<()> {
                                 );
                             }
                         } else {
-                            net_height_for_p2p.fetch_max(height, std::sync::atomic::Ordering::Relaxed);
+                            net_height_for_p2p
+                                .fetch_max(height, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     NetworkMessage::CheckpointAttestation {
@@ -1211,28 +1312,42 @@ async fn main() -> anyhow::Result<()> {
                         signature,
                     } => {
                         // Verify the attestation signature.
-                        let msg = solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
-                            height, &block_hash, &state_root,
-                        );
+                        let msg =
+                            solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                                height,
+                                &block_hash,
+                                &state_root,
+                            );
                         if signature.len() == 64 {
                             let mut sig = [0u8; 64];
                             sig.copy_from_slice(&signature);
                             if solen_crypto::verify(&validator_id, &msg, &sig).is_ok() {
                                 let finalized = engine_for_p2p.attest_checkpoint_with_data(
-                                    validator_id, signature, height, &block_hash, &state_root,
+                                    validator_id,
+                                    signature,
+                                    height,
+                                    &block_hash,
+                                    &state_root,
                                 );
                                 if finalized {
-                                    tracing::info!(height, "checkpoint finalized via peer attestation");
+                                    tracing::info!(
+                                        height,
+                                        "checkpoint finalized via peer attestation"
+                                    );
                                 }
                             }
                         }
                     }
-                    NetworkMessage::SyncRequest { from_height, to_height } => {
+                    NetworkMessage::SyncRequest {
+                        from_height,
+                        to_height,
+                    } => {
                         // Rate-limit sync serving: ignore repeated requests for the
                         // same height range (stuck peer on old code).
                         let now = std::time::Instant::now();
                         let should_serve = {
-                            let entry = sync_serve_tracker.entry(from_height).or_insert((now, 0u32));
+                            let entry =
+                                sync_serve_tracker.entry(from_height).or_insert((now, 0u32));
                             if now.duration_since(entry.0) < std::time::Duration::from_secs(30) {
                                 entry.1 += 1;
                                 entry.1 <= 3 // serve max 3 times per 30s per height
@@ -1243,14 +1358,18 @@ async fn main() -> anyhow::Result<()> {
                         };
                         // Prune old tracker entries periodically.
                         if sync_serve_tracker.len() > 1000 {
-                            sync_serve_tracker.retain(|_, (t, _)| now.duration_since(*t) < std::time::Duration::from_secs(60));
+                            sync_serve_tracker.retain(|_, (t, _)| {
+                                now.duration_since(*t) < std::time::Duration::from_secs(60)
+                            });
                         }
 
                         // H-07: global cap on sync-serve broadcasts/sec (across all
                         // ranges) to bound amplification from distinct-range floods.
                         let should_serve = should_serve && {
                             const MAX_SYNC_SERVES_PER_SEC: u32 = 8;
-                            if now.duration_since(sync_serve_global.0) >= std::time::Duration::from_secs(1) {
+                            if now.duration_since(sync_serve_global.0)
+                                >= std::time::Duration::from_secs(1)
+                            {
                                 sync_serve_global = (now, 1);
                                 true
                             } else if sync_serve_global.1 < MAX_SYNC_SERVES_PER_SEC {
@@ -1262,7 +1381,10 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         if !should_serve {
-                            tracing::debug!(from = from_height, "ignoring repeated sync request (rate limited)");
+                            tracing::debug!(
+                                from = from_height,
+                                "ignoring repeated sync request (rate limited)"
+                            );
                         } else {
                             let max_batch = 100;
                             let _to = to_height.min(from_height + max_batch as u64 - 1);
@@ -1348,7 +1470,8 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         let our_height = engine_for_p2p.height();
-                        let known_net_height = net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
+                        let known_net_height =
+                            net_height_for_p2p.load(std::sync::atomic::Ordering::Relaxed);
 
                         if synced > 0 {
                             sync_fail_count = 0; // reset on any success
@@ -1362,7 +1485,8 @@ async fn main() -> anyhow::Result<()> {
                             // Received blocks but none applied.
                             // Only count as fork mismatch if some blocks were at the right height
                             // (not just stale duplicates from other peers responding late).
-                            let had_relevant_blocks = blocks.iter().any(|b| b.header.height >= our_height + 1);
+                            let had_relevant_blocks =
+                                blocks.iter().any(|b| b.header.height >= our_height + 1);
                             if !had_relevant_blocks {
                                 // All blocks were below our height — just stale duplicates, not a fork.
                                 continue;
@@ -1389,7 +1513,9 @@ async fn main() -> anyhow::Result<()> {
                                 // tip doesn't spuriously resync. This is the fork-strand escape
                                 // hatch — replay_synced_block's revert counter can't reach its
                                 // threshold here because bad_state_roots skips repeat-bad blocks.
-                                if known_net_height > our_height + 2 && !engine_for_p2p.is_resyncing() {
+                                if known_net_height > our_height + 2
+                                    && !engine_for_p2p.is_resyncing()
+                                {
                                     tracing::warn!(
                                         our_height,
                                         known_net_height,
@@ -1446,10 +1572,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 let height = status_engine.height();
                 let state_root = status_engine.store().read().unwrap().state_root();
-                status_handle.broadcast(NetworkMessage::StatusAnnounce {
-                    height,
-                    state_root,
-                });
+                status_handle.broadcast(NetworkMessage::StatusAnnounce { height, state_root });
 
                 // If still in sync mode, check if we can resume production.
                 ticks_since_start += 1;
@@ -1471,13 +1594,20 @@ async fn main() -> anyhow::Result<()> {
                         // but haven't accepted a live block yet.
                         // Safety fallback after 60s.
                         status_engine.clear_stale_pending(height);
-                        tracing::info!(height, network_height = known, "timeout — resuming block production");
+                        tracing::info!(
+                            height,
+                            network_height = known,
+                            "timeout — resuming block production"
+                        );
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if height > 0 && known == 0 && ticks_since_start >= 5 {
                         // We replayed the chain but no peer has announced a height yet.
                         // We're likely the most advanced node — resume production.
                         status_engine.clear_stale_pending(height);
-                        tracing::info!(height, "no peer heights received — resuming as lead validator");
+                        tracing::info!(
+                            height,
+                            "no peer heights received — resuming as lead validator"
+                        );
                         syncing_for_status.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                     // Otherwise: keep waiting for a live block to verify state.
@@ -1507,17 +1637,23 @@ async fn main() -> anyhow::Result<()> {
     // file instead of re-downloading the whole chain). Keep the newest few.
     let checkpoints_dir = PathBuf::from(&data_dir).join("checkpoints");
     let local_snapshots = solen_consensus::snapshot::LocalSnapshots::new(
-        checkpoints_dir.clone(), LOCAL_SNAPSHOT_KEEP,
+        checkpoints_dir.clone(),
+        LOCAL_SNAPSHOT_KEEP,
     );
     let _rpc_handle = solen_rpc::server::start_rpc_server_full(
-        rpc_addr, engine.clone(), tx_broadcaster, Some(local_snapshots.clone()),
-    ).await?;
+        rpc_addr,
+        engine.clone(),
+        tx_broadcaster,
+        Some(local_snapshots.clone()),
+    )
+    .await?;
 
     // Fine-grained, restart-surviving local recovery via native RocksDB
     // checkpoints (hard-linked, cheap). Created periodically below; consulted by
     // the resync path before falling back to the serialized snapshot / remote.
     let rocks_checkpoints = solen_consensus::snapshot::RocksCheckpoints::new(
-        PathBuf::from(&data_dir).join("rocks-checkpoints"), ROCKS_CHECKPOINT_KEEP,
+        PathBuf::from(&data_dir).join("rocks-checkpoints"),
+        ROCKS_CHECKPOINT_KEEP,
     );
     {
         let engine_cp = engine.clone();
@@ -1571,13 +1707,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if explorer_port > 0 {
-        let explorer_addr: SocketAddr =
-            format!("127.0.0.1:{}", explorer_port).parse()?;
+        let explorer_addr: SocketAddr = format!("127.0.0.1:{}", explorer_port).parse()?;
         let explorer_store = index_store.clone();
         let explorer_engine = engine.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                solen_indexer::api::start_explorer_api(explorer_addr, explorer_store, Some(explorer_engine)).await
+            if let Err(e) = solen_indexer::api::start_explorer_api(
+                explorer_addr,
+                explorer_store,
+                Some(explorer_engine),
+            )
+            .await
             {
                 tracing::error!(error = %e, "explorer API failed");
             }
@@ -1669,8 +1808,7 @@ async fn main() -> anyhow::Result<()> {
             // heuristic disrupted that) and not already resyncing.
             {
                 let our_h = engine_clone.height();
-                let net_h = network_height_for_consensus
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                let net_h = network_height_for_consensus.load(std::sync::atomic::Ordering::Relaxed);
                 let stranded = our_h > 0
                     && net_h > our_h + STRANDED_BEHIND_BLOCKS
                     && !engine_clone.is_resyncing()
@@ -1766,7 +1904,11 @@ async fn main() -> anyhow::Result<()> {
                             buf.copy_from_slice(&data[..8]);
                             let new_bt = u64::from_le_bytes(buf);
                             if new_bt > 0 && new_bt != min_interval.as_millis() as u64 {
-                                info!(old_ms = min_interval.as_millis(), new_ms = new_bt, "block time updated by governance");
+                                info!(
+                                    old_ms = min_interval.as_millis(),
+                                    new_ms = new_bt,
+                                    "block time updated by governance"
+                                );
                                 min_interval = std::time::Duration::from_millis(new_bt);
                             }
                         }
@@ -1775,10 +1917,15 @@ async fn main() -> anyhow::Result<()> {
 
                 // At epoch boundaries, broadcast our checkpoint attestation.
                 if current_height % 100 == 0 {
-                    if let Some((cp_height, cp_block_hash, cp_state_root)) = engine_clone.pending_checkpoint() {
-                        let msg = solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
-                            cp_height, &cp_block_hash, &cp_state_root,
-                        );
+                    if let Some((cp_height, cp_block_hash, cp_state_root)) =
+                        engine_clone.pending_checkpoint()
+                    {
+                        let msg =
+                            solen_consensus::checkpoint::FinalizedCheckpointStore::signing_message(
+                                cp_height,
+                                &cp_block_hash,
+                                &cp_state_root,
+                            );
                         let sig = att_kp_for_consensus.sign(&msg);
                         if let Some(ref handle) = net_for_blocks {
                             handle.broadcast(NetworkMessage::CheckpointAttestation {
@@ -1827,19 +1974,14 @@ async fn main() -> anyhow::Result<()> {
                     // self-heal and loops forever requesting sync from peers it
                     // then rejects as a different fork — it must be wiped and
                     // resynced by hand. Listed so auto-resync works on mainnet.
-                    Network::Mainnet => vec![
-                        "https://rpc.solenchain.io".into(),
-                    ],
+                    Network::Mainnet => vec!["https://rpc.solenchain.io".into()],
                     // Devnet is local-only; no public resync source.
                     _ => vec![],
                 };
                 // Operator-supplied canonical RPC(s) take priority over the
                 // built-in defaults (and are the ONLY source on devnet).
-                let resync_urls: Vec<String> = cli_resync_urls
-                    .iter()
-                    .cloned()
-                    .chain(resync_urls)
-                    .collect();
+                let resync_urls: Vec<String> =
+                    cli_resync_urls.iter().cloned().chain(resync_urls).collect();
 
                 let mut resync_ok = false;
                 // Same reqwest::blocking-in-async hazard as startup snapshot sync,
@@ -1847,125 +1989,169 @@ async fn main() -> anyhow::Result<()> {
                 // the blocking client (and its runtime drop) run without panicking
                 // — required now that mainnet has resync URLs.
                 tokio::task::block_in_place(|| {
-                // The backward recovery tiers below REGRESS us to an earlier
-                // height, so they are correct ONLY for a DEFINITIVELY forked tip.
-                // If our tip is canonical we are merely behind/sync-starved, and
-                // regressing would re-strand us in an endless resync loop. Just as
-                // important: if the probe is INCONCLUSIVE (canonical source timed
-                // out — common when the whole fleet is restarting), we must NOT
-                // treat that as a fork and regress; fail open and fall through to
-                // the forward-pulling remote snapshot instead. Gating on `!canonical`
-                // (fail-closed) is exactly what wedged validator8 on 2026-07-19.
-                // (state_root collides across heights on an idle chain, but it is
-                // compared at the SAME height here, so the check is sound.)
-                let tip_forked = {
-                    let h = engine_clone.height();
-                    let root = engine_clone.store().read().unwrap().state_root();
-                    h > 0 && matches!(check_canonicity(&resync_urls, h, &root), Canonicity::Forked)
-                };
-                if tip_forked {
-                // --- Phase 2: in-place rollback to the common ancestor. If the
-                // fork is shallow enough to sit within the rollback journal, find
-                // the deepest height where our state root still matches the
-                // canonical chain and undo just the forked suffix — no download,
-                // no snapshot restore, rewind = actual fork depth. ---
-                if let Some(min_target) = engine_clone.min_rollback_target() {
-                    let tip = engine_clone.height();
-                    if let Some((anc_h, anc_root)) =
-                        find_common_ancestor(&resync_urls, &engine_clone, min_target, tip)
-                    {
-                        if anc_h < tip && engine_clone.rollback_to_height(anc_h, &anc_root) {
-                            info!(from = tip, to = anc_h, "in-place rollback to common ancestor — resync complete");
-                            resync_ok = true;
-                            return;
+                    // The backward recovery tiers below REGRESS us to an earlier
+                    // height, so they are correct ONLY for a DEFINITIVELY forked tip.
+                    // If our tip is canonical we are merely behind/sync-starved, and
+                    // regressing would re-strand us in an endless resync loop. Just as
+                    // important: if the probe is INCONCLUSIVE (canonical source timed
+                    // out — common when the whole fleet is restarting), we must NOT
+                    // treat that as a fork and regress; fail open and fall through to
+                    // the forward-pulling remote snapshot instead. Gating on `!canonical`
+                    // (fail-closed) is exactly what wedged validator8 on 2026-07-19.
+                    // (state_root collides across heights on an idle chain, but it is
+                    // compared at the SAME height here, so the check is sound.)
+                    let tip_forked = {
+                        let h = engine_clone.height();
+                        let root = engine_clone.store().read().unwrap().state_root();
+                        h > 0
+                            && matches!(
+                                check_canonicity(&resync_urls, h, &root),
+                                Canonicity::Forked
+                            )
+                    };
+                    if tip_forked {
+                        // --- Phase 2: in-place rollback to the common ancestor. If the
+                        // fork is shallow enough to sit within the rollback journal, find
+                        // the deepest height where our state root still matches the
+                        // canonical chain and undo just the forked suffix — no download,
+                        // no snapshot restore, rewind = actual fork depth. ---
+                        if let Some(min_target) = engine_clone.min_rollback_target() {
+                            let tip = engine_clone.height();
+                            if let Some((anc_h, anc_root)) =
+                                find_common_ancestor(&resync_urls, &engine_clone, min_target, tip)
+                            {
+                                if anc_h < tip && engine_clone.rollback_to_height(anc_h, &anc_root)
+                                {
+                                    info!(
+                                        from = tip,
+                                        to = anc_h,
+                                        "in-place rollback to common ancestor — resync complete"
+                                    );
+                                    resync_ok = true;
+                                    return;
+                                }
+                            }
                         }
-                    }
-                }
 
-                // --- Phase 3: restore a fine-grained local RocksDB checkpoint
-                // (hard-linked, restart-surviving) whose height a canonical peer
-                // confirms, then sync forward. Finer than the serialized snapshot
-                // below, so it rewinds and replays less; covers the case where the
-                // in-memory journal is gone (e.g. after a restart). ---
-                let tip = engine_clone.height();
-                for entry in rocks_checkpoints_for_resync.list().into_iter().rev()
-                    .filter(|e| e.height <= tip)
-                {
-                    if !checkpoint_is_canonical(&resync_urls, entry.height, &entry.state_root) {
-                        info!(height = entry.height, "rocks checkpoint not confirmed canonical — trying older / next tier");
-                        continue;
-                    }
-                    info!(height = entry.height, path = %entry.db_path.display(),
+                        // --- Phase 3: restore a fine-grained local RocksDB checkpoint
+                        // (hard-linked, restart-surviving) whose height a canonical peer
+                        // confirms, then sync forward. Finer than the serialized snapshot
+                        // below, so it rewinds and replays less; covers the case where the
+                        // in-memory journal is gone (e.g. after a restart). ---
+                        let tip = engine_clone.height();
+                        for entry in rocks_checkpoints_for_resync
+                            .list()
+                            .into_iter()
+                            .rev()
+                            .filter(|e| e.height <= tip)
+                        {
+                            if !checkpoint_is_canonical(
+                                &resync_urls,
+                                entry.height,
+                                &entry.state_root,
+                            ) {
+                                info!(height = entry.height, "rocks checkpoint not confirmed canonical — trying older / next tier");
+                                continue;
+                            }
+                            info!(height = entry.height, path = %entry.db_path.display(),
                           "restoring from local RocksDB checkpoint (no download)");
-                    let restored = {
-                        let store = engine_clone.store();
-                        let mut store = store.write().unwrap();
-                        store.restore_from_checkpoint(&entry.db_path)
-                    };
-                    match restored {
-                        Ok(()) => {
-                            let (h, ep) = engine_clone.reset_to_store_meta();
-                            info!(height = h, epoch = ep, "RocksDB checkpoint restored — resync complete");
-                            resync_ok = true;
-                            return;
+                            let restored = {
+                                let store = engine_clone.store();
+                                let mut store = store.write().unwrap();
+                                store.restore_from_checkpoint(&entry.db_path)
+                            };
+                            match restored {
+                                Ok(()) => {
+                                    let (h, ep) = engine_clone.reset_to_store_meta();
+                                    info!(
+                                        height = h,
+                                        epoch = ep,
+                                        "RocksDB checkpoint restored — resync complete"
+                                    );
+                                    resync_ok = true;
+                                    return;
+                                }
+                                Err(err) => {
+                                    warn!(error = %err, "rocks checkpoint restore failed — trying older / next tier")
+                                }
+                            }
                         }
-                        Err(err) => warn!(error = %err, "rocks checkpoint restore failed — trying older / next tier"),
-                    }
-                }
 
-                // --- Phase 1: try a verified LOCAL checkpoint before any network
-                // download. Restore from the newest on-disk snapshot whose height
-                // a canonical peer confirms (so we never restore our own forked
-                // state), falling back to older checkpoints then the remote path.
-                // This avoids re-downloading the whole chain and works even when
-                // the public RPC is itself unreachable. ---
-                let our_h = engine_clone.height();
-                for (cp_h, cp_path) in local_snapshots_for_resync.list().into_iter().rev()
-                    .filter(|(h, _)| *h <= our_h)
-                {
-                    let bytes = match std::fs::read(&cp_path) {
-                        Ok(b) => b,
-                        Err(e) => { warn!(height = cp_h, error = %e, "local checkpoint read failed — skipping"); continue; }
-                    };
-                    let meta = match solen_consensus::snapshot::read_snapshot_meta(&bytes) {
-                        Ok(m) => m,
-                        Err(e) => { warn!(height = cp_h, error = %e, "local checkpoint unreadable — skipping"); continue; }
-                    };
-                    if !checkpoint_is_canonical(&resync_urls, meta.height, &meta.state_root) {
-                        info!(height = meta.height, "local checkpoint not confirmed canonical — trying older / remote");
-                        continue;
-                    }
-                    info!(height = meta.height, path = %cp_path.display(),
+                        // --- Phase 1: try a verified LOCAL checkpoint before any network
+                        // download. Restore from the newest on-disk snapshot whose height
+                        // a canonical peer confirms (so we never restore our own forked
+                        // state), falling back to older checkpoints then the remote path.
+                        // This avoids re-downloading the whole chain and works even when
+                        // the public RPC is itself unreachable. ---
+                        let our_h = engine_clone.height();
+                        for (cp_h, cp_path) in local_snapshots_for_resync
+                            .list()
+                            .into_iter()
+                            .rev()
+                            .filter(|(h, _)| *h <= our_h)
+                        {
+                            let bytes = match std::fs::read(&cp_path) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(height = cp_h, error = %e, "local checkpoint read failed — skipping");
+                                    continue;
+                                }
+                            };
+                            let meta = match solen_consensus::snapshot::read_snapshot_meta(&bytes) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    warn!(height = cp_h, error = %e, "local checkpoint unreadable — skipping");
+                                    continue;
+                                }
+                            };
+                            if !checkpoint_is_canonical(&resync_urls, meta.height, &meta.state_root)
+                            {
+                                info!(height = meta.height, "local checkpoint not confirmed canonical — trying older / remote");
+                                continue;
+                            }
+                            info!(height = meta.height, path = %cp_path.display(),
                           "restoring from verified local checkpoint (no download)");
-                    let store = engine_clone.store();
-                    let mut store = store.write().unwrap();
-                    store.clear().ok();
-                    match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &bytes) {
-                        Ok(m) => {
-                            drop(store);
-                            engine_clone.reset_to_height(m.height, m.epoch);
-                            resync_ok = true;
-                            info!(height = m.height, epoch = m.epoch, "local checkpoint restored — resync complete");
-                            break;
+                            let store = engine_clone.store();
+                            let mut store = store.write().unwrap();
+                            store.clear().ok();
+                            match solen_consensus::snapshot::restore_snapshot(
+                                store.as_mut(),
+                                &bytes,
+                            ) {
+                                Ok(m) => {
+                                    drop(store);
+                                    engine_clone.reset_to_height(m.height, m.epoch);
+                                    resync_ok = true;
+                                    info!(
+                                        height = m.height,
+                                        epoch = m.epoch,
+                                        "local checkpoint restored — resync complete"
+                                    );
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "local checkpoint restore failed — falling back to remote")
+                                }
+                            }
                         }
-                        Err(e) => warn!(error = %e, "local checkpoint restore failed — falling back to remote"),
+                    } // end backward recovery tiers (run only when our tip is forked)
+
+                    if resync_ok {
+                        return;
                     }
-                }
-                } // end backward recovery tiers (run only when our tip is forked)
 
-                if resync_ok { return; }
-
-                for url in &resync_urls {
-                    // Skip if this URL points to ourselves — check by comparing height.
-                    let client = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(120))
-                        .build() {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-                    // Quick height check — if peer is at same or lower height, skip.
-                    let our_h = engine_clone.height();
-                    if let Ok(resp) = client.post(url.as_str())
+                    for url in &resync_urls {
+                        // Skip if this URL points to ourselves — check by comparing height.
+                        let client = match reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(120))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        // Quick height check — if peer is at same or lower height, skip.
+                        let our_h = engine_clone.height();
+                        if let Ok(resp) = client.post(url.as_str())
                         .header("Content-Type", "application/json")
                         .body(r#"{"jsonrpc":"2.0","id":1,"method":"solen_chainStatus","params":[]}"#)
                         .send()
@@ -1978,101 +2164,132 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    info!(url, "attempting snapshot resync...");
+                        info!(url, "attempting snapshot resync...");
 
-                    // Get metadata first.
-                    let meta_resp = match client.post(url.as_str())
+                        // Get metadata first.
+                        let meta_resp = match client.post(url.as_str())
                         .header("Content-Type", "application/json")
                         .body(r#"{"jsonrpc":"2.0","id":1,"method":"solen_getSnapshotMeta","params":[]}"#)
                         .send() {
                         Ok(r) => r,
                         Err(e) => { warn!(url, error = %e, "resync meta failed"); continue; }
                     };
-                    let meta_json: serde_json::Value = match meta_resp.json() {
-                        Ok(j) => j,
-                        Err(_) => continue,
-                    };
-                    let total_bytes = match meta_json["result"]["total_bytes"].as_u64() {
-                        Some(t) => t as usize,
-                        None => { warn!(url, "resync: no total_bytes in meta"); continue; }
-                    };
-
-                    info!(url, total_bytes, "downloading snapshot chunks...");
-                    let chunk_size: usize = 4 * 1024 * 1024;
-                    let mut snapshot_data = Vec::with_capacity(total_bytes);
-                    let mut offset: usize = 0;
-                    let mut download_ok = true;
-
-                    loop {
-                        let body = serde_json::json!({
-                            "jsonrpc": "2.0", "id": 1,
-                            "method": "solen_getSnapshotChunk",
-                            "params": [offset, chunk_size]
-                        });
-                        let resp = match client.post(url.as_str())
-                            .header("Content-Type", "application/json")
-                            .body(body.to_string())
-                            .send() {
-                            Ok(r) => r,
-                            Err(e) => { warn!(error = %e, "chunk download failed"); download_ok = false; break; }
-                        };
-                        let cj: serde_json::Value = match resp.json() {
+                        let meta_json: serde_json::Value = match meta_resp.json() {
                             Ok(j) => j,
-                            Err(_) => { download_ok = false; break; }
+                            Err(_) => continue,
                         };
-                        let chunk_b64 = match cj["result"]["data"].as_str() {
-                            Some(s) => s.to_string(),
-                            None => { download_ok = false; break; }
-                        };
-                        let chunk_bytes = match base64_decode(&chunk_b64) {
-                            Ok(b) => b,
-                            Err(_) => { download_ok = false; break; }
-                        };
-                        let done = cj["result"]["done"].as_bool().unwrap_or(false);
-                        info!(offset, chunk_len = chunk_bytes.len(), "resync chunk downloaded");
-                        snapshot_data.extend_from_slice(&chunk_bytes);
-                        offset += chunk_bytes.len();
-                        if done || chunk_bytes.is_empty() { break; }
-                    }
-
-                    if !download_ok || snapshot_data.is_empty() { continue; }
-
-                    // Wipe current store and restore from snapshot.
-                    info!(bytes = snapshot_data.len(), "restoring snapshot...");
-                    {
-                        let store = engine_clone.store();
-                        let mut store = store.write().unwrap();
-                        store.clear().ok();
-                        match solen_consensus::snapshot::restore_snapshot(store.as_mut(), &snapshot_data) {
-                            Ok(meta) => {
-                                // Release the store WRITE lock BEFORE reset_to_height,
-                                // which takes a store READ lock to read the restored
-                                // state_root. std RwLock is not reentrant, so calling it
-                                // while still holding this write guard self-deadlocks the
-                                // thread — freezing consensus AND every RPC store reader.
-                                // (2026-06-26 validator3 hang: its last log line was
-                                // exactly "snapshot restored — resync complete", then 6h
-                                // of silence with RPC dead.) The local-checkpoint path
-                                // above already drops the guard first for this reason.
-                                drop(store);
-                                info!(
-                                    height = meta.height,
-                                    epoch = meta.epoch,
-                                    entries = meta.entry_count,
-                                    "snapshot restored — resync complete"
-                                );
-                                // Reset engine state to match snapshot.
-                                engine_clone.reset_to_height(meta.height, meta.epoch);
-                                resync_ok = true;
+                        let total_bytes = match meta_json["result"]["total_bytes"].as_u64() {
+                            Some(t) => t as usize,
+                            None => {
+                                warn!(url, "resync: no total_bytes in meta");
+                                continue;
                             }
-                            Err(e) => {
-                                warn!(error = %e, "snapshot restore failed");
+                        };
+
+                        info!(url, total_bytes, "downloading snapshot chunks...");
+                        let chunk_size: usize = 4 * 1024 * 1024;
+                        let mut snapshot_data = Vec::with_capacity(total_bytes);
+                        let mut offset: usize = 0;
+                        let mut download_ok = true;
+
+                        loop {
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "method": "solen_getSnapshotChunk",
+                                "params": [offset, chunk_size]
+                            });
+                            let resp = match client
+                                .post(url.as_str())
+                                .header("Content-Type", "application/json")
+                                .body(body.to_string())
+                                .send()
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    warn!(error = %e, "chunk download failed");
+                                    download_ok = false;
+                                    break;
+                                }
+                            };
+                            let cj: serde_json::Value = match resp.json() {
+                                Ok(j) => j,
+                                Err(_) => {
+                                    download_ok = false;
+                                    break;
+                                }
+                            };
+                            let chunk_b64 = match cj["result"]["data"].as_str() {
+                                Some(s) => s.to_string(),
+                                None => {
+                                    download_ok = false;
+                                    break;
+                                }
+                            };
+                            let chunk_bytes = match base64_decode(&chunk_b64) {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    download_ok = false;
+                                    break;
+                                }
+                            };
+                            let done = cj["result"]["done"].as_bool().unwrap_or(false);
+                            info!(
+                                offset,
+                                chunk_len = chunk_bytes.len(),
+                                "resync chunk downloaded"
+                            );
+                            snapshot_data.extend_from_slice(&chunk_bytes);
+                            offset += chunk_bytes.len();
+                            if done || chunk_bytes.is_empty() {
+                                break;
                             }
                         }
-                    }
 
-                    if resync_ok { break; }
-                }
+                        if !download_ok || snapshot_data.is_empty() {
+                            continue;
+                        }
+
+                        // Wipe current store and restore from snapshot.
+                        info!(bytes = snapshot_data.len(), "restoring snapshot...");
+                        {
+                            let store = engine_clone.store();
+                            let mut store = store.write().unwrap();
+                            store.clear().ok();
+                            match solen_consensus::snapshot::restore_snapshot(
+                                store.as_mut(),
+                                &snapshot_data,
+                            ) {
+                                Ok(meta) => {
+                                    // Release the store WRITE lock BEFORE reset_to_height,
+                                    // which takes a store READ lock to read the restored
+                                    // state_root. std RwLock is not reentrant, so calling it
+                                    // while still holding this write guard self-deadlocks the
+                                    // thread — freezing consensus AND every RPC store reader.
+                                    // (2026-06-26 validator3 hang: its last log line was
+                                    // exactly "snapshot restored — resync complete", then 6h
+                                    // of silence with RPC dead.) The local-checkpoint path
+                                    // above already drops the guard first for this reason.
+                                    drop(store);
+                                    info!(
+                                        height = meta.height,
+                                        epoch = meta.epoch,
+                                        entries = meta.entry_count,
+                                        "snapshot restored — resync complete"
+                                    );
+                                    // Reset engine state to match snapshot.
+                                    engine_clone.reset_to_height(meta.height, meta.epoch);
+                                    resync_ok = true;
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "snapshot restore failed");
+                                }
+                            }
+                        }
+
+                        if resync_ok {
+                            break;
+                        }
+                    }
                 });
 
                 engine_clone.set_resyncing(false);
@@ -2111,21 +2328,25 @@ async fn main() -> anyhow::Result<()> {
             // permanent deadlock (2026-06-08). Pending blocks are cleared on
             // partition detection (engine force-finalize loop), so there is no stale
             // block to compete with the prober's across windows.
-            let is_partitioned = is_validator
-                && engine_clone.height() > 0
-                && engine_clone.is_likely_partitioned();
+            let is_partitioned =
+                is_validator && engine_clone.height() > 0 && engine_clone.is_likely_partitioned();
             let mut probe_producer = false;
             if is_partitioned {
                 // Clear bans either way so probe + attestation traffic can flow.
                 if let Some(ref handle) = net_for_blocks {
                     handle.report_peer(solen_p2p::reputation::ReputationEvent::ClearAllBans);
                 }
-                if engine_clone.is_partition_probe_proposer() && engine_clone.partition_probe_due() {
-                    tracing::warn!("partition detected — recovery probe (this node is the prober this window)");
+                if engine_clone.is_partition_probe_proposer() && engine_clone.partition_probe_due()
+                {
+                    tracing::warn!(
+                        "partition detected — recovery probe (this node is the prober this window)"
+                    );
                     probe_producer = true;
                     // Fall through to production below.
                 } else {
-                    tracing::warn!("skipping production — partition detected (not the prober this window)");
+                    tracing::warn!(
+                        "skipping production — partition detected (not the prober this window)"
+                    );
                     // (Stranded auto-recovery is handled generally earlier in the
                     // loop — covering both latched and block-sync strands — so it
                     // is not duplicated here.)
@@ -2173,7 +2394,10 @@ async fn main() -> anyhow::Result<()> {
             // If so, request sync for that height to get the correct block from peers.
             if let Some(dropped_height) = engine_clone.take_dropped_block_height() {
                 if let Some(ref handle) = net_for_blocks {
-                    tracing::info!(height = dropped_height, "requesting sync after dropping mismatched block");
+                    tracing::info!(
+                        height = dropped_height,
+                        "requesting sync after dropping mismatched block"
+                    );
                     handle.broadcast(NetworkMessage::SyncRequest {
                         from_height: dropped_height,
                         to_height: dropped_height + 10,
@@ -2188,7 +2412,11 @@ async fn main() -> anyhow::Result<()> {
 
                 // Broadcast the proposed block with full operations.
                 if let Some(ref handle) = net_for_blocks {
-                    let gas = produced.finalized.as_ref().map(|b| b.result.gas_used).unwrap_or(0);
+                    let gas = produced
+                        .finalized
+                        .as_ref()
+                        .map(|b| b.result.gas_used)
+                        .unwrap_or(0);
                     let tx_count = produced.operations.len();
                     let header_for_att = produced.header.clone();
                     handle.broadcast(NetworkMessage::NewBlock {
@@ -2210,7 +2438,11 @@ async fn main() -> anyhow::Result<()> {
                         broadcast_v2_revotes(&engine_clone, &att_kp_for_consensus, handle);
                     } else {
                         let bh = solen_consensus::engine::block_hash(&header_for_att);
-                        let att_payload = attestation_payload(engine_clone.config().chain_id, header_for_att.height, &bh);
+                        let att_payload = attestation_payload(
+                            engine_clone.config().chain_id,
+                            header_for_att.height,
+                            &bh,
+                        );
                         let att_sig = att_kp_for_consensus.sign(&att_payload);
                         handle.broadcast(NetworkMessage::Attestation {
                             validator_id: engine_clone.validator_id(),
@@ -2287,12 +2519,12 @@ fn find_common_ancestor(
             None => break, // missing local block — can't compare deeper
         };
         let want = hex(&our_root);
-        let body = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{h}]}}"#
-        );
+        let body =
+            format!(r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{h}]}}"#);
         let mut canonical: Option<String> = None;
         for url in urls {
-            if let Ok(resp) = client.post(url.as_str())
+            if let Ok(resp) = client
+                .post(url.as_str())
                 .header("Content-Type", "application/json")
                 .body(body.clone())
                 .send()
@@ -2307,7 +2539,7 @@ fn find_common_ancestor(
         }
         match canonical {
             Some(r) if r.eq_ignore_ascii_case(&want) => return Some((h, our_root)),
-            Some(_) => {} // still diverged at h — go deeper
+            Some(_) => {}        // still diverged at h — go deeper
             None => return None, // no seed answered — bail to other recovery paths
         }
         if h == min_height {
@@ -2380,21 +2612,25 @@ fn check_canonicity(urls: &[String], height: u64, expected_root: &[u8; 32]) -> C
         Err(_) => return Canonicity::Inconclusive,
     };
     let want = hex(expected_root);
-    let body = format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{height}]}}"#
-    );
+    let body =
+        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"solen_getBlock","params":[{height}]}}"#);
     // Up to 3 rounds over all sources; return on the first definitive answer.
     // A transient timeout on one round must not read as a fork — retry first.
     const ROUNDS: u64 = 3;
     for round in 0..ROUNDS {
-        let answers: Vec<Option<String>> = urls.iter().map(|url| {
-            let resp = client.post(url.as_str())
-                .header("Content-Type", "application/json")
-                .body(body.clone())
-                .send().ok()?;
-            let json = resp.json::<serde_json::Value>().ok()?;
-            json["result"]["state_root"].as_str().map(|s| s.to_string())
-        }).collect();
+        let answers: Vec<Option<String>> = urls
+            .iter()
+            .map(|url| {
+                let resp = client
+                    .post(url.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(body.clone())
+                    .send()
+                    .ok()?;
+                let json = resp.json::<serde_json::Value>().ok()?;
+                json["result"]["state_root"].as_str().map(|s| s.to_string())
+            })
+            .collect();
         let verdict = decide_canonicity(answers.iter().map(|o| o.as_deref()), &want);
         if verdict != Canonicity::Inconclusive {
             return verdict;
@@ -2412,13 +2648,18 @@ fn check_canonicity(urls: &[String], height: u64, expected_root: &[u8; 32]) -> C
 /// the old raw check it now retries first, so a transient hiccup no longer makes
 /// a node reject its own valid checkpoints while walking the recovery tiers.
 fn checkpoint_is_canonical(urls: &[String], height: u64, expected_root: &[u8; 32]) -> bool {
-    matches!(check_canonicity(urls, height, expected_root), Canonicity::Canonical)
+    matches!(
+        check_canonicity(urls, height, expected_root),
+        Canonicity::Canonical
+    )
 }
 
 /// Build the deterministic payload for attestation signing/verification.
 fn attestation_payload(chain_id: u64, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
     // Use the engine's domain-separated payload to ensure consistency.
-    solen_consensus::engine::ConsensusEngine::attestation_signing_payload(chain_id, height, block_hash)
+    solen_consensus::engine::ConsensusEngine::attestation_signing_payload(
+        chain_id, height, block_hash,
+    )
 }
 
 /// v2 fork choice: broadcast any (height, hash) attestations the engine wants us
@@ -2458,11 +2699,20 @@ fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
     const TABLE: [u8; 128] = {
         let mut t = [0xFF; 128];
         let mut i = 0u8;
-        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            i += 1;
+        }
         i = 0;
-        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
+        while i < 26 {
+            t[(b'a' + i) as usize] = 26 + i;
+            i += 1;
+        }
         i = 0;
-        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
+        while i < 10 {
+            t[(b'0' + i) as usize] = 52 + i;
+            i += 1;
+        }
         t[b'+' as usize] = 62;
         t[b'/' as usize] = 63;
         t
@@ -2491,17 +2741,23 @@ fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod canonicity_tests {
-    use super::{classify_root, decide_canonicity, checkpoint_is_canonical, Canonicity};
+    use super::{checkpoint_is_canonical, classify_root, decide_canonicity, Canonicity};
 
     #[test]
     fn classify_matching_root_is_canonical() {
         // Case-insensitive hex comparison.
-        assert_eq!(classify_root(Some("abCD"), "ABcd"), Some(Canonicity::Canonical));
+        assert_eq!(
+            classify_root(Some("abCD"), "ABcd"),
+            Some(Canonicity::Canonical)
+        );
     }
 
     #[test]
     fn classify_differing_root_is_forked() {
-        assert_eq!(classify_root(Some("dead"), "beef"), Some(Canonicity::Forked));
+        assert_eq!(
+            classify_root(Some("dead"), "beef"),
+            Some(Canonicity::Forked)
+        );
     }
 
     #[test]

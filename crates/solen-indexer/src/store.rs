@@ -230,10 +230,20 @@ impl IndexStore {
     }
 
     pub fn get_recent_txs_paged(&self, limit: usize, offset: usize) -> Vec<&IndexedTx> {
-        self.transactions.iter().rev().skip(offset).take(limit).collect()
+        self.transactions
+            .iter()
+            .rev()
+            .skip(offset)
+            .take(limit)
+            .collect()
     }
 
-    pub fn get_account_txs_paged(&self, account: &str, limit: usize, offset: usize) -> Vec<&IndexedTx> {
+    pub fn get_account_txs_paged(
+        &self,
+        account: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<&IndexedTx> {
         self.account_txs
             .get(account)
             .map(|indices| {
@@ -290,10 +300,26 @@ impl IndexStore {
             .iter()
             .rev()
             .filter(|e| {
-                if let Some(f) = from_height { if e.block_height < f { return false; } }
-                if let Some(t) = to_height   { if e.block_height > t { return false; } }
-                if let Some(em) = emitter    { if e.emitter != em     { return false; } }
-                if let Some(tp) = topic      { if e.topic != tp       { return false; } }
+                if let Some(f) = from_height {
+                    if e.block_height < f {
+                        return false;
+                    }
+                }
+                if let Some(t) = to_height {
+                    if e.block_height > t {
+                        return false;
+                    }
+                }
+                if let Some(em) = emitter {
+                    if e.emitter != em {
+                        return false;
+                    }
+                }
+                if let Some(tp) = topic {
+                    if e.topic != tp {
+                        return false;
+                    }
+                }
                 true
             })
             .skip(offset)
@@ -376,7 +402,10 @@ impl IndexStore {
     }
 
     pub fn get_rollup_batch_count(&self, rollup_id: u64) -> usize {
-        self.rollup_batches.get(&rollup_id).map(|b| b.len()).unwrap_or(0)
+        self.rollup_batches
+            .get(&rollup_id)
+            .map(|b| b.len())
+            .unwrap_or(0)
     }
 }
 
@@ -385,35 +414,61 @@ mod cap_tests {
     use super::*;
 
     fn blk(h: u64) -> IndexedBlock {
-        IndexedBlock { height: h, epoch: h / 100, parent_hash: String::new(),
-            state_root: String::new(), proposer: String::new(), timestamp_ms: 0,
-            tx_count: 0, gas_used: 0, attestation_count: 0 }
+        IndexedBlock {
+            height: h,
+            epoch: h / 100,
+            parent_hash: String::new(),
+            state_root: String::new(),
+            proposer: String::new(),
+            timestamp_ms: 0,
+            tx_count: 0,
+            gas_used: 0,
+            attestation_count: 0,
+        }
     }
     fn evt(h: u64) -> IndexedEvent {
-        IndexedEvent { block_height: h, tx_index: 0, emitter: String::new(),
-            topic: String::new(), data: String::new() }
+        IndexedEvent {
+            block_height: h,
+            tx_index: 0,
+            emitter: String::new(),
+            topic: String::new(),
+            data: String::new(),
+        }
     }
 
     #[test]
     fn blocks_are_capped_keeping_the_most_recent() {
         let mut s = IndexStore::new();
-        for h in 0..(MAX_INDEXED_BLOCKS as u64 + 500) { s.add_block(blk(h)); }
+        for h in 0..(MAX_INDEXED_BLOCKS as u64 + 500) {
+            s.add_block(blk(h));
+        }
         assert_eq!(s.blocks.len(), MAX_INDEXED_BLOCKS, "bounded");
         // Oldest evicted, newest retained.
         assert_eq!(s.blocks.first().unwrap().height, 500);
-        assert_eq!(s.blocks.last().unwrap().height, MAX_INDEXED_BLOCKS as u64 + 499);
+        assert_eq!(
+            s.blocks.last().unwrap().height,
+            MAX_INDEXED_BLOCKS as u64 + 499
+        );
         // latest_height still tracks the true tip after eviction.
         assert_eq!(s.latest_height, MAX_INDEXED_BLOCKS as u64 + 499);
         // Recent-block query still works.
-        assert_eq!(s.get_recent_blocks(1)[0].height, MAX_INDEXED_BLOCKS as u64 + 499);
+        assert_eq!(
+            s.get_recent_blocks(1)[0].height,
+            MAX_INDEXED_BLOCKS as u64 + 499
+        );
     }
 
     #[test]
     fn events_are_capped_keeping_the_most_recent() {
         let mut s = IndexStore::new();
-        for h in 0..(MAX_INDEXED_EVENTS as u64 + 300) { s.add_event(evt(h)); }
+        for h in 0..(MAX_INDEXED_EVENTS as u64 + 300) {
+            s.add_event(evt(h));
+        }
         assert_eq!(s.events.len(), MAX_INDEXED_EVENTS, "bounded");
         assert_eq!(s.events.first().unwrap().block_height, 300);
-        assert_eq!(s.events.last().unwrap().block_height, MAX_INDEXED_EVENTS as u64 + 299);
+        assert_eq!(
+            s.events.last().unwrap().block_height,
+            MAX_INDEXED_EVENTS as u64 + 299
+        );
     }
 }

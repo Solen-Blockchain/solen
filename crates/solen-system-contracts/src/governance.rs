@@ -63,7 +63,10 @@ pub fn emergency_fasttrack_active(epoch: u64) -> bool {
 
 /// Emergency actions (circuit breaker) eligible for the fast-track.
 fn is_emergency(action: &ProposalAction) -> bool {
-    matches!(action, ProposalAction::EmergencyPause | ProposalAction::EmergencyResume)
+    matches!(
+        action,
+        ProposalAction::EmergencyPause | ProposalAction::EmergencyResume
+    )
 }
 
 /// Minimum deposit to create a proposal (in base units).
@@ -313,7 +316,8 @@ impl GovernanceContract {
 
         // threshold: total_for / total_voted >= PASS_THRESHOLD_BPS / 10_000
         let threshold_met = total_voted > 0
-            && proposal.total_for.saturating_mul(10_000) >= total_voted.saturating_mul(PASS_THRESHOLD_BPS as u128);
+            && proposal.total_for.saturating_mul(10_000)
+                >= total_voted.saturating_mul(PASS_THRESHOLD_BPS as u128);
 
         if quorum_met && threshold_met {
             proposal.status = ProposalStatus::Passed;
@@ -460,7 +464,9 @@ mod tests {
         let mut gov = GovernanceContract::new();
         let pid = gov.create_proposal(
             aid(1),
-            ProposalAction::SetBlockTime { new_block_time_ms: 1000 },
+            ProposalAction::SetBlockTime {
+                new_block_time_ms: 1000,
+            },
             "Faster blocks".into(),
             0,
         );
@@ -493,12 +499,7 @@ mod tests {
     #[test]
     fn double_vote_rejected() {
         let mut gov = GovernanceContract::new();
-        let pid = gov.create_proposal(
-            aid(1),
-            ProposalAction::EmergencyPause,
-            "Pause".into(),
-            0,
-        );
+        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyPause, "Pause".into(), 0);
 
         gov.vote(pid, aid(10), true, 100, 5).unwrap();
         let err = gov.vote(pid, aid(10), false, 100, 5).unwrap_err();
@@ -529,7 +530,12 @@ mod tests {
     #[test]
     fn emergency_fasttrack_executes_immediately_on_quorum() {
         let mut gov = GovernanceContract::new();
-        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyPause, "halt now".into(), 100);
+        let pid = gov.create_proposal(
+            aid(1),
+            ProposalAction::EmergencyPause,
+            "halt now".into(),
+            100,
+        );
         let voting_end = gov.get_proposal(pid).unwrap().voting_end_epoch; // 100 + 14
         assert!(voting_end > 101);
 
@@ -539,7 +545,11 @@ mod tests {
         // Finalize at epoch 101 — DEEP inside the voting window — succeeds only
         // because it's an emergency and the fast-track is active.
         let status = gov.finalize(pid, 1000, 101, true).unwrap();
-        assert_eq!(status, ProposalStatus::Passed, "emergency passes early on quorum");
+        assert_eq!(
+            status,
+            ProposalStatus::Passed,
+            "emergency passes early on quorum"
+        );
 
         // Execute immediately — no timelock wait.
         let action = gov.execute(pid, 101, true).unwrap();
@@ -552,12 +562,21 @@ mod tests {
     #[test]
     fn emergency_fasttrack_stays_active_until_enough_votes() {
         let mut gov = GovernanceContract::new();
-        let pid = gov.create_proposal(aid(1), ProposalAction::EmergencyResume, "resume".into(), 100);
+        let pid = gov.create_proposal(
+            aid(1),
+            ProposalAction::EmergencyResume,
+            "resume".into(),
+            100,
+        );
 
         // Only 20% votes — below the 30% quorum.
         gov.vote(pid, aid(10), true, 200, 101).unwrap();
         let status = gov.finalize(pid, 1000, 101, true).unwrap();
-        assert_eq!(status, ProposalStatus::Active, "not enough yet — stays open, not rejected");
+        assert_eq!(
+            status,
+            ProposalStatus::Active,
+            "not enough yet — stays open, not rejected"
+        );
 
         // More stake votes → now over quorum + threshold → passes.
         gov.vote(pid, aid(11), true, 600, 102).unwrap();
@@ -572,7 +591,12 @@ mod tests {
     #[test]
     fn fasttrack_does_not_affect_normal_proposals() {
         let mut gov = GovernanceContract::new();
-        let pid = gov.create_proposal(aid(1), ProposalAction::SetBaseFee { new_fee: 5 }, "fee".into(), 100);
+        let pid = gov.create_proposal(
+            aid(1),
+            ProposalAction::SetBaseFee { new_fee: 5 },
+            "fee".into(),
+            100,
+        );
         gov.vote(pid, aid(10), true, 1000, 101).unwrap();
         // Even with emergency_fasttrack=true, a non-emergency can't finalize early.
         assert!(matches!(

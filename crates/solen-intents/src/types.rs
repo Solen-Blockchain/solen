@@ -23,10 +23,7 @@ pub enum Constraint {
         min_amount: u128,
     },
     /// A specific contract method must be called.
-    RequireCall {
-        target: AccountId,
-        method: String,
-    },
+    RequireCall { target: AccountId, method: String },
     /// Cross-chain swap: lock SOLEN in bridge, solver delivers output on destination chain.
     /// The L1 verifies the lock; the solver fronts output to the user on the destination chain.
     CrossChainSwap {
@@ -44,10 +41,7 @@ pub enum Constraint {
         output_token: [u8; 32],
     },
     /// Custom constraint evaluated by a verifier contract.
-    Custom {
-        verifier: AccountId,
-        data: Vec<u8>,
-    },
+    Custom { verifier: AccountId, data: Vec<u8> },
 }
 
 /// A user's intent expressing a desired outcome.

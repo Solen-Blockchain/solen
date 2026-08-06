@@ -26,7 +26,9 @@ async fn current_max_proposal_id(rpc: &RpcClient) -> i64 {
 async fn announce_proposal(rpc: &RpcClient, proposer_b58: &str, prev_max_id: i64) {
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let Ok(list) = rpc.get_governance_proposals().await else { continue };
+        let Ok(list) = rpc.get_governance_proposals().await else {
+            continue;
+        };
         if let Some(p) = list
             .iter()
             .filter(|p| p.id as i64 > prev_max_id && p.proposer == proposer_b58)
@@ -37,7 +39,10 @@ async fn announce_proposal(rpc: &RpcClient, proposer_b58: &str, prev_max_id: i64
                 "  Voting ends at epoch {}; executable after epoch {} (post-timelock).",
                 p.voting_end_epoch, p.execute_after_epoch
             );
-            println!("  Vote:     solen vote <key> {} --yes --weight <stake>", p.id);
+            println!(
+                "  Vote:     solen vote <key> {} --yes --weight <stake>",
+                p.id
+            );
             println!(
                 "  Finalize: solen finalize-proposal <key> {}   (after epoch {})",
                 p.id, p.voting_end_epoch
@@ -62,7 +67,11 @@ pub async fn cmd_status(rpc: &RpcClient) -> Result<()> {
     println!("Solen Network Status");
     println!("────────────────────────────────────────");
     println!("  Height:      {}", status.height);
-    println!("  State root:  {}...{}", &status.state_root[..12], &status.state_root[status.state_root.len()-8..]);
+    println!(
+        "  State root:  {}...{}",
+        &status.state_root[..12],
+        &status.state_root[status.state_root.len() - 8..]
+    );
     println!("  Pending ops: {}", status.pending_ops);
     println!("  Epoch:       {}", block.epoch);
     println!("  Proposer:    {}...", &block.proposer[..16]);
@@ -91,7 +100,11 @@ pub async fn cmd_validators(rpc: &RpcClient) -> Result<()> {
 
     for v in &validators {
         let status = if v.is_active {
-            if v.is_genesis { "GENSIS" } else { "ACTIVE" }
+            if v.is_genesis {
+                "GENSIS"
+            } else {
+                "ACTIVE"
+            }
         } else {
             "INACTV"
         };
@@ -106,7 +119,8 @@ pub async fn cmd_validators(rpc: &RpcClient) -> Result<()> {
         );
     }
 
-    println!("\n{} validators ({} active)",
+    println!(
+        "\n{} validators ({} active)",
         validators.len(),
         validators.iter().filter(|v| v.is_active).count(),
     );
@@ -172,7 +186,11 @@ pub async fn cmd_propose_set_bridge_relayer(
     let info = rpc.get_account(&sender_hex).await?;
 
     let relayer_id = resolve_account_id(relayer)?;
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     // args: relayer[32] + desc[...]
     let mut args = Vec::new();
@@ -196,7 +214,10 @@ pub async fn cmd_propose_set_bridge_relayer(
     let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Proposal submitted: set bridge relayer to {}", account_to_base58(&relayer_id));
+        println!(
+            "Proposal submitted: set bridge relayer to {}",
+            account_to_base58(&relayer_id)
+        );
         println!("  Description: {}", description);
         announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
@@ -218,7 +239,11 @@ pub async fn cmd_propose_set_vesting_admin(
     let info = rpc.get_account(&sender_hex).await?;
 
     let admin_id = resolve_account_id(admin)?;
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     // args: admin[32] + desc[...]
     let mut args = Vec::new();
@@ -242,7 +267,10 @@ pub async fn cmd_propose_set_vesting_admin(
     let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Proposal submitted: set vesting admin to {}", account_to_base58(&admin_id));
+        println!(
+            "Proposal submitted: set vesting admin to {}",
+            account_to_base58(&admin_id)
+        );
         println!("  Description: {}", description);
         announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
@@ -263,7 +291,11 @@ pub async fn cmd_propose_set_voting_period(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     // args: epochs[8] + desc[...]
     let mut args = Vec::new();
@@ -287,7 +319,10 @@ pub async fn cmd_propose_set_voting_period(
     let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Proposal submitted: set governance voting period to {} epochs", epochs);
+        println!(
+            "Proposal submitted: set governance voting period to {} epochs",
+            epochs
+        );
         println!("  Description: {}", description);
         announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
@@ -307,7 +342,11 @@ pub async fn cmd_propose_migrate_team_pool_to_vesting(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     // args: description bytes only (the handler reads the whole arg as desc).
     let args = description.as_bytes().to_vec();
@@ -350,7 +389,11 @@ pub async fn cmd_propose_block_time(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     let mut args = Vec::new();
     args.extend_from_slice(&new_block_time_ms.to_le_bytes());
@@ -373,7 +416,10 @@ pub async fn cmd_propose_block_time(
     let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Proposal submitted: change block time to {}ms", new_block_time_ms);
+        println!(
+            "Proposal submitted: change block time to {}ms",
+            new_block_time_ms
+        );
         println!("  Description: {}", description);
         announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
@@ -394,7 +440,11 @@ pub async fn cmd_propose_min_stake(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     let mut args = Vec::new();
     args.extend_from_slice(&new_min_stake.to_le_bytes());
@@ -417,7 +467,10 @@ pub async fn cmd_propose_min_stake(
     let prev_max_id = current_max_proposal_id(rpc).await;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Proposal submitted: change minimum validator stake to {} base units", new_min_stake);
+        println!(
+            "Proposal submitted: change minimum validator stake to {} base units",
+            new_min_stake
+        );
         println!("  Description: {}", description);
         announce_proposal(rpc, &sender_hex, prev_max_id).await;
     } else {
@@ -439,7 +492,11 @@ pub async fn cmd_vote(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     let mut args = Vec::new();
     args.extend_from_slice(&proposal_id.to_le_bytes());
@@ -462,7 +519,11 @@ pub async fn cmd_vote(
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Vote submitted: {} on proposal #{}", if support { "YES" } else { "NO" }, proposal_id);
+        println!(
+            "Vote submitted: {} on proposal #{}",
+            if support { "YES" } else { "NO" },
+            proposal_id
+        );
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -480,7 +541,11 @@ pub async fn cmd_finalize_proposal(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     let mut op = UserOperation {
         sender: sender_id,
@@ -516,7 +581,11 @@ pub async fn cmd_execute_proposal(
     let sender_hex = account_to_base58(&sender_id);
     let info = rpc.get_account(&sender_hex).await?;
 
-    let gov_addr = { let mut t = [0xFFu8; 32]; t[31] = 0x02; t };
+    let gov_addr = {
+        let mut t = [0xFFu8; 32];
+        t[31] = 0x02;
+        t
+    };
 
     let mut op = UserOperation {
         sender: sender_id,
@@ -610,7 +679,6 @@ pub async fn cmd_stake(
     args.extend_from_slice(&validator_bytes);
     args.extend_from_slice(&amount.to_le_bytes());
 
-
     let mut op = UserOperation {
         sender: sender_id,
         nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
@@ -632,7 +700,11 @@ pub async fn cmd_stake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Stake submitted successfully.");
-        println!("  Delegated {} SOLEN to {}", format_solen(amount), account_to_base58(&validator_id));
+        println!(
+            "  Delegated {} SOLEN to {}",
+            format_solen(amount),
+            account_to_base58(&validator_id)
+        );
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
     }
@@ -682,7 +754,11 @@ pub async fn cmd_unstake(
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
         println!("Unstake submitted successfully.");
-        println!("  Undelegating {} SOLEN from {}", format_solen(amount), account_to_base58(&validator_id));
+        println!(
+            "  Undelegating {} SOLEN from {}",
+            format_solen(amount),
+            account_to_base58(&validator_id)
+        );
         println!("  Funds available after unbonding period (7 epochs).");
     } else {
         println!("Rejected: {}", result.error.unwrap_or_default());
@@ -728,7 +804,12 @@ pub async fn cmd_withdraw_stake(rpc: &RpcClient, from: &str, chain_id: u64) -> R
     Ok(())
 }
 
-pub async fn cmd_set_vesting_admin(rpc: &RpcClient, from: &str, new_admin: &str, chain_id: u64) -> Result<()> {
+pub async fn cmd_set_vesting_admin(
+    rpc: &RpcClient,
+    from: &str,
+    new_admin: &str,
+    chain_id: u64,
+) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
     let admin_id = resolve_account_id(new_admin)?;
@@ -788,9 +869,18 @@ pub async fn cmd_add_vesting(
     args.extend_from_slice(&amount.to_le_bytes());
 
     let type_name = match vesting_type {
-        "team" => { args.push(0); "Team (1yr cliff, 3yr vest)" }
-        "investor" => { args.push(1); "Investor (6mo cliff, 2yr vest)" }
-        "validator" => { args.push(2); "Validator (3mo cliff, 1yr vest)" }
+        "team" => {
+            args.push(0);
+            "Team (1yr cliff, 3yr vest)"
+        }
+        "investor" => {
+            args.push(1);
+            "Investor (6mo cliff, 2yr vest)"
+        }
+        "validator" => {
+            args.push(2);
+            "Validator (3mo cliff, 1yr vest)"
+        }
         "custom" => {
             let cliff = cliff_months.unwrap_or(3);
             let vest = vest_months.unwrap_or(12);
@@ -801,7 +891,9 @@ pub async fn cmd_add_vesting(
             args.extend_from_slice(&total_ep.to_le_bytes());
             "Custom"
         }
-        _ => anyhow::bail!("invalid vesting type: {vesting_type} (use team, investor, validator, or custom)"),
+        _ => anyhow::bail!(
+            "invalid vesting type: {vesting_type} (use team, investor, validator, or custom)"
+        ),
     };
 
     let vesting_addr = solen_types::system::VESTING_ADDRESS;
@@ -886,7 +978,10 @@ pub async fn cmd_bridge_to_base(
     // Parse Base address (20 bytes, 0x-prefixed).
     let base_hex = base_address.strip_prefix("0x").unwrap_or(base_address);
     if base_hex.len() != 40 {
-        anyhow::bail!("invalid Base address: expected 40 hex chars (20 bytes), got {}", base_hex.len());
+        anyhow::bail!(
+            "invalid Base address: expected 40 hex chars (20 bytes), got {}",
+            base_hex.len()
+        );
     }
     let base_bytes = hex_decode(base_hex)?;
 
@@ -925,7 +1020,10 @@ pub async fn cmd_bridge_to_base(
         return Ok(());
     }
 
-    println!("Simulated OK. Bridging {} SOLEN to Base address {}...", amount_str, base_address);
+    println!(
+        "Simulated OK. Bridging {} SOLEN to Base address {}...",
+        amount_str, base_address
+    );
 
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
@@ -976,7 +1074,14 @@ pub async fn cmd_account(rpc: &RpcClient, account: &str) -> Result<()> {
     println!("  ID:        {}", info.id);
     println!("  Balance:   {}", info.balance);
     println!("  Nonce:     {}", info.nonce);
-    println!("  Code hash: {}", if info.code_hash.chars().all(|c| c == '0') { "(none)".to_string() } else { format!("{}...", &info.code_hash[..16]) });
+    println!(
+        "  Code hash: {}",
+        if info.code_hash.chars().all(|c| c == '0') {
+            "(none)".to_string()
+        } else {
+            format!("{}...", &info.code_hash[..16])
+        }
+    );
 
     Ok(())
 }
@@ -1021,10 +1126,7 @@ pub async fn cmd_transfer(
     let mut op = UserOperation {
         sender: sender_id,
         nonce,
-        actions: vec![Action::Transfer {
-            to: to_arr,
-            amount,
-        }],
+        actions: vec![Action::Transfer { to: to_arr, amount }],
         max_fee: 100_000,
         signature: vec![],
     };
@@ -1083,10 +1185,7 @@ pub async fn cmd_deploy(rpc: &RpcClient, from: &str, wasm_path: &str, chain_id: 
     let mut op = UserOperation {
         sender: sender_id,
         nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(info.nonce),
-        actions: vec![Action::Deploy {
-            code,
-            salt,
-        }],
+        actions: vec![Action::Deploy { code, salt }],
         max_fee: 1_000_000,
         signature: vec![],
     };
@@ -1358,13 +1457,22 @@ fn sign_op(op: &mut UserOperation, signer: &wallet::Signer, chain_id: u64) {
 /// The new auth is ML-DSA-ONLY (a true quantum upgrade, removing the classical
 /// key). It therefore requires the network to have post-quantum auth ACTIVE
 /// (`--pq-auth-height`); otherwise the account cannot transact until activation.
-pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, hybrid: bool, chain_id: u64) -> Result<()> {
+pub async fn cmd_key_quantum_upgrade(
+    rpc: &RpcClient,
+    name: &str,
+    hybrid: bool,
+    chain_id: u64,
+) -> Result<()> {
     use solen_types::account::AuthMethod;
 
     let mut ks = wallet::load_keystore()?;
     let (signer, sender_id) = wallet::load_keypair(&ks, name)?;
     if signer.scheme() != "ed25519" {
-        anyhow::bail!("key '{}' is already post-quantum ({})", name, signer.scheme());
+        anyhow::bail!(
+            "key '{}' is already post-quantum ({})",
+            name,
+            signer.scheme()
+        );
     }
 
     // New key material + the target auth method (held locally; persisted only on
@@ -1376,19 +1484,29 @@ pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, hybrid: bool, 
     let (target_auth, pending) = if hybrid {
         let (seed, ed_pub, ml_pub) = wallet::new_hybrid();
         (
-            AuthMethod::Hybrid { ed25519_public_key: ed_pub, ml_dsa_public_key: ml_pub },
+            AuthMethod::Hybrid {
+                ed25519_public_key: ed_pub,
+                ml_dsa_public_key: ml_pub,
+            },
             Pending::Hybrid(seed, ed_pub),
         )
     } else {
         let (seed, ml_pub) = wallet::new_ml_dsa();
-        (AuthMethod::MlDsa { public_key: ml_pub.clone() }, Pending::MlDsa(seed, ml_pub))
+        (
+            AuthMethod::MlDsa {
+                public_key: ml_pub.clone(),
+            },
+            Pending::MlDsa(seed, ml_pub),
+        )
     };
 
     let sender_hex = account_to_base58(&sender_id);
     let mut op = UserOperation {
         sender: sender_id,
         nonce: rpc.get_next_nonce(&sender_hex).await.unwrap_or(0),
-        actions: vec![Action::SetAuth { auth_methods: vec![target_auth] }],
+        actions: vec![Action::SetAuth {
+            auth_methods: vec![target_auth],
+        }],
         max_fee: 1_000_000,
         signature: vec![],
     };
@@ -1412,14 +1530,22 @@ pub async fn cmd_key_quantum_upgrade(rpc: &RpcClient, name: &str, hybrid: bool, 
     }
     wallet::save_keystore(&ks)?;
 
-    let scheme = if hybrid { "Hybrid (Ed25519 + ML-DSA-65)" } else { "ML-DSA-65 (FIPS 204)" };
+    let scheme = if hybrid {
+        "Hybrid (Ed25519 + ML-DSA-65)"
+    } else {
+        "ML-DSA-65 (FIPS 204)"
+    };
     println!("Account upgraded to post-quantum authentication.");
     println!("  Account:  {}", sender_hex);
     println!("  Scheme:   Ed25519  ->  {}", scheme);
     println!(
         "  Key '{}' now signs with {}; the address is unchanged.",
         name,
-        if hybrid { "BOTH schemes (a signature needs both to verify)" } else { "ML-DSA" }
+        if hybrid {
+            "BOTH schemes (a signature needs both to verify)"
+        } else {
+            "ML-DSA"
+        }
     );
     println!(
         "\n  NOTE: post-quantum auth must be ACTIVE on the network (--pq-auth-height)\n  \
@@ -1481,12 +1607,19 @@ pub async fn cmd_multisig(
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Account converted to {}-of-{} multi-sig.", threshold, signers.len());
+        println!(
+            "Account converted to {}-of-{} multi-sig.",
+            threshold,
+            signers.len()
+        );
         println!("Signers:");
         for (i, s) in signers.iter().enumerate() {
             println!("  {}: {}", i + 1, account_to_base58(s));
         }
-        println!("\nAll future operations require {} signature(s).", threshold);
+        println!(
+            "\nAll future operations require {} signature(s).",
+            threshold
+        );
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -1523,7 +1656,9 @@ pub async fn cmd_initiate_recovery(
     let target_bytes = target_id.to_vec();
 
     // Parse new public key.
-    let new_pk_hex = new_public_key_hex.strip_prefix("0x").unwrap_or(new_public_key_hex);
+    let new_pk_hex = new_public_key_hex
+        .strip_prefix("0x")
+        .unwrap_or(new_public_key_hex);
     let new_pk_bytes = hex_decode(new_pk_hex)?;
     if new_pk_bytes.len() != 32 {
         anyhow::bail!("new public key must be 32 bytes (64 hex chars)");
@@ -1693,7 +1828,10 @@ pub async fn cmd_execute_recovery(
     let op_json = serde_json::to_value(&op)?;
     let result = rpc.submit_operation(op_json).await?;
     if result.accepted {
-        println!("Recovery #{} executed! Account auth methods have been replaced.", recovery_id);
+        println!(
+            "Recovery #{} executed! Account auth methods have been replaced.",
+            recovery_id
+        );
     } else {
         println!("Failed: {}", result.error.unwrap_or_default());
     }
@@ -1732,7 +1870,9 @@ pub async fn cmd_register_rollup(
     args.extend_from_slice(&sender_id);
 
     // Genesis state root
-    let root_hex = genesis_state_root_hex.strip_prefix("0x").unwrap_or(genesis_state_root_hex);
+    let root_hex = genesis_state_root_hex
+        .strip_prefix("0x")
+        .unwrap_or(genesis_state_root_hex);
     let root_bytes = hex_decode(root_hex)?;
     if root_bytes.len() != 32 {
         anyhow::bail!("genesis state root must be 32 bytes (64 hex chars)");
@@ -1774,11 +1914,7 @@ pub async fn cmd_register_rollup(
     Ok(())
 }
 
-pub async fn cmd_register_paymaster(
-    rpc: &RpcClient,
-    from: &str,
-    chain_id: u64,
-) -> Result<()> {
+pub async fn cmd_register_paymaster(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 
@@ -1817,11 +1953,7 @@ pub async fn cmd_register_paymaster(
     Ok(())
 }
 
-pub async fn cmd_unregister_paymaster(
-    rpc: &RpcClient,
-    from: &str,
-    chain_id: u64,
-) -> Result<()> {
+pub async fn cmd_unregister_paymaster(rpc: &RpcClient, from: &str, chain_id: u64) -> Result<()> {
     let ks = wallet::load_keystore()?;
     let (kp, sender_id) = wallet::load_keypair(&ks, from)?;
 

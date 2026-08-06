@@ -35,9 +35,7 @@ fn setup_engine() -> (ConsensusEngine, Keypair, [u8; 32], [u8; 32]) {
             GenesisAccount {
                 id: alice,
                 balance: 1_000_000_000,
-                auth_methods: vec![AuthMethod::Ed25519 {
-                    public_key: alice,
-                }],
+                auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }],
             },
         ],
     )
@@ -83,8 +81,7 @@ fn validator_set_syncs_from_staking_at_epoch() {
     {
         let store = engine.store();
         let mut store = store.write().unwrap();
-        let mut staking =
-            solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        let mut staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
         let _ = staking.register_validator(new_validator, 50_000_000_000_000);
         staking.save(store.as_mut());
     }
@@ -108,9 +105,12 @@ fn validator_set_syncs_from_staking_at_epoch() {
     {
         let store = engine.store();
         let mut store = store.write().unwrap();
-        let mut staking =
-            solen_system_contracts::staking::StakingContract::load(store.as_ref());
-        if let Some(v) = staking.validators.iter_mut().find(|v| v.id == new_validator) {
+        let mut staking = solen_system_contracts::staking::StakingContract::load(store.as_ref());
+        if let Some(v) = staking
+            .validators
+            .iter_mut()
+            .find(|v| v.id == new_validator)
+        {
             v.is_active = false;
         }
         staking.save(store.as_mut());
@@ -312,7 +312,10 @@ fn mempool_rejects_duplicate_nonce() {
         max_fee: 200, // different fee
         signature: vec![0; 64],
     };
-    assert!(!mempool.submit(op2), "duplicate (sender, nonce) must be rejected");
+    assert!(
+        !mempool.submit(op2),
+        "duplicate (sender, nonce) must be rejected"
+    );
 }
 
 // ── Adversarial test: Attestation for unknown block rejected ─
@@ -397,8 +400,12 @@ fn block_at_wrong_height_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: [0x01; 32],
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
+        proposer_signature: vec![],
     };
 
     let accepted = engine.accept_block(&fake_header, &[]);
@@ -414,13 +421,19 @@ fn block_from_invalid_proposer_rejected() {
     let header = solen_types::block::BlockHeader {
         height: 2,
         epoch: 0,
-        parent_hash: solen_consensus::engine::block_hash(&engine.get_blocks_for_sync(1, 1)[0].header),
+        parent_hash: solen_consensus::engine::block_hash(
+            &engine.get_blocks_for_sync(1, 1)[0].header,
+        ),
         state_root: [0; 32],
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: fake_proposer,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
+        proposer_signature: vec![],
     };
 
     let accepted = engine.accept_block(&header, &[]);
@@ -435,13 +448,19 @@ fn block_with_wrong_epoch_rejected() {
     let header = solen_types::block::BlockHeader {
         height: 2,
         epoch: 999, // wrong epoch
-        parent_hash: solen_consensus::engine::block_hash(&engine.get_blocks_for_sync(1, 1)[0].header),
+        parent_hash: solen_consensus::engine::block_hash(
+            &engine.get_blocks_for_sync(1, 1)[0].header,
+        ),
         state_root: [0; 32],
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: engine.validator_id(),
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
+        proposer_signature: vec![],
     };
 
     let accepted = engine.accept_block(&header, &[]);
@@ -468,7 +487,11 @@ fn duplicate_block_at_same_height_rejected() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: engine.validator_id(),
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
         proposer_signature: vec![],
     };
     sign_header(&v_kp, &mut header);
@@ -479,7 +502,10 @@ fn duplicate_block_at_same_height_rejected() {
 
     // Second accept at same height should be rejected (already pending).
     let accepted2 = engine.accept_block(&header, &[]);
-    assert!(!accepted2, "duplicate block at same height must be rejected");
+    assert!(
+        !accepted2,
+        "duplicate block at same height must be rejected"
+    );
 }
 
 #[test]
@@ -520,7 +546,11 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: v_a,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
         proposer_signature: vec![],
     };
     sign_header(&kp_a, &mut header_a);
@@ -533,7 +563,11 @@ fn fork_scoring_prefers_higher_priority_proposer() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: v_b,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 1,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1,
         proposer_signature: vec![],
     };
     sign_header(&kp_b, &mut header_b);
@@ -548,7 +582,10 @@ fn fork_scoring_prefers_higher_priority_proposer() {
     let _second_result = engine.accept_block(&header_b, &[]);
 
     // Either way, we should still have exactly one pending block.
-    assert!(engine.has_pending_block(2), "should have a pending block at height 2");
+    assert!(
+        engine.has_pending_block(2),
+        "should have a pending block at height 2"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -557,8 +594,8 @@ fn fork_scoring_prefers_higher_priority_proposer() {
 
 #[test]
 fn missed_block_counter_resets_on_successful_proposal() {
-    use solen_consensus::validator::{ValidatorInfo, ValidatorSet};
     use solen_consensus::slashing::record_missed_block;
+    use solen_consensus::validator::{ValidatorInfo, ValidatorSet};
 
     let v1 = {
         let mut id = [0u8; 32];
@@ -566,9 +603,7 @@ fn missed_block_counter_resets_on_successful_proposal() {
         id
     };
 
-    let mut vs = ValidatorSet::new(vec![
-        ValidatorInfo::new(v1, 100),
-    ]);
+    let mut vs = ValidatorSet::new(vec![ValidatorInfo::new(v1, 100)]);
 
     // Miss one short of the downtime threshold.
     let threshold = solen_consensus::slashing::DOWNTIME_THRESHOLD;
@@ -588,7 +623,10 @@ fn missed_block_counter_resets_on_successful_proposal() {
 
     // One more miss reaches the threshold and triggers slash.
     let evidence = record_missed_block(&mut vs, &v1);
-    assert!(evidence.is_some(), "miss at downtime threshold must trigger slash");
+    assert!(
+        evidence.is_some(),
+        "miss at downtime threshold must trigger slash"
+    );
 }
 
 #[test]
@@ -757,8 +795,12 @@ fn state_root_mismatch_does_not_corrupt_store() {
         transactions_root: [0; 32],
         receipts_root: [0; 32],
         proposer: validator_id,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 100,
-            proposer_signature: vec![],
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 100,
+        proposer_signature: vec![],
     };
 
     // Accept the block (goes to pending).
@@ -768,7 +810,11 @@ fn state_root_mismatch_does_not_corrupt_store() {
     engine.force_finalize_block(2);
 
     // Chain should NOT have advanced (block rejected).
-    assert_eq!(engine.height(), 1, "chain must not advance on state root mismatch");
+    assert_eq!(
+        engine.height(),
+        1,
+        "chain must not advance on state root mismatch"
+    );
 
     // State root should be unchanged (rollback succeeded).
     let root_after_reject = {

@@ -123,7 +123,12 @@ impl RpcClient {
         method: &str,
         params: P,
     ) -> Result<R> {
-        let req = JsonRpcRequest { jsonrpc: "2.0", id: 1, method, params };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method,
+            params,
+        };
         let resp: JsonRpcResponse<R> = self
             .http
             .post(&self.url)
@@ -175,10 +180,8 @@ fn decode_account(label: &str, s: &str) -> Result<AccountId> {
 }
 
 fn decode_32_seed(path: &std::path::Path) -> Result<[u8; 32]> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let bytes = hex::decode(raw.trim().trim_start_matches("0x"))
-        .context("decode seed hex")?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = hex::decode(raw.trim().trim_start_matches("0x")).context("decode seed hex")?;
     if bytes.len() != 32 {
         bail!("seed file must contain 32 bytes (got {})", bytes.len());
     }
@@ -192,8 +195,7 @@ fn decode_32_seed(path: &std::path::Path) -> Result<[u8; 32]> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -245,7 +247,10 @@ fn main() -> Result<()> {
         sender: depositor,
         nonce,
         actions: vec![
-            Action::Transfer { to: stsolen, amount: cli.amount },
+            Action::Transfer {
+                to: stsolen,
+                amount: cli.amount,
+            },
             Action::Call {
                 target: stsolen,
                 method: "deposit".into(),

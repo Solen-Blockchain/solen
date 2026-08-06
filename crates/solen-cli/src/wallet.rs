@@ -85,8 +85,12 @@ impl Signer {
     /// The on-chain auth method this signer corresponds to (for SetAuth).
     pub fn auth_method(&self) -> AuthMethod {
         match self {
-            Signer::Ed25519(kp) => AuthMethod::Ed25519 { public_key: kp.public_key() },
-            Signer::MlDsa(kp) => AuthMethod::MlDsa { public_key: kp.public_key() },
+            Signer::Ed25519(kp) => AuthMethod::Ed25519 {
+                public_key: kp.public_key(),
+            },
+            Signer::MlDsa(kp) => AuthMethod::MlDsa {
+                public_key: kp.public_key(),
+            },
             Signer::Hybrid(ed, ml) => AuthMethod::Hybrid {
                 ed25519_public_key: ed.public_key(),
                 ml_dsa_public_key: ml.public_key(),
@@ -191,16 +195,17 @@ pub fn import_key(name: &str, seed_hex: &str) -> Result<StoredKey> {
 // ── Load keypair (handles locked state) ────────────────────────
 
 pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Signer, [u8; 32])> {
-    let key = ks
-        .keys
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("key '{}' not found. Run: solen key generate {}", name, name))?;
+    let key = ks.keys.get(name).ok_or_else(|| {
+        anyhow::anyhow!("key '{}' not found. Run: solen key generate {}", name, name)
+    })?;
 
     let seed_hex = if let Some(ref s) = key.seed_hex {
         s.clone()
     } else if let Some(ref enc) = key.encrypted_seed_hex {
         // Wallet is locked — prompt for password.
-        let lock = ks.lock.as_ref()
+        let lock = ks
+            .lock
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("key is encrypted but no lock metadata found"))?;
         let password = prompt_password("Enter wallet password: ")?;
         let derived = derive_key(&password, &hex_decode(&lock.salt_hex)?)?;
@@ -209,7 +214,10 @@ pub fn load_keypair(ks: &Keystore, name: &str) -> Result<(Signer, [u8; 32])> {
         // Decrypt the seed.
         decrypt_seed(&derived, enc)?
     } else {
-        bail!("key '{}' has no seed (neither plaintext nor encrypted)", name);
+        bail!(
+            "key '{}' has no seed (neither plaintext nor encrypted)",
+            name
+        );
     };
 
     let seed_bytes = hex_decode(&seed_hex)?;
@@ -269,7 +277,12 @@ pub fn new_hybrid() -> ([u8; 32], [u8; 32], Vec<u8>) {
 }
 
 /// Persist a rotated hybrid key under `name` (same `account_id`).
-pub fn persist_hybrid(ks: &mut Keystore, name: &str, seed: &[u8; 32], ed_pubkey: &[u8; 32]) -> Result<()> {
+pub fn persist_hybrid(
+    ks: &mut Keystore,
+    name: &str,
+    seed: &[u8; 32],
+    ed_pubkey: &[u8; 32],
+) -> Result<()> {
     let key = ks
         .keys
         .get_mut(name)
@@ -326,7 +339,9 @@ pub fn lock_keystore(ks: &mut Keystore, password: &str) -> Result<()> {
 
 /// Decrypt all seeds in the keystore, removing password protection.
 pub fn unlock_keystore(ks: &mut Keystore, password: &str) -> Result<()> {
-    let lock = ks.lock.as_ref()
+    let lock = ks
+        .lock
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("wallet is not locked"))?
         .clone();
 
@@ -351,7 +366,9 @@ pub fn unlock_keystore(ks: &mut Keystore, password: &str) -> Result<()> {
 
 /// Encrypt a single new key to add to an already-locked keystore.
 pub fn encrypt_new_key(ks: &Keystore, key: &mut StoredKey, password: &str) -> Result<()> {
-    let lock = ks.lock.as_ref()
+    let lock = ks
+        .lock
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("wallet is not locked"))?;
 
     let salt = hex_decode(&lock.salt_hex)?;

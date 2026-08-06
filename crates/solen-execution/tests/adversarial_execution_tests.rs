@@ -160,7 +160,10 @@ fn transfer_to_self_does_not_create_money() {
     let mut op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: alice, amount: 100 }],
+        actions: vec![Action::Transfer {
+            to: alice,
+            amount: 100,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -174,7 +177,10 @@ fn transfer_to_self_does_not_create_money() {
     };
 
     // Self-transfer should not change balance (ignoring fees)
-    assert_eq!(balance_before, balance_after, "self-transfer must not change balance");
+    assert_eq!(
+        balance_before, balance_after,
+        "self-transfer must not change balance"
+    );
 }
 
 #[test]
@@ -190,14 +196,20 @@ fn transfer_entire_balance_leaves_zero() {
     let mut op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: bob, amount: balance }],
+        actions: vec![Action::Transfer {
+            to: bob,
+            amount: balance,
+        }],
         max_fee: 0,
         signature: vec![],
     };
     sign_op(&kp, &executor, &mut op);
 
     let result = executor.execute_block(&mut store, &[op]);
-    assert!(result.receipts[0].success, "transferring entire balance should succeed");
+    assert!(
+        result.receipts[0].success,
+        "transferring entire balance should succeed"
+    );
 
     let final_balance = {
         let state = StateManager::new(&mut store);
@@ -214,7 +226,10 @@ fn transfer_more_than_balance_fails() {
     let mut op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: bob, amount: u128::MAX }],
+        actions: vec![Action::Transfer {
+            to: bob,
+            amount: u128::MAX,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -245,7 +260,10 @@ fn same_op_replayed_in_same_block_fails() {
     // Submit same op twice in one block.
     let result = executor.execute_block(&mut store, &[op.clone(), op]);
     assert!(result.receipts[0].success, "first op should succeed");
-    assert!(!result.receipts[1].success, "replayed op must fail (nonce consumed)");
+    assert!(
+        !result.receipts[1].success,
+        "replayed op must fail (nonce consumed)"
+    );
 }
 
 #[test]
@@ -256,7 +274,8 @@ fn cross_chain_replay_rejected() {
     let executor_a = BlockExecutor::with_fee_config(FeeConfig {
         base_fee_per_gas: 0,
         ..Default::default()
-    }).with_chain_id(1337);
+    })
+    .with_chain_id(1337);
 
     let mut op = UserOperation {
         sender: alice,
@@ -272,7 +291,8 @@ fn cross_chain_replay_rejected() {
     let executor_b = BlockExecutor::with_fee_config(FeeConfig {
         base_fee_per_gas: 0,
         ..Default::default()
-    }).with_chain_id(9000);
+    })
+    .with_chain_id(9000);
 
     let result = executor_b.execute_block(&mut store, &[op]);
     assert!(
@@ -364,7 +384,10 @@ fn system_contract_transfer_rejected() {
     sign_op(&kp, &executor, &mut op);
 
     let result = executor.execute_block(&mut store, &[op]);
-    assert!(!result.receipts[0].success, "transfer to system contract must fail");
+    assert!(
+        !result.receipts[0].success,
+        "transfer to system contract must fail"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -386,7 +409,10 @@ fn total_supply_conserved_across_block() {
     let mut op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: bob, amount: 1_000_000 }],
+        actions: vec![Action::Transfer {
+            to: bob,
+            amount: 1_000_000,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -401,7 +427,10 @@ fn total_supply_conserved_across_block() {
         a + b
     };
 
-    assert_eq!(total_before, total_after, "total supply must be conserved (zero-fee)");
+    assert_eq!(
+        total_before, total_after,
+        "total supply must be conserved (zero-fee)"
+    );
 }
 
 #[test]
@@ -422,7 +451,10 @@ fn failed_op_does_not_change_balances() {
     let mut op = UserOperation {
         sender: alice,
         nonce: 0,
-        actions: vec![Action::Transfer { to: bob, amount: u128::MAX }],
+        actions: vec![Action::Transfer {
+            to: bob,
+            amount: u128::MAX,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -440,8 +472,14 @@ fn failed_op_does_not_change_balances() {
         state.require_account(&bob).unwrap().balance
     };
 
-    assert_eq!(alice_before, alice_after, "failed op must not change sender balance");
-    assert_eq!(bob_before, bob_after, "failed op must not change recipient balance");
+    assert_eq!(
+        alice_before, alice_after,
+        "failed op must not change sender balance"
+    );
+    assert_eq!(
+        bob_before, bob_after,
+        "failed op must not change recipient balance"
+    );
 }
 
 #[test]
@@ -462,7 +500,10 @@ fn multi_action_failure_rolls_back_all() {
         nonce: 0,
         actions: vec![
             Action::Transfer { to: bob, amount: 1 },
-            Action::Transfer { to: bob, amount: u128::MAX },
+            Action::Transfer {
+                to: bob,
+                amount: u128::MAX,
+            },
         ],
         max_fee: 0,
         signature: vec![],
@@ -470,14 +511,20 @@ fn multi_action_failure_rolls_back_all() {
     sign_op(&kp, &executor, &mut op);
 
     let result = executor.execute_block(&mut store, &[op]);
-    assert!(!result.receipts[0].success, "multi-action with failure must fail");
+    assert!(
+        !result.receipts[0].success,
+        "multi-action with failure must fail"
+    );
 
     let alice_after = {
         let state = StateManager::new(&mut store);
         state.require_account(&alice).unwrap().balance
     };
 
-    assert_eq!(alice_before, alice_after, "multi-action rollback must restore balance");
+    assert_eq!(
+        alice_before, alice_after,
+        "multi-action rollback must restore balance"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -514,7 +561,10 @@ fn same_block_produces_same_state_root_twice() {
         let mut op = UserOperation {
             sender: alice,
             nonce: 0,
-            actions: vec![Action::Transfer { to: bob, amount: 123_456 }],
+            actions: vec![Action::Transfer {
+                to: bob,
+                amount: 123_456,
+            }],
             max_fee: 0,
             signature: vec![],
         };
@@ -544,25 +594,50 @@ fn different_op_order_same_result_when_independent() {
         apply_genesis(
             &mut store,
             vec![
-                GenesisAccount { id: alice, balance: 1000, auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }] },
-                GenesisAccount { id: bob, balance: 1000, auth_methods: vec![AuthMethod::Ed25519 { public_key: bob }] },
-                GenesisAccount { id: charlie, balance: 0, auth_methods: vec![AuthMethod::Ed25519 { public_key: charlie }] },
+                GenesisAccount {
+                    id: alice,
+                    balance: 1000,
+                    auth_methods: vec![AuthMethod::Ed25519 { public_key: alice }],
+                },
+                GenesisAccount {
+                    id: bob,
+                    balance: 1000,
+                    auth_methods: vec![AuthMethod::Ed25519 { public_key: bob }],
+                },
+                GenesisAccount {
+                    id: charlie,
+                    balance: 0,
+                    auth_methods: vec![AuthMethod::Ed25519 {
+                        public_key: charlie,
+                    }],
+                },
             ],
-        ).unwrap();
+        )
+        .unwrap();
         store
     };
 
     let mut op_a = UserOperation {
-        sender: alice, nonce: 0,
-        actions: vec![Action::Transfer { to: charlie, amount: 100 }],
-        max_fee: 0, signature: vec![],
+        sender: alice,
+        nonce: 0,
+        actions: vec![Action::Transfer {
+            to: charlie,
+            amount: 100,
+        }],
+        max_fee: 0,
+        signature: vec![],
     };
     sign_op(&alice_kp, &executor, &mut op_a);
 
     let mut op_b = UserOperation {
-        sender: bob, nonce: 0,
-        actions: vec![Action::Transfer { to: charlie, amount: 200 }],
-        max_fee: 0, signature: vec![],
+        sender: bob,
+        nonce: 0,
+        actions: vec![Action::Transfer {
+            to: charlie,
+            amount: 200,
+        }],
+        max_fee: 0,
+        signature: vec![],
     };
     sign_op(&bob_kp, &executor, &mut op_b);
 
@@ -583,7 +658,10 @@ fn different_op_order_same_result_when_independent() {
         let s = StateManager::new(&mut store2);
         s.require_account(&charlie).unwrap().balance
     };
-    assert_eq!(charlie_1, charlie_2, "independent transfers must produce same final balance");
+    assert_eq!(
+        charlie_1, charlie_2,
+        "independent transfers must produce same final balance"
+    );
     assert_eq!(charlie_1, 300, "charlie should have 300");
 }
 
@@ -675,17 +753,21 @@ fn threshold_with_out_of_set_signer_not_counted() {
                 }],
             },
             GenesisAccount {
-                id: bob, balance: 0,
+                id: bob,
+                balance: 0,
                 auth_methods: vec![AuthMethod::Ed25519 { public_key: bob }],
             },
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let executor = zero_fee_executor();
     let mut op = UserOperation {
-        sender: owner, nonce: 0,
+        sender: owner,
+        nonce: 0,
         actions: vec![Action::Transfer { to: bob, amount: 1 }],
-        max_fee: 0, signature: vec![],
+        max_fee: 0,
+        signature: vec![],
     };
     let msg = executor.operation_signing_message(&op);
 
@@ -700,7 +782,10 @@ fn threshold_with_out_of_set_signer_not_counted() {
     op.signature = combined;
 
     let result = executor.execute_block(&mut store, &[op]);
-    assert!(!result.receipts[0].success, "out-of-set signer must not count toward threshold");
+    assert!(
+        !result.receipts[0].success,
+        "out-of-set signer must not count toward threshold"
+    );
 }
 
 #[test]
@@ -722,17 +807,21 @@ fn threshold_1_of_1_works() {
                 }],
             },
             GenesisAccount {
-                id: bob, balance: 0,
+                id: bob,
+                balance: 0,
                 auth_methods: vec![AuthMethod::Ed25519 { public_key: bob }],
             },
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let executor = zero_fee_executor();
     let mut op = UserOperation {
-        sender: owner, nonce: 0,
+        sender: owner,
+        nonce: 0,
         actions: vec![Action::Transfer { to: bob, amount: 1 }],
-        max_fee: 0, signature: vec![],
+        max_fee: 0,
+        signature: vec![],
     };
     let msg = executor.operation_signing_message(&op);
     let sig = s1.sign(&msg);

@@ -44,8 +44,7 @@ fn load_account(store: &dyn StateStore, id: &AccountId) -> Result<Option<Account
 }
 
 fn require_account(store: &dyn StateStore, id: &AccountId) -> Result<Account, StateError> {
-    load_account(store, id)?
-        .ok_or_else(|| StateError::AccountNotFound(hex::encode(id)))
+    load_account(store, id)?.ok_or_else(|| StateError::AccountNotFound(hex::encode(id)))
 }
 
 fn save_account(store: &mut dyn StateStore, account: &Account) -> Result<(), StateError> {
@@ -196,9 +195,10 @@ impl<'a> StateManager<'a> {
                 got: nonce,
             });
         }
-        account.nonce = account.nonce.checked_add(1).ok_or_else(|| {
-            StateError::Serialization("nonce overflow".into())
-        })?;
+        account.nonce = account
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| StateError::Serialization("nonce overflow".into()))?;
         self.save_account(&account)?;
         Ok(())
     }
@@ -293,8 +293,8 @@ impl<'a> StateManager<'a> {
         }
         // Save the key manifest so we can reload later.
         let manifest_key = contract_storage_key(contract_id, b"__keys__");
-        let manifest_data = serde_json::to_vec(&keys)
-            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let manifest_data =
+            serde_json::to_vec(&keys).map_err(|e| StateError::Serialization(e.to_string()))?;
         self.store.put(&manifest_key, &manifest_data)?;
         Ok(())
     }
@@ -401,7 +401,13 @@ mod tests {
         state.consume_nonce(&id, 1).unwrap();
 
         let err = state.consume_nonce(&id, 5).unwrap_err();
-        assert!(matches!(err, StateError::InvalidNonce { expected: 2, got: 5 }));
+        assert!(matches!(
+            err,
+            StateError::InvalidNonce {
+                expected: 2,
+                got: 5
+            }
+        ));
     }
 
     #[test]
@@ -410,7 +416,9 @@ mod tests {
         let root_empty = store.state_root();
 
         let mut state = StateManager::new(&mut store);
-        state.create_account(test_account_id(1), vec![], 100).unwrap();
+        state
+            .create_account(test_account_id(1), vec![], 100)
+            .unwrap();
         let root_after = state.state_root();
 
         assert_ne!(root_empty, root_after);
@@ -421,7 +429,9 @@ mod tests {
         let mut store = MemoryStore::new();
         {
             let mut state = StateManager::new(&mut store);
-            state.create_account(test_account_id(1), vec![], 777).unwrap();
+            state
+                .create_account(test_account_id(1), vec![], 777)
+                .unwrap();
         }
 
         let ro = ReadonlyStateManager::new(&store);

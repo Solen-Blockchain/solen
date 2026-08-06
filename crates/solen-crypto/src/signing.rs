@@ -53,11 +53,14 @@ impl Keypair {
 /// module's `sign`) already produces canonical signatures, so this only
 /// rejects deliberately-crafted malleable ones. NOTE: consensus-affecting —
 /// ship via a coordinated upgrade so all nodes verify identically.
-pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> Result<(), SigningError> {
+pub fn verify(
+    public_key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), SigningError> {
     let verifying_key =
         VerifyingKey::from_bytes(public_key).map_err(|_| SigningError::InvalidPublicKey)?;
-    let sig =
-        ed25519_dalek::Signature::from_bytes(signature);
+    let sig = ed25519_dalek::Signature::from_bytes(signature);
     verifying_key
         .verify_strict(message, &sig)
         .map_err(|_| SigningError::InvalidSignature)

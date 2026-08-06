@@ -120,10 +120,10 @@ impl NetworkService {
             .heartbeat_interval(Duration::from_secs(1))
             .validation_mode(gossipsub::ValidationMode::Permissive)
             .max_transmit_size(16 * 1024 * 1024) // 16 MB — large blocks with many operations
-            .mesh_n(8)              // target mesh size
-            .mesh_n_low(4)          // minimum before requesting more
-            .mesh_n_high(12)        // maximum before pruning
-            .mesh_outbound_min(2)   // minimum outbound peers in mesh
+            .mesh_n(8) // target mesh size
+            .mesh_n_low(4) // minimum before requesting more
+            .mesh_n_high(12) // maximum before pruning
+            .mesh_outbound_min(2) // minimum outbound peers in mesh
             .build()
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
@@ -140,9 +140,9 @@ impl NetworkService {
             params
         };
         let peer_score_thresholds = gossipsub::PeerScoreThresholds {
-            gossip_threshold: -100.0,      // suppress gossip below this
-            publish_threshold: -200.0,     // suppress publish below this
-            graylist_threshold: -300.0,    // completely ignore messages below this
+            gossip_threshold: -100.0,   // suppress gossip below this
+            publish_threshold: -200.0,  // suppress publish below this
+            graylist_threshold: -300.0, // completely ignore messages below this
             accept_px_threshold: 0.0,
             opportunistic_graft_threshold: 0.5,
         };
@@ -172,11 +172,8 @@ impl NetworkService {
 
         // Identify protocol — exchanges peer info and keeps connections alive.
         let identify = libp2p::identify::Behaviour::new(
-            libp2p::identify::Config::new(
-                "/solen/1.0.0".to_string(),
-                local_key.public(),
-            )
-            .with_push_listen_addr_updates(true),
+            libp2p::identify::Config::new("/solen/1.0.0".to_string(), local_key.public())
+                .with_push_listen_addr_updates(true),
         );
 
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
@@ -195,7 +192,13 @@ impl NetworkService {
                 .with_max_established(Some(total_limit as u32)),
         );
 
-        let behaviour = SolenBehaviour { gossipsub, kademlia, identify, mdns, connection_limits };
+        let behaviour = SolenBehaviour {
+            gossipsub,
+            kademlia,
+            identify,
+            mdns,
+            connection_limits,
+        };
 
         let mut swarm = SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
@@ -217,9 +220,14 @@ impl NetworkService {
         );
 
         // Subscribe to network-specific topics (chain_id prevents cross-network interference).
-        use crate::messages::{topic_blocks, topic_transactions, topic_attestations, topic_sync};
+        use crate::messages::{topic_attestations, topic_blocks, topic_sync, topic_transactions};
         let cid = config.chain_id;
-        let topic_names = [topic_blocks(cid), topic_transactions(cid), topic_attestations(cid), topic_sync(cid)];
+        let topic_names = [
+            topic_blocks(cid),
+            topic_transactions(cid),
+            topic_attestations(cid),
+            topic_sync(cid),
+        ];
         for topic_name in &topic_names {
             let topic = IdentTopic::new(topic_name);
             swarm
@@ -250,7 +258,10 @@ impl NetworkService {
                     // Add to Kademlia if we know the peer ID from the address.
                     // Otherwise, Identify will populate Kademlia once connected.
                     if let Some(pid) = peer_id {
-                        swarm.behaviour_mut().kademlia.add_address(&pid, addr.clone());
+                        swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&pid, addr.clone());
                     }
                 }
                 Err(e) => warn!(%addr, error = %e, "failed to dial bootstrap peer"),
@@ -261,9 +272,13 @@ impl NetworkService {
         // Bounded inbound channel — backpressure if processing can't keep up.
         let (inbound_tx, inbound_rx) = mpsc::channel::<NetworkMessage>(4096);
         // Reputation event channel — node reports valid/invalid peers.
-        let (reputation_tx, mut reputation_rx) = mpsc::unbounded_channel::<crate::reputation::ReputationEvent>();
+        let (reputation_tx, mut reputation_rx) =
+            mpsc::unbounded_channel::<crate::reputation::ReputationEvent>();
 
-        let handle = NetworkHandle { outbound_tx, reputation_tx };
+        let handle = NetworkHandle {
+            outbound_tx,
+            reputation_tx,
+        };
         let _p2p_genesis_hash = config.genesis_hash;
         // Track peers that recently relayed SyncBlocks messages.
         let mut recent_sync_senders: HashMap<libp2p::PeerId, std::time::Instant> = HashMap::new();
@@ -272,7 +287,10 @@ impl NetworkService {
 
         let task = tokio::spawn(async move {
             // Per-peer rate limiting: track message counts per peer per window.
-            let mut peer_msg_counts: std::collections::HashMap<libp2p::PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
+            let mut peer_msg_counts: std::collections::HashMap<
+                libp2p::PeerId,
+                (u64, std::time::Instant),
+            > = std::collections::HashMap::new();
             const MAX_MSGS_PER_PEER_PER_SEC: u64 = 50;
 
             // Global inbound bytes rate limit: prevents aggregate flooding
@@ -515,7 +533,12 @@ mod tests {
         let decoded = NetworkMessage::decode(&encoded).unwrap();
 
         match decoded {
-            NetworkMessage::NewBlock { header, tx_count, gas_used, .. } => {
+            NetworkMessage::NewBlock {
+                header,
+                tx_count,
+                gas_used,
+                ..
+            } => {
                 assert_eq!(header.height, 1);
                 assert_eq!(tx_count, 5);
                 assert_eq!(gas_used, 1000);
@@ -537,7 +560,11 @@ mod tests {
         let decoded = NetworkMessage::decode(&encoded).unwrap();
 
         match decoded {
-            NetworkMessage::Attestation { validator_id, block_height, .. } => {
+            NetworkMessage::Attestation {
+                validator_id,
+                block_height,
+                ..
+            } => {
                 assert_eq!(validator_id, [42; 32]);
                 assert_eq!(block_height, 10);
             }

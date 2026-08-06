@@ -81,9 +81,11 @@ impl GuardianContract {
         }
 
         // Check no active recovery already exists for this account.
-        if self.recovery_requests.iter().any(|r| {
-            r.target_account == target_account && r.status == RecoveryStatus::Pending
-        }) {
+        if self
+            .recovery_requests
+            .iter()
+            .any(|r| r.target_account == target_account && r.status == RecoveryStatus::Pending)
+        {
             return Err("active recovery already exists for this account".into());
         }
 
@@ -123,7 +125,9 @@ impl GuardianContract {
         recovery_id: u64,
         confirmer: AccountId,
     ) -> Result<(), String> {
-        let req = self.recovery_requests.iter_mut()
+        let req = self
+            .recovery_requests
+            .iter_mut()
             .find(|r| r.id == recovery_id && r.status == RecoveryStatus::Pending)
             .ok_or("recovery request not found or not pending")?;
 
@@ -141,12 +145,10 @@ impl GuardianContract {
     }
 
     /// Cancel a recovery request. Only the target account owner can cancel.
-    pub fn cancel_recovery(
-        &mut self,
-        recovery_id: u64,
-        sender: &AccountId,
-    ) -> Result<(), String> {
-        let req = self.recovery_requests.iter_mut()
+    pub fn cancel_recovery(&mut self, recovery_id: u64, sender: &AccountId) -> Result<(), String> {
+        let req = self
+            .recovery_requests
+            .iter_mut()
             .find(|r| r.id == recovery_id && r.status == RecoveryStatus::Pending)
             .ok_or("recovery request not found or not pending")?;
 
@@ -164,7 +166,9 @@ impl GuardianContract {
         recovery_id: u64,
         current_height: u64,
     ) -> Result<&RecoveryRequest, String> {
-        let req = self.recovery_requests.iter()
+        let req = self
+            .recovery_requests
+            .iter()
             .find(|r| r.id == recovery_id && r.status == RecoveryStatus::Pending)
             .ok_or("recovery request not found or not pending")?;
 
@@ -178,7 +182,8 @@ impl GuardianContract {
         if req.confirmations.len() < req.threshold {
             return Err(format!(
                 "insufficient confirmations: {} of {} required",
-                req.confirmations.len(), req.threshold
+                req.confirmations.len(),
+                req.threshold
             ));
         }
 
@@ -188,7 +193,9 @@ impl GuardianContract {
     /// Mark a recovery as executed. The caller is responsible for
     /// actually updating the account's auth methods.
     pub fn mark_executed(&mut self, recovery_id: u64) -> Result<RecoveryRequest, String> {
-        let req = self.recovery_requests.iter_mut()
+        let req = self
+            .recovery_requests
+            .iter_mut()
             .find(|r| r.id == recovery_id && r.status == RecoveryStatus::Pending)
             .ok_or("recovery request not found or not pending")?;
 
@@ -198,9 +205,9 @@ impl GuardianContract {
 
     /// Get active recovery for an account (if any).
     pub fn active_recovery(&self, account: &AccountId) -> Option<&RecoveryRequest> {
-        self.recovery_requests.iter().find(|r| {
-            r.target_account == *account && r.status == RecoveryStatus::Pending
-        })
+        self.recovery_requests
+            .iter()
+            .find(|r| r.target_account == *account && r.status == RecoveryStatus::Pending)
     }
 
     const STORAGE_KEY: &'static [u8] = b"__guardian_state__";
@@ -243,9 +250,9 @@ mod tests {
         let new_auth = vec![ed25519_auth(99)];
 
         // Guardian 10 initiates recovery.
-        let id = contract.initiate_recovery(
-            target, aid(10), new_auth.clone(), &guardians, 1000,
-        ).unwrap();
+        let id = contract
+            .initiate_recovery(target, aid(10), new_auth.clone(), &guardians, 1000)
+            .unwrap();
 
         // Threshold is majority: 2 of 3.
         let req = &contract.recovery_requests[0];
@@ -260,7 +267,9 @@ mod tests {
         assert!(contract.can_execute(id, 1000).is_err());
 
         // After timelock.
-        let req = contract.can_execute(id, 1000 + RECOVERY_TIMELOCK_BLOCKS).unwrap();
+        let req = contract
+            .can_execute(id, 1000 + RECOVERY_TIMELOCK_BLOCKS)
+            .unwrap();
         assert_eq!(req.new_auth_methods.len(), 1);
 
         // Execute.
@@ -274,16 +283,19 @@ mod tests {
         let target = aid(1);
         let guardians = vec![aid(10), aid(11)];
 
-        let id = contract.initiate_recovery(
-            target, aid(10), vec![ed25519_auth(99)], &guardians, 100,
-        ).unwrap();
+        let id = contract
+            .initiate_recovery(target, aid(10), vec![ed25519_auth(99)], &guardians, 100)
+            .unwrap();
 
         // Non-owner can't cancel.
         assert!(contract.cancel_recovery(id, &aid(10)).is_err());
 
         // Owner cancels.
         contract.cancel_recovery(id, &aid(1)).unwrap();
-        assert_eq!(contract.recovery_requests[0].status, RecoveryStatus::Cancelled);
+        assert_eq!(
+            contract.recovery_requests[0].status,
+            RecoveryStatus::Cancelled
+        );
     }
 
     #[test]
@@ -291,9 +303,8 @@ mod tests {
         let mut contract = GuardianContract::new();
         let guardians = vec![aid(10), aid(11)];
 
-        let result = contract.initiate_recovery(
-            aid(1), aid(99), vec![ed25519_auth(1)], &guardians, 100,
-        );
+        let result =
+            contract.initiate_recovery(aid(1), aid(99), vec![ed25519_auth(1)], &guardians, 100);
         assert!(result.is_err());
     }
 
@@ -302,14 +313,13 @@ mod tests {
         let mut contract = GuardianContract::new();
         let guardians = vec![aid(10), aid(11)];
 
-        contract.initiate_recovery(
-            aid(1), aid(10), vec![ed25519_auth(99)], &guardians, 100,
-        ).unwrap();
+        contract
+            .initiate_recovery(aid(1), aid(10), vec![ed25519_auth(99)], &guardians, 100)
+            .unwrap();
 
         // Second recovery for same account rejected.
-        let result = contract.initiate_recovery(
-            aid(1), aid(11), vec![ed25519_auth(88)], &guardians, 200,
-        );
+        let result =
+            contract.initiate_recovery(aid(1), aid(11), vec![ed25519_auth(88)], &guardians, 200);
         assert!(result.is_err());
     }
 
@@ -318,9 +328,9 @@ mod tests {
         let mut contract = GuardianContract::new();
         let guardians = vec![aid(10), aid(11), aid(12)];
 
-        let id = contract.initiate_recovery(
-            aid(1), aid(10), vec![ed25519_auth(99)], &guardians, 100,
-        ).unwrap();
+        let id = contract
+            .initiate_recovery(aid(1), aid(10), vec![ed25519_auth(99)], &guardians, 100)
+            .unwrap();
 
         // Only 1 confirmation (initiator), need 2.
         let result = contract.can_execute(id, 100 + RECOVERY_TIMELOCK_BLOCKS);

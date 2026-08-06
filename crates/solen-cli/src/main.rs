@@ -22,7 +22,11 @@ mod wallet;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "solen", version = "0.1.0", about = "Solen CLI — interact with the Solen network")]
+#[command(
+    name = "solen",
+    version = "0.1.0",
+    about = "Solen CLI — interact with the Solen network"
+)]
 struct Cli {
     /// JSON-RPC endpoint URL (overrides --network default)
     #[arg(long, global = true)]
@@ -284,7 +288,10 @@ enum Commands {
         #[arg(long, default_value = "mock")]
         proof_type: String,
         /// Genesis state root (64-char hex, defaults to zero)
-        #[arg(long, default_value = "0000000000000000000000000000000000000000000000000000000000000000")]
+        #[arg(
+            long,
+            default_value = "0000000000000000000000000000000000000000000000000000000000000000"
+        )]
         genesis_state_root: String,
     },
 
@@ -397,7 +404,10 @@ async fn main() -> anyhow::Result<()> {
         Some("mainnet") => ("https://rpc.solenchain.io", 1u64),
         Some("testnet") => ("https://testnet-rpc.solenchain.io", 9000u64),
         Some("devnet") | None => ("http://127.0.0.1:29944", 1337u64),
-        Some(other) => anyhow::bail!("unknown network '{}' (use devnet, testnet, or mainnet)", other),
+        Some(other) => anyhow::bail!(
+            "unknown network '{}' (use devnet, testnet, or mainnet)",
+            other
+        ),
     };
 
     let rpc_url = cli.rpc.as_deref().unwrap_or(default_rpc);
@@ -414,26 +424,56 @@ async fn main() -> anyhow::Result<()> {
         Commands::ClaimVesting { from } => {
             commands::cmd_claim_vesting(&rpc, &from, chain_id).await?
         }
-        Commands::ProposeBlockTime { from, new_block_time_ms, description } => {
-            commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, chain_id).await?
+        Commands::ProposeBlockTime {
+            from,
+            new_block_time_ms,
+            description,
+        } => {
+            commands::cmd_propose_block_time(&rpc, &from, new_block_time_ms, &description, chain_id)
+                .await?
         }
-        Commands::ProposeMinStake { from, new_min_stake, description } => {
+        Commands::ProposeMinStake {
+            from,
+            new_min_stake,
+            description,
+        } => {
             let base = parse_solen_amount(&new_min_stake)?;
             commands::cmd_propose_min_stake(&rpc, &from, base, &description, chain_id).await?
         }
         Commands::ProposeMigrateTeamPoolToVesting { from, description } => {
-            commands::cmd_propose_migrate_team_pool_to_vesting(&rpc, &from, &description, chain_id).await?
+            commands::cmd_propose_migrate_team_pool_to_vesting(&rpc, &from, &description, chain_id)
+                .await?
         }
-        Commands::ProposeSetVotingPeriod { from, epochs, description } => {
-            commands::cmd_propose_set_voting_period(&rpc, &from, epochs, &description, chain_id).await?
+        Commands::ProposeSetVotingPeriod {
+            from,
+            epochs,
+            description,
+        } => {
+            commands::cmd_propose_set_voting_period(&rpc, &from, epochs, &description, chain_id)
+                .await?
         }
-        Commands::ProposeSetBridgeRelayer { from, relayer, description } => {
-            commands::cmd_propose_set_bridge_relayer(&rpc, &from, &relayer, &description, chain_id).await?
+        Commands::ProposeSetBridgeRelayer {
+            from,
+            relayer,
+            description,
+        } => {
+            commands::cmd_propose_set_bridge_relayer(&rpc, &from, &relayer, &description, chain_id)
+                .await?
         }
-        Commands::ProposeSetVestingAdmin { from, admin, description } => {
-            commands::cmd_propose_set_vesting_admin(&rpc, &from, &admin, &description, chain_id).await?
+        Commands::ProposeSetVestingAdmin {
+            from,
+            admin,
+            description,
+        } => {
+            commands::cmd_propose_set_vesting_admin(&rpc, &from, &admin, &description, chain_id)
+                .await?
         }
-        Commands::Vote { from, proposal_id, yes, weight } => {
+        Commands::Vote {
+            from,
+            proposal_id,
+            yes,
+            weight,
+        } => {
             let base = parse_solen_amount(&weight)?;
             commands::cmd_vote(&rpc, &from, proposal_id, yes, base, chain_id).await?
         }
@@ -447,11 +487,19 @@ async fn main() -> anyhow::Result<()> {
             let base = parse_solen_amount(&amount)?;
             commands::cmd_register_validator(&rpc, &from, base, chain_id).await?
         }
-        Commands::Stake { from, validator, amount } => {
+        Commands::Stake {
+            from,
+            validator,
+            amount,
+        } => {
             let base = parse_solen_amount(&amount)?;
             commands::cmd_stake(&rpc, &from, &validator, base, chain_id).await?
         }
-        Commands::Unstake { from, validator, amount } => {
+        Commands::Unstake {
+            from,
+            validator,
+            amount,
+        } => {
             let base = parse_solen_amount(&amount)?;
             commands::cmd_unstake(&rpc, &from, &validator, base, chain_id).await?
         }
@@ -461,16 +509,33 @@ async fn main() -> anyhow::Result<()> {
         Commands::SetVestingAdmin { from, new_admin } => {
             commands::cmd_set_vesting_admin(&rpc, &from, &new_admin, chain_id).await?
         }
-        Commands::AddVesting { from, recipient, amount, vesting_type, cliff_months, vest_months } => {
+        Commands::AddVesting {
+            from,
+            recipient,
+            amount,
+            vesting_type,
+            cliff_months,
+            vest_months,
+        } => {
             let base = parse_solen_amount(&amount)?;
-            commands::cmd_add_vesting(&rpc, &from, &recipient, base, &vesting_type, cliff_months, vest_months, chain_id).await?
+            commands::cmd_add_vesting(
+                &rpc,
+                &from,
+                &recipient,
+                base,
+                &vesting_type,
+                cliff_months,
+                vest_months,
+                chain_id,
+            )
+            .await?
         }
-        Commands::Unjail { from } => {
-            commands::cmd_unjail(&rpc, &from, chain_id).await?
-        }
-        Commands::BridgeToBase { from, base_address, amount } => {
-            commands::cmd_bridge_to_base(&rpc, &from, &base_address, &amount, chain_id).await?
-        }
+        Commands::Unjail { from } => commands::cmd_unjail(&rpc, &from, chain_id).await?,
+        Commands::BridgeToBase {
+            from,
+            base_address,
+            amount,
+        } => commands::cmd_bridge_to_base(&rpc, &from, &base_address, &amount, chain_id).await?,
         Commands::Transfer { from, to, amount } => {
             let base = parse_solen_amount(&amount)?;
             commands::cmd_transfer(&rpc, &from, &to, base, chain_id).await?
@@ -483,10 +548,12 @@ async fn main() -> anyhow::Result<()> {
             target,
             method,
             args,
+        } => commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), chain_id).await?,
+        Commands::InitiateRecovery {
+            from,
+            target,
+            new_public_key,
         } => {
-            commands::cmd_call(&rpc, &from, &target, &method, args.as_deref(), chain_id).await?
-        }
-        Commands::InitiateRecovery { from, target, new_public_key } => {
             commands::cmd_initiate_recovery(&rpc, &from, &target, &new_public_key, chain_id).await?
         }
         Commands::ConfirmRecovery { from, recovery_id } => {
@@ -498,8 +565,23 @@ async fn main() -> anyhow::Result<()> {
         Commands::ExecuteRecovery { from, recovery_id } => {
             commands::cmd_execute_recovery(&rpc, &from, recovery_id, chain_id).await?
         }
-        Commands::RegisterRollup { from, rollup_id, name, proof_type, genesis_state_root } => {
-            commands::cmd_register_rollup(&rpc, &from, rollup_id, &name, &proof_type, &genesis_state_root, chain_id).await?
+        Commands::RegisterRollup {
+            from,
+            rollup_id,
+            name,
+            proof_type,
+            genesis_state_root,
+        } => {
+            commands::cmd_register_rollup(
+                &rpc,
+                &from,
+                rollup_id,
+                &name,
+                &proof_type,
+                &genesis_state_root,
+                chain_id,
+            )
+            .await?
         }
         Commands::RegisterPaymaster { from } => {
             commands::cmd_register_paymaster(&rpc, &from, chain_id).await?
@@ -507,9 +589,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::UnregisterPaymaster { from } => {
             commands::cmd_unregister_paymaster(&rpc, &from, chain_id).await?
         }
-        Commands::Multisig { from, threshold, signers } => {
-            commands::cmd_multisig(&rpc, &from, threshold, &signers, chain_id).await?
-        }
+        Commands::Multisig {
+            from,
+            threshold,
+            signers,
+        } => commands::cmd_multisig(&rpc, &from, threshold, &signers, chain_id).await?,
         Commands::Key { action } => match action {
             KeyAction::Generate { name } => commands::cmd_key_generate(&name)?,
             KeyAction::Import { name, seed } => commands::cmd_key_import(&name, &seed)?,
@@ -533,13 +617,17 @@ fn parse_solen_amount(s: &str) -> anyhow::Result<u128> {
     let multiplier = 10u128.pow(DECIMALS);
 
     if let Some(dot) = s.find('.') {
-        let whole: u128 = s[..dot].parse().map_err(|_| anyhow::anyhow!("invalid amount"))?;
+        let whole: u128 = s[..dot]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid amount"))?;
         let frac_str = &s[dot + 1..];
         let frac_len = frac_str.len();
         if frac_len > DECIMALS as usize {
             anyhow::bail!("too many decimal places (max {})", DECIMALS);
         }
-        let frac: u128 = frac_str.parse().map_err(|_| anyhow::anyhow!("invalid amount"))?;
+        let frac: u128 = frac_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid amount"))?;
         let frac_multiplier = 10u128.pow(DECIMALS - frac_len as u32);
         Ok(whole * multiplier + frac * frac_multiplier)
     } else {

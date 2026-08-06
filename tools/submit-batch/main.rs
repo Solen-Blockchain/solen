@@ -14,17 +14,23 @@ fn hex(bytes: &[u8]) -> String {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
-    let rpc_url = args.iter().position(|a| a == "--rpc")
+    let rpc_url = args
+        .iter()
+        .position(|a| a == "--rpc")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("https://testnet-rpc.solenchain.io");
 
-    let rollup_id: u64 = args.iter().position(|a| a == "--rollup-id")
+    let rollup_id: u64 = args
+        .iter()
+        .position(|a| a == "--rollup-id")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
 
-    let num_batches: usize = args.iter().position(|a| a == "--batches")
+    let num_batches: usize = args
+        .iter()
+        .position(|a| a == "--batches")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
@@ -36,23 +42,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // First, check rollup status to get the current state root.
-    let status = rpc_call(rpc_url, "solen_getRollupStatus", &serde_json::json!([rollup_id]))?;
+    let status = rpc_call(
+        rpc_url,
+        "solen_getRollupStatus",
+        &serde_json::json!([rollup_id]),
+    )?;
     let registered = status["result"]["registered"].as_bool().unwrap_or(false);
     if !registered {
         eprintln!("Error: Rollup {} is not registered", rollup_id);
         std::process::exit(1);
     }
 
-    let mut current_state_root = if let Some(hex_str) = status["result"]["last_verified_state_root"].as_str() {
-        let mut root = [0u8; 32];
-        let bytes: Vec<u8> = (0..hex_str.len()).step_by(2)
-            .filter_map(|i| u8::from_str_radix(&hex_str[i..i+2], 16).ok())
-            .collect();
-        if bytes.len() == 32 { root.copy_from_slice(&bytes); }
-        root
-    } else {
-        [0u8; 32] // genesis
-    };
+    let mut current_state_root =
+        if let Some(hex_str) = status["result"]["last_verified_state_root"].as_str() {
+            let mut root = [0u8; 32];
+            let bytes: Vec<u8> = (0..hex_str.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).ok())
+                .collect();
+            if bytes.len() == 32 {
+                root.copy_from_slice(&bytes);
+            }
+            root
+        } else {
+            [0u8; 32] // genesis
+        };
 
     println!("Current state root: {}", hex(&current_state_root));
     println!();
@@ -73,12 +87,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut sender = [0u8; 32];
             sender[0] = (batch_num % 256) as u8;
             sender[1] = i as u8;
-            sequencer.submit(L2Transaction {
-                sender,
-                nonce: i,
-                data: format!("batch{}:tx{}", batch_num, i).into_bytes(),
-                gas_limit: 100_000,
-            }).unwrap();
+            sequencer
+                .submit(L2Transaction {
+                    sender,
+                    nonce: i,
+                    data: format!("batch{}:tx{}", batch_num, i).into_bytes(),
+                    gas_limit: 100_000,
+                })
+                .unwrap();
         }
 
         let batch = sequencer.produce_batch().unwrap();
@@ -93,7 +109,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Generate mock proof.
-        let proof = prover.generate_proof(&current_state_root, &post_state_root, &batch_data).unwrap();
+        let proof = prover
+            .generate_proof(&current_state_root, &post_state_root, &batch_data)
+            .unwrap();
         let data_hash = blake3_hash(&batch_data);
 
         println!("  Txs:        {}", batch.transactions.len());
@@ -128,14 +146,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Final status check.
-    let final_status = rpc_call(rpc_url, "solen_getRollupStatus", &serde_json::json!([rollup_id]))?;
+    let final_status = rpc_call(
+        rpc_url,
+        "solen_getRollupStatus",
+        &serde_json::json!([rollup_id]),
+    )?;
     println!("=== Final Status ===");
     println!("{}", serde_json::to_string_pretty(&final_status["result"])?);
 
     Ok(())
 }
 
-fn rpc_call(url: &str, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+fn rpc_call(
+    url: &str,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,

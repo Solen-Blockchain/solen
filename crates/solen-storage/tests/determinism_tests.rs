@@ -105,10 +105,7 @@ fn non_state_keys_excluded_from_root() {
     with_meta.put(b"slash/evidence", b"proof").unwrap();
     let root2 = with_meta.state_root();
 
-    assert_eq!(
-        root1, root2,
-        "non-state keys must not affect state root"
-    );
+    assert_eq!(root1, root2, "non-state keys must not affect state root");
 }
 
 // ── Test: scan_all returns all entries ─────────────────────────

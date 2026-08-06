@@ -130,7 +130,11 @@ fn deploy(
     };
     sign_op(kp, executor, &mut op);
     let result = executor.execute_block(store, &[op]);
-    assert!(result.receipts[0].success, "deploy: {:?}", result.receipts[0].error);
+    assert!(
+        result.receipts[0].success,
+        "deploy: {:?}",
+        result.receipts[0].error
+    );
     let ev = result.receipts[0]
         .events
         .iter()
@@ -178,7 +182,15 @@ fn setup() -> (MemoryStore, Keypair, AccountId, BlockExecutor) {
 fn queued_call_actually_executes() {
     let (mut store, kp, sender, executor) = setup();
     let counter = deploy(&mut store, &executor, &kp, sender, 0, COUNTER_WAT, [1; 32]);
-    let forwarder = deploy(&mut store, &executor, &kp, sender, 1, FORWARDER_WAT, [2; 32]);
+    let forwarder = deploy(
+        &mut store,
+        &executor,
+        &kp,
+        sender,
+        1,
+        FORWARDER_WAT,
+        [2; 32],
+    );
 
     // Counter starts at 0.
     assert_eq!(counter_value(&store, &counter), 0);
@@ -216,14 +228,28 @@ fn queued_call_actually_executes() {
         .iter()
         .map(|e| e.topic.as_slice())
         .collect();
-    assert!(topics.iter().any(|t| *t == b"fwd"), "forwarder event missing");
-    assert!(topics.iter().any(|t| *t == b"bump"), "counter event missing");
+    assert!(
+        topics.iter().any(|t| *t == b"fwd"),
+        "forwarder event missing"
+    );
+    assert!(
+        topics.iter().any(|t| *t == b"bump"),
+        "counter event missing"
+    );
 }
 
 #[test]
 fn queued_call_depth_cap_stops_runaway() {
     let (mut store, kp, sender, executor) = setup();
-    let self_q = deploy(&mut store, &executor, &kp, sender, 0, SELF_QUEUE_WAT, [3; 32]);
+    let self_q = deploy(
+        &mut store,
+        &executor,
+        &kp,
+        sender,
+        0,
+        SELF_QUEUE_WAT,
+        [3; 32],
+    );
 
     // Calling self_q with target=self_q queues another self-call which queues
     // another, etc. Depth cap is 8, so this must fail (not infinite-loop).

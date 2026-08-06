@@ -117,19 +117,26 @@ fn main() {
         }
     };
 
-    let iter = db
-        .iterator(IteratorMode::Start)
-        .filter_map(|r| r.ok());
+    let iter = db.iterator(IteratorMode::Start).filter_map(|r| r.ok());
     let c = census(iter);
 
     println!("accounts scanned : {}", c.accounts);
     println!("  ed25519        : {}", c.ed25519);
     println!("  threshold      : {}", c.threshold);
     println!("  guardian       : {}", c.guardian);
-    println!("  passkey        : {}   <- borsh-layout-sensitive", c.passkey);
-    println!("  session        : {}   <- borsh-layout-sensitive", c.session);
+    println!(
+        "  passkey        : {}   <- borsh-layout-sensitive",
+        c.passkey
+    );
+    println!(
+        "  session        : {}   <- borsh-layout-sensitive",
+        c.session
+    );
     if c.decode_errors > 0 {
-        println!("  DECODE ERRORS  : {}  (investigate before deploying!)", c.decode_errors);
+        println!(
+            "  DECODE ERRORS  : {}  (investigate before deploying!)",
+            c.decode_errors
+        );
     }
     for id in &c.passkey_ids {
         println!("  passkey acct   : {id}");
@@ -139,7 +146,9 @@ fn main() {
     }
     println!();
     if c.passkey == 0 && c.session == 0 && c.decode_errors == 0 {
-        println!("RESULT: 0 passkey + 0 session accounts — SAFE to ship the AuthMethod layout change.");
+        println!(
+            "RESULT: 0 passkey + 0 session accounts — SAFE to ship the AuthMethod layout change."
+        );
     } else {
         println!("RESULT: layout-sensitive accounts exist (or decode errors) — migrate before deploying.");
         std::process::exit(3);
@@ -170,12 +179,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let db = DB::open_default(dir.path()).unwrap();
-            let (k, v) = acct(1, vec![AuthMethod::Ed25519 { public_key: [1; 32] }]);
+            let (k, v) = acct(
+                1,
+                vec![AuthMethod::Ed25519 {
+                    public_key: [1; 32],
+                }],
+            );
             db.put(k, v).unwrap();
             let (k, v) = acct(
                 2,
                 vec![
-                    AuthMethod::Ed25519 { public_key: [2; 32] },
+                    AuthMethod::Ed25519 {
+                        public_key: [2; 32],
+                    },
                     AuthMethod::Session {
                         session_key: [9; 32],
                         expires_at: 100,
@@ -210,7 +226,10 @@ mod tests {
         assert_eq!(c.passkey, 1);
         assert_eq!(c.guardian, 0);
         assert_eq!(c.threshold, 0);
-        assert_eq!(c.decode_errors, 0, "junk keys are skipped, not decode-failed");
+        assert_eq!(
+            c.decode_errors, 0,
+            "junk keys are skipped, not decode-failed"
+        );
         assert_eq!(c.session_ids.len(), 1);
         assert_eq!(c.passkey_ids.len(), 1);
     }

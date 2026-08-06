@@ -89,7 +89,11 @@ impl ValidatorSet {
     ///
     /// Algorithm: compute a deterministic random value from the seed + height,
     /// then select the validator whose cumulative stake range contains that value.
-    pub fn proposer_for_height_with_seed(&self, height: u64, epoch_seed: &[u8; 32]) -> Option<ValidatorId> {
+    pub fn proposer_for_height_with_seed(
+        &self,
+        height: u64,
+        epoch_seed: &[u8; 32],
+    ) -> Option<ValidatorId> {
         let active = self.active();
         if active.is_empty() {
             return None;
@@ -136,7 +140,11 @@ impl ValidatorSet {
     /// hash(seed || height || validator_id) divided by their stake.
     /// Lower effective score = higher priority. This ensures validators
     /// with more stake are more likely to be earlier in the order.
-    pub fn proposer_order_for_height(&self, height: u64, epoch_seed: &[u8; 32]) -> Vec<ValidatorId> {
+    pub fn proposer_order_for_height(
+        &self,
+        height: u64,
+        epoch_seed: &[u8; 32],
+    ) -> Vec<ValidatorId> {
         let active = self.active();
         if active.is_empty() {
             return vec![];
@@ -164,7 +172,11 @@ impl ValidatorSet {
                     let hash_val = u128::from_le_bytes(buf);
                     // Effective score = hash / stake. Lower = higher priority.
                     // Use saturating division to avoid div-by-zero.
-                    let effective = if v.stake > 0 { hash_val / v.stake } else { u128::MAX };
+                    let effective = if v.stake > 0 {
+                        hash_val / v.stake
+                    } else {
+                        u128::MAX
+                    };
                     (effective, v.id)
                 })
                 .collect();
@@ -312,9 +324,7 @@ mod tests {
         // a partitioned minority that locally jails the unreachable majority
         // must NOT be able to self-certify a "quorum" against its own
         // shrunken view. Quorum is always measured against the full set.
-        let mut vs = ValidatorSet::new(
-            (1..=9).map(|n| ValidatorInfo::new(vid(n), 100)).collect(),
-        );
+        let mut vs = ValidatorSet::new((1..=9).map(|n| ValidatorInfo::new(vid(n), 100)).collect());
         // Minority side sees only v1,v2,v3 (300 of 900 stake) and locally
         // jails the six it can't reach.
         for n in 4..=9 {
@@ -357,7 +367,10 @@ mod tests {
                 break;
             }
         }
-        assert!(differ, "different seeds must produce different proposer schedules");
+        assert!(
+            differ,
+            "different seeds must produce different proposer schedules"
+        );
     }
 
     #[test]
@@ -366,9 +379,18 @@ mod tests {
         let zero_seed = [0u8; 32];
 
         // Zero seed = genesis epoch = round-robin.
-        assert_eq!(vs.proposer_for_height_with_seed(1, &zero_seed), Some(vid(2)));
-        assert_eq!(vs.proposer_for_height_with_seed(2, &zero_seed), Some(vid(3)));
-        assert_eq!(vs.proposer_for_height_with_seed(3, &zero_seed), Some(vid(1)));
+        assert_eq!(
+            vs.proposer_for_height_with_seed(1, &zero_seed),
+            Some(vid(2))
+        );
+        assert_eq!(
+            vs.proposer_for_height_with_seed(2, &zero_seed),
+            Some(vid(3))
+        );
+        assert_eq!(
+            vs.proposer_for_height_with_seed(3, &zero_seed),
+            Some(vid(1))
+        );
     }
 
     #[test]
@@ -398,7 +420,10 @@ mod tests {
         }
         // Each should get roughly 1000 out of 3000.
         for (_, count) in &counts {
-            assert!(*count > 500, "equal-stake validators should each get >500/3000");
+            assert!(
+                *count > 500,
+                "equal-stake validators should each get >500/3000"
+            );
         }
         assert_eq!(counts.len(), 3, "all validators should be selected");
     }
@@ -428,11 +453,19 @@ mod tests {
         assert!(
             v1_count > v2_count * 3,
             "high-stake validator should propose >3x more: v1={} v2={} v3={}",
-            v1_count, v2_count, v3_count
+            v1_count,
+            v2_count,
+            v3_count
         );
         // All should still be selected sometimes.
-        assert!(v2_count > 0, "low-stake validators should still be selected");
-        assert!(v3_count > 0, "low-stake validators should still be selected");
+        assert!(
+            v2_count > 0,
+            "low-stake validators should still be selected"
+        );
+        assert!(
+            v3_count > 0,
+            "low-stake validators should still be selected"
+        );
     }
 
     #[test]

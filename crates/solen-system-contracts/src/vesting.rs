@@ -45,7 +45,10 @@ pub enum VestingType {
     /// 3-month cliff, 1-year linear vest (for validator token sales).
     Validator,
     /// Custom cliff and vesting duration.
-    Custom { cliff_epochs: u64, total_epochs: u64 },
+    Custom {
+        cliff_epochs: u64,
+        total_epochs: u64,
+    },
 }
 
 impl VestingType {
@@ -62,7 +65,7 @@ impl VestingType {
     /// Total vesting duration in epochs (including cliff).
     pub fn total_epochs(&self) -> u64 {
         match self {
-            VestingType::Team => EPOCHS_PER_YEAR * 4,       // 4 years total
+            VestingType::Team => EPOCHS_PER_YEAR * 4, // 4 years total
             VestingType::Investor => EPOCHS_PER_MONTH * 30, // 2.5 years total
             VestingType::Validator => EPOCHS_PER_MONTH * 15, // 1.25 years total (3mo cliff + 12mo vest)
             VestingType::Custom { total_epochs, .. } => *total_epochs,
@@ -104,7 +107,9 @@ impl VestingSchedule {
             return self.total_amount;
         }
         let elapsed_after_cliff = elapsed - cliff;
-        self.total_amount.saturating_mul(elapsed_after_cliff as u128) / vesting_period as u128
+        self.total_amount
+            .saturating_mul(elapsed_after_cliff as u128)
+            / vesting_period as u128
     }
 
     /// How much can be claimed right now.
@@ -183,7 +188,11 @@ impl VestingContract {
     /// governance (`governance_set_admin`). Without this guard, anyone could
     /// claim admin on an unconfigured contract and then add self-paying
     /// schedules.
-    pub fn set_admin(&mut self, caller: &AccountId, new_admin: AccountId) -> Result<(), VestingError> {
+    pub fn set_admin(
+        &mut self,
+        caller: &AccountId,
+        new_admin: AccountId,
+    ) -> Result<(), VestingError> {
         match &self.admin {
             Some(current) if current == caller => {
                 self.admin = Some(new_admin);
@@ -211,7 +220,7 @@ impl VestingContract {
         start_epoch: u64,
     ) -> Result<(), VestingError> {
         match &self.admin {
-            Some(admin) if admin == caller => {},
+            Some(admin) if admin == caller => {}
             _ => return Err(VestingError::NotAdmin),
         }
         self.schedules.push(VestingSchedule {
@@ -319,7 +328,9 @@ mod tests {
         assert!(vc.claim(&aid(1), EPOCHS_PER_YEAR).is_err());
 
         // Claim after cliff.
-        let claimed = vc.claim(&aid(1), EPOCHS_PER_YEAR + EPOCHS_PER_MONTH).unwrap();
+        let claimed = vc
+            .claim(&aid(1), EPOCHS_PER_YEAR + EPOCHS_PER_MONTH)
+            .unwrap();
         assert!(claimed > 0);
 
         // Claim again later.

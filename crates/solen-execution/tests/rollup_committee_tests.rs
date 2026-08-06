@@ -17,7 +17,10 @@ use solen_types::transaction::{Action, UserOperation};
 const D: u128 = 100_000_000; // 1 SOLEN in base units
 
 fn zero_fee_executor() -> BlockExecutor {
-    BlockExecutor::with_fee_config(FeeConfig { base_fee_per_gas: 0, ..Default::default() })
+    BlockExecutor::with_fee_config(FeeConfig {
+        base_fee_per_gas: 0,
+        ..Default::default()
+    })
 }
 
 fn sign_op(kp: &Keypair, executor: &BlockExecutor, op: &mut UserOperation) {
@@ -82,7 +85,11 @@ fn committee_proof(
     signers: &[(u32, &Keypair)],
 ) -> Vec<u8> {
     let msg = solen_rollup_kit::prover::committee_attestation_message(
-        rollup_id, batch_index, pre, post, data_hash,
+        rollup_id,
+        batch_index,
+        pre,
+        post,
+        data_hash,
     );
     let mut proof = (signers.len() as u32).to_le_bytes().to_vec();
     for (idx, kp) in signers {
@@ -92,11 +99,22 @@ fn committee_proof(
     proof
 }
 
-fn call_op(seq_kp: &Keypair, seq: [u8; 32], nonce: u64, method: &str, args: Vec<u8>, ex: &BlockExecutor) -> UserOperation {
+fn call_op(
+    seq_kp: &Keypair,
+    seq: [u8; 32],
+    nonce: u64,
+    method: &str,
+    args: Vec<u8>,
+    ex: &BlockExecutor,
+) -> UserOperation {
     let mut op = UserOperation {
         sender: seq,
         nonce,
-        actions: vec![Action::Call { target: BRIDGE_ADDRESS, method: method.to_string(), args }],
+        actions: vec![Action::Call {
+            target: BRIDGE_ADDRESS,
+            method: method.to_string(),
+            args,
+        }],
         max_fee: 0,
         signature: vec![],
     };
@@ -131,7 +149,15 @@ fn setup() -> Fixture {
     )
     .unwrap();
 
-    Fixture { store, ex: zero_fee_executor(), seq_kp, seq, attestors_kp, attestors, genesis_root: [0u8; 32] }
+    Fixture {
+        store,
+        ex: zero_fee_executor(),
+        seq_kp,
+        seq,
+        attestors_kp,
+        attestors,
+        genesis_root: [0u8; 32],
+    }
 }
 
 #[test]
@@ -140,44 +166,110 @@ fn committee_rollup_accepts_valid_batch_and_rejects_insufficient() {
     let rid = 7u64;
 
     // Register a 2-of-3 committee rollup.
-    let reg = call_op(&f.seq_kp, f.seq, 0, "register_rollup",
-        register_args(rid, "test-rollup", &f.seq, &f.genesis_root, 2, &f.attestors), &f.ex);
+    let reg = call_op(
+        &f.seq_kp,
+        f.seq,
+        0,
+        "register_rollup",
+        register_args(rid, "test-rollup", &f.seq, &f.genesis_root, 2, &f.attestors),
+        &f.ex,
+    );
     let r = f.ex.execute_block(&mut f.store, &[reg]);
-    assert!(r.receipts[0].success, "register_rollup failed: {:?}", r.receipts[0].error);
+    assert!(
+        r.receipts[0].success,
+        "register_rollup failed: {:?}",
+        r.receipts[0].error
+    );
 
     let post = [9u8; 32];
     let data_hash = [7u8; 32];
 
     // Batch 0 with only ONE attestor signature -> below threshold -> rejected.
-    let weak = committee_proof(rid, 0, &f.genesis_root, &post, &data_hash, &[(0, &f.attestors_kp[0])]);
-    let op = call_op(&f.seq_kp, f.seq, 1, "submit_batch", submit_args(rid, 0, &post, &data_hash, &weak), &f.ex);
+    let weak = committee_proof(
+        rid,
+        0,
+        &f.genesis_root,
+        &post,
+        &data_hash,
+        &[(0, &f.attestors_kp[0])],
+    );
+    let op = call_op(
+        &f.seq_kp,
+        f.seq,
+        1,
+        "submit_batch",
+        submit_args(rid, 0, &post, &data_hash, &weak),
+        &f.ex,
+    );
     let r = f.ex.execute_block(&mut f.store, &[op]);
-    assert!(!r.receipts[0].success, "submit_batch must reject a below-threshold proof");
+    assert!(
+        !r.receipts[0].success,
+        "submit_batch must reject a below-threshold proof"
+    );
 
     // Batch 0 with TWO valid attestor signatures -> accepted. (nonce 2: the
     // rejected submit above still consumed nonce 1 for replay protection.)
-    let good = committee_proof(rid, 0, &f.genesis_root, &post, &data_hash,
-        &[(0, &f.attestors_kp[0]), (1, &f.attestors_kp[1])]);
-    let op = call_op(&f.seq_kp, f.seq, 2, "submit_batch", submit_args(rid, 0, &post, &data_hash, &good), &f.ex);
+    let good = committee_proof(
+        rid,
+        0,
+        &f.genesis_root,
+        &post,
+        &data_hash,
+        &[(0, &f.attestors_kp[0]), (1, &f.attestors_kp[1])],
+    );
+    let op = call_op(
+        &f.seq_kp,
+        f.seq,
+        2,
+        "submit_batch",
+        submit_args(rid, 0, &post, &data_hash, &good),
+        &f.ex,
+    );
     let r = f.ex.execute_block(&mut f.store, &[op]);
-    assert!(r.receipts[0].success, "submit_batch must accept a valid quorum proof: {:?}", r.receipts[0].error);
+    assert!(
+        r.receipts[0].success,
+        "submit_batch must accept a valid quorum proof: {:?}",
+        r.receipts[0].error
+    );
 }
 
 #[test]
 fn committee_rollup_rejects_forged_post_root() {
     let mut f = setup();
     let rid = 7u64;
-    let reg = call_op(&f.seq_kp, f.seq, 0, "register_rollup",
-        register_args(rid, "r", &f.seq, &f.genesis_root, 2, &f.attestors), &f.ex);
+    let reg = call_op(
+        &f.seq_kp,
+        f.seq,
+        0,
+        "register_rollup",
+        register_args(rid, "r", &f.seq, &f.genesis_root, 2, &f.attestors),
+        &f.ex,
+    );
     assert!(f.ex.execute_block(&mut f.store, &[reg]).receipts[0].success);
 
     // Attestors sign post=A, but the sequencer submits a different post=B.
     let signed_post = [9u8; 32];
     let forged_post = [0xAAu8; 32];
     let data_hash = [7u8; 32];
-    let proof = committee_proof(rid, 0, &f.genesis_root, &signed_post, &data_hash,
-        &[(0, &f.attestors_kp[0]), (1, &f.attestors_kp[1])]);
-    let op = call_op(&f.seq_kp, f.seq, 1, "submit_batch", submit_args(rid, 0, &forged_post, &data_hash, &proof), &f.ex);
+    let proof = committee_proof(
+        rid,
+        0,
+        &f.genesis_root,
+        &signed_post,
+        &data_hash,
+        &[(0, &f.attestors_kp[0]), (1, &f.attestors_kp[1])],
+    );
+    let op = call_op(
+        &f.seq_kp,
+        f.seq,
+        1,
+        "submit_batch",
+        submit_args(rid, 0, &forged_post, &data_hash, &proof),
+        &f.ex,
+    );
     let r = f.ex.execute_block(&mut f.store, &[op]);
-    assert!(!r.receipts[0].success, "a post root the committee did not sign must be rejected");
+    assert!(
+        !r.receipts[0].success,
+        "a post root the committee did not sign must be rejected"
+    );
 }

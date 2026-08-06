@@ -40,7 +40,9 @@ use tracing::info;
 const MAX_OPERATORS_PER_OP: usize = 11; // Leaves 5 slots for deploy/init/set_op_count/headroom.
 
 #[derive(Parser)]
-#[command(about = "Deploy + init + populate operators on the stSOLEN contract in one atomic UserOp")]
+#[command(
+    about = "Deploy + init + populate operators on the stSOLEN contract in one atomic UserOp"
+)]
 struct Cli {
     #[arg(long, env = "SOLEN_RPC", default_value = "https://rpc.solenchain.io")]
     rpc: String,
@@ -153,7 +155,12 @@ impl RpcClient {
         method: &str,
         params: P,
     ) -> Result<R> {
-        let req = JsonRpcRequest { jsonrpc: "2.0", id: 1, method, params };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method,
+            params,
+        };
         let resp: JsonRpcResponse<R> = self
             .http
             .post(&self.url)
@@ -212,10 +219,8 @@ fn decode_account(label: &str, s: &str) -> Result<AccountId> {
 }
 
 fn decode_32_seed(path: &std::path::Path) -> Result<[u8; 32]> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let bytes = hex::decode(raw.trim().trim_start_matches("0x"))
-        .context("decode seed hex")?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = hex::decode(raw.trim().trim_start_matches("0x")).context("decode seed hex")?;
     if bytes.len() != 32 {
         bail!("seed file must contain 32 bytes (got {})", bytes.len());
     }
@@ -225,7 +230,11 @@ fn decode_32_seed(path: &std::path::Path) -> Result<[u8; 32]> {
 }
 
 fn parse_operators(s: &str) -> Result<Vec<AccountId>> {
-    let parts: Vec<&str> = s.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.is_empty() {
         bail!("--operators must list at least one validator");
     }
@@ -262,8 +271,7 @@ fn build_set_operator_args(index: u64, validator: &AccountId) -> Vec<u8> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -279,8 +287,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("read {}", cli.stsolen_wasm.display()))?;
 
     let salt = if let Some(s) = &cli.salt {
-        let raw = hex::decode(s.trim().trim_start_matches("0x"))
-            .context("decode --salt hex")?;
+        let raw = hex::decode(s.trim().trim_start_matches("0x")).context("decode --salt hex")?;
         if raw.len() != 32 {
             bail!("--salt must decode to 32 bytes");
         }

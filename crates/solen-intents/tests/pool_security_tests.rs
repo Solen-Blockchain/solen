@@ -60,7 +60,11 @@ fn solution_cap_enforced() {
     // Submit 50 solutions (the cap). Sign each with its actual claimed_tip.
     for i in 0..50 {
         let sol = signed_solution(id, i, i as u128);
-        assert!(pool.submit_solution(sol).is_ok(), "solution {} should succeed", i);
+        assert!(
+            pool.submit_solution(sol).is_ok(),
+            "solution {} should succeed",
+            i
+        );
     }
 
     // 51st should fail.
@@ -114,7 +118,10 @@ fn pool_rejects_when_full() {
     }
 
     // 6th should fail.
-    assert!(pool.submit(test_intent()).is_err(), "pool must reject when full");
+    assert!(
+        pool.submit(test_intent()).is_err(),
+        "pool must reject when full"
+    );
 }
 
 // ── Expired intents not in pending ────────────────────────────

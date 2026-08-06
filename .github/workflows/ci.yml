@@ -29,6 +29,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          # Some workspace deps (the no_std contract SDK) build for wasm.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # Fails on clippy's deny-by-default correctness lints (e.g.
       # absurd_extreme_comparisons). Style/complexity warnings are surfaced but
@@ -41,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
       - run: cargo test --workspace

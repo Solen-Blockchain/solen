@@ -234,7 +234,12 @@ proptest! {
         let bob_bal = state.get_balance(&bob).unwrap();
 
         prop_assert!(alice_bal <= balance, "alice balance increased without reason");
-        prop_assert!(bob_bal >= 0, "negative balance detected");
+        // (bob_bal is u128 so it can't be negative; assert the real invariant —
+        // no overflow/corruption in the combined balance.)
+        prop_assert!(
+            alice_bal.checked_add(bob_bal).is_some(),
+            "combined balances overflowed — state corruption"
+        );
 
         if transfer > balance {
             prop_assert!(!result.receipts[0].success, "should have failed");

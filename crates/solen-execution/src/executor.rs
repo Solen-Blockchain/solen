@@ -3353,4 +3353,91 @@ mod tests {
             alice_after
         );
     }
+
+    /// The durable-journaled produce path must compute the SAME state root and
+    /// leave the SAME account state as the plain journaled path — including at an
+    /// EPOCH BOUNDARY (height % 100 == 0), where the reward distribution runs.
+    /// The only difference is the excluded `__eager_revert__` record, so the two
+    /// must be indistinguishable in consensus-visible state. (Rules the durable
+    /// produce path in or out as the cause of the validator5 canary boundary
+    /// divergence, 2026-08-06.)
+    #[test]
+    fn durable_journaled_matches_plain_at_epoch_boundary() {
+        use solen_system_contracts::staking::StakingContract;
+        use solen_types::system::STAKING_POOL_ADDRESS;
+
+        // Build a store with a funded staking pool + one registered validator so
+        // the boundary reward distribution actually fires and mutates state.
+        fn make_store() -> MemoryStore {
+            let mut store = MemoryStore::new();
+            // Fund the staking pool account.
+            let pool_key = {
+                let mut k = b"acc/".to_vec();
+                k.extend_from_slice(&STAKING_POOL_ADDRESS);
+                k
+            };
+            let pool = solen_types::account::Account {
+                id: STAKING_POOL_ADDRESS,
+                code_hash: [0u8; 32],
+                auth_methods: vec![],
+                nonce: 0,
+                balance: 100_000_000 * 100_000_000, // plenty to cover the epoch reward
+            };
+            store
+                .put(&pool_key, &borsh::to_vec(&pool).unwrap())
+                .unwrap();
+            // Register a validator (eligible from epoch 0) with >= min stake so the
+            // boundary reward distribution at height 100 (epoch 1) actually fires.
+            let mut sc = StakingContract::new();
+            let mut vid = [0u8; 32];
+            vid[..3].copy_from_slice(b"val");
+            sc.register_validator_at_epoch(vid, 1_000_000 * 100_000_000, 0)
+                .unwrap();
+            sc.save(&mut store);
+            store.commit_root();
+            store
+        }
+
+        let ex = BlockExecutor::new();
+        let boundary_height = 100u64; // epoch boundary → rewards distributed
+
+        let mut store_plain = make_store();
+        let mut store_durable = make_store();
+        // Sanity: identical starting point.
+        assert_eq!(
+            store_plain.state_root(),
+            store_durable.state_root(),
+            "stores start identical"
+        );
+
+        let (res_plain, _) = ex.execute_block_journaled(&mut store_plain, &[], boundary_height);
+        let (res_durable, _) =
+            ex.execute_block_journaled_durable(&mut store_durable, &[], boundary_height);
+
+        // The consensus-visible root MUST match (the durable record is excluded).
+        assert_eq!(
+            res_plain.state_root, res_durable.state_root,
+            "durable produce diverged from plain at the epoch boundary — root mismatch"
+        );
+        assert_eq!(
+            store_plain.state_root(),
+            store_durable.state_root(),
+            "post-commit store roots must match"
+        );
+        // And the account state (acc/…) must be byte-identical.
+        let acc_plain = store_plain.scan_prefix(b"acc/").unwrap();
+        let acc_durable = store_durable.scan_prefix(b"acc/").unwrap();
+        assert_eq!(
+            acc_plain, acc_durable,
+            "durable produce left different account state at the boundary"
+        );
+        // The durable path additionally persisted its undo-record (excluded key).
+        assert!(
+            store_durable
+                .get(&solen_storage::eager_revert_key(boundary_height))
+                .unwrap()
+                .is_some(),
+            "durable path persisted the eager-revert record"
+        );
+    }
 }

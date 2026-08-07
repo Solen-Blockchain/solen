@@ -310,12 +310,28 @@ impl ConsensusEngine {
     /// persisted metadata if available.
     pub fn with_validators(
         config: EngineConfig,
-        store: Box<dyn StateStore>,
+        mut store: Box<dyn StateStore>,
         mempool: Mempool,
         validator_set: ValidatorSet,
     ) -> Self {
         // Try to load persisted chain metadata.
         let (restored_height, restored_epoch) = load_chain_meta(&*store);
+
+        // BOOT RECONCILE: if a previous process eager-committed a block above the
+        // finalized tip and died/was-superseded before finalizing (its in-memory
+        // reverts now gone), the store is durably drifted — height N but N+1's
+        // trie state. Replay any durable eager-revert records for heights above
+        // the restored tip so we boot on the true finalized state, not the leak.
+        // (mainnet validator5, 2026-08-06: without this it booted with block
+        // 1,336,900's epoch-transition state at height 1,336,899 and could never
+        // reapply the canonical boundary block.) Done BEFORE the placeholder
+        // below reads `store.state_root()`, so the placeholder root is correct.
+        if apply_durable_reverts_above(store.as_mut(), restored_height) {
+            warn!(
+                tip = restored_height,
+                "boot: repaired durable store drift from a leaked eager-commit before starting"
+            );
+        }
 
         let mut chain = Vec::new();
         if restored_height > 0 {
@@ -993,10 +1009,43 @@ impl ConsensusEngine {
             // A deeper drift we can't undo locally (e.g. reverts already GC'd).
             // Resync is the safe fallback; with the finalize-mismatch fix a single
             // resyncing node no longer halts the fleet.
+            // In-memory reverts didn't fully undo the drift — the leak likely
+            // predates this process (a superseded eager-commit persisted, then a
+            // restart dropped the in-memory reverts). Try the DURABLE reverts
+            // before giving up on local recovery.
+            if self.reconcile_store_from_durable_reverts(self.height()) {
+                let repaired = self.store.read().unwrap().state_root();
+                if repaired == tip_root {
+                    warn!("store had drifted from the finalized tip — repaired via durable eager-revert (survived restart)");
+                    return;
+                }
+            }
             warn!("store still drifted from finalized tip after undo — requesting resync to avoid proposing a divergent block");
             self.needs_resync
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Delete the durable eager-revert record for `height`. Called when a block
+    /// FINALIZES: it is now canonical, so its eager writes must never be undone.
+    fn clear_eager_revert(&self, height: u64) {
+        let mut store = self.store.write().unwrap();
+        if let Err(e) = store.delete(&solen_storage::eager_revert_key(height)) {
+            warn!(height, error = %e, "failed to clear durable eager-revert record");
+        }
+    }
+
+    /// Repair a store that drifted above the finalized tip by replaying DURABLE
+    /// eager-revert records for every height > `tip_height`, newest-first. This
+    /// is the restart-safe counterpart to `restore_store_to_finalized_tip`: the
+    /// in-memory reverts live only for the current process, but these records
+    /// survive on disk (written atomically with the eager writes they undo).
+    ///
+    /// Returns true if any record was applied. After applying, the caller should
+    /// verify the resulting state root equals the expected finalized-tip root.
+    fn reconcile_store_from_durable_reverts(&self, tip_height: u64) -> bool {
+        let mut store = self.store.write().unwrap();
+        apply_durable_reverts_above(store.as_mut(), tip_height)
     }
 
     pub fn get_block(&self, height: BlockHeight) -> Option<FinalizedBlock> {
@@ -1235,8 +1284,13 @@ impl ConsensusEngine {
         // (recorded on finalization, keeping the journal aligned with the chain).
         let (result, revert) = {
             let mut store = self.store.write().unwrap();
+            // Durable-journaled: the eager writes AND their undo-record commit in
+            // one atomic batch, so a superseded produce attempt (or a crash
+            // between produce and finalize) can be undone even after a restart.
+            // The record is cleared when this block finalizes, or replayed to
+            // repair drift at boot / before the next produce.
             self.executor
-                .execute_block_journaled(store.as_mut(), &ops, height)
+                .execute_block_journaled_durable(store.as_mut(), &ops, height)
         };
 
         let epoch = {
@@ -1299,6 +1353,9 @@ impl ConsensusEngine {
                 .write()
                 .unwrap()
                 .record(height, revert);
+            // Block is canonical now — drop its durable eager-revert so it is
+            // never undone at a later boot/reconcile.
+            self.clear_eager_revert(height);
             self.persist_block_and_meta(&block);
             self.emit_block_events(&block);
             self.mempool.remove_finalized(&block.operations);
@@ -2370,6 +2427,8 @@ impl ConsensusEngine {
             .write()
             .unwrap()
             .record(height, block_revert);
+        // Canonical now — drop any durable eager-revert for this height.
+        self.clear_eager_revert(height);
         self.persist_block_and_meta(&block);
         self.emit_block_events(&block);
         // We advanced past `height`; execution-invalid markers at/below it are now
@@ -2882,6 +2941,8 @@ impl ConsensusEngine {
             .write()
             .unwrap()
             .record(height, revert);
+        // Canonical now — drop any durable eager-revert for this height.
+        self.clear_eager_revert(height);
         self.persist_block_and_meta(&block);
 
         // Advance epoch counter (rewards already handled by executor).
@@ -3356,6 +3417,59 @@ fn credit_account(store: &mut dyn StateStore, account_id: &[u8; 32], amount: u12
             }
         }
     }
+}
+
+/// Replay DURABLE eager-revert records for every height strictly above
+/// `tip_height`, newest-first, undoing leaked eager-commits so the store
+/// reflects the true finalized-tip state. Returns true if any record applied.
+///
+/// Each record was written atomically with the eager writes it undoes (see
+/// `executor::execute_block_journaled_durable`) and reverts that block back to
+/// the finalized tip; a record's own key is deleted by the revert it encodes.
+/// Records at heights <= `tip_height` are canonical (finalized) and left alone.
+/// This is the restart-safe repair for the mainnet validator5 wedge (2026-08-06).
+fn apply_durable_reverts_above(store: &mut dyn StateStore, tip_height: u64) -> bool {
+    let mut pending: Vec<(u64, solen_execution::executor::BlockRevert)> = Vec::new();
+    let entries = match store.scan_prefix(solen_storage::EAGER_REVERT_PREFIX) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "failed to scan durable eager-revert records");
+            return false;
+        }
+    };
+    for (k, v) in entries {
+        let suffix = &k[solen_storage::EAGER_REVERT_PREFIX.len()..];
+        if suffix.len() != 8 {
+            continue;
+        }
+        let mut h = [0u8; 8];
+        h.copy_from_slice(suffix);
+        let height = u64::from_be_bytes(h);
+        if height <= tip_height {
+            continue; // finalized/canonical — must not undo
+        }
+        if let Some(revert) = solen_execution::executor::BlockExecutor::decode_eager_revert(&v) {
+            pending.push((height, revert));
+        }
+    }
+    if pending.is_empty() {
+        return false;
+    }
+    // Newest-first. In practice there is at most one (we always produce on the
+    // tip), but this is correct if several ever stacked.
+    pending.sort_by(|a, b| b.0.cmp(&a.0));
+    for (height, revert) in &pending {
+        if let Err(e) = store.apply_batch_atomic(revert, true) {
+            warn!(height = *height, error = %e, "failed to apply durable eager-revert");
+        }
+    }
+    store.commit_root();
+    info!(
+        count = pending.len(),
+        tip = tip_height,
+        "replayed durable eager-revert record(s) to repair store drift"
+    );
+    true
 }
 
 /// Key for persisted chain metadata.
@@ -4067,6 +4181,150 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the leaked eager-commit write was undone"
+        );
+    }
+
+    /// The produce path must persist a DURABLE eager-revert record when it
+    /// eager-commits, and clear it when the block finalizes.
+    #[test]
+    fn produce_persists_durable_eager_revert_and_clears_on_finalize() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
+        let engine = ConsensusEngine::with_validators(
+            config,
+            Box::new(MemoryStore::new()),
+            Mempool::new(1000),
+            vs,
+        );
+
+        let p1 = engine.produce_block();
+        let hash1 = block_hash(&p1.header);
+        // After eager-committing block 1 (before finalize) the durable record exists.
+        assert!(
+            engine
+                .store()
+                .read()
+                .unwrap()
+                .get(&solen_storage::eager_revert_key(1))
+                .unwrap()
+                .is_some(),
+            "produce persisted a durable eager-revert for the eager-committed height"
+        );
+        // Finalize block 1 (2/3 of 3) — the record must be cleared (now canonical).
+        engine.accept_attestation(ids[1], 1, hash1);
+        engine.accept_attestation(ids[2], 1, hash1);
+        assert_eq!(engine.height(), 1);
+        assert!(
+            engine
+                .store()
+                .read()
+                .unwrap()
+                .get(&solen_storage::eager_revert_key(1))
+                .unwrap()
+                .is_none(),
+            "finalize cleared the durable eager-revert — a canonical block is never undone"
+        );
+    }
+
+    /// Regression for the mainnet validator5 wedge (2026-08-06): a superseded
+    /// eager-commit that MUTATED state and survives a RESTART. After a restart the
+    /// in-memory reverts are gone, so the in-process repair in
+    /// `restore_store_to_finalized_tip` can't fire — the store boots durably
+    /// drifted (height N carrying N+1's trie state) and can never reapply the
+    /// canonical chain. The DURABLE eager-revert, replayed by the boot reconcile,
+    /// must repair the store to the true finalized tip.
+    #[test]
+    fn boot_reconcile_repairs_durable_leaked_eager_commit_after_restart() {
+        let kps: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
+        let engine = ConsensusEngine::with_validators(
+            config.clone(),
+            Box::new(MemoryStore::new()),
+            Mempool::new(1000),
+            vs.clone(),
+        );
+
+        // Finalized tip at height 1.
+        let p1 = engine.produce_block();
+        let hash1 = block_hash(&p1.header);
+        engine.accept_attestation(ids[1], 1, hash1);
+        engine.accept_attestation(ids[2], 1, hash1);
+        assert_eq!(engine.height(), 1, "have a finalized tip at height 1");
+        let tip_root = engine.store().read().unwrap().state_root();
+
+        // Simulate a durable eager-commit at height 2 that MUTATED state and was
+        // never finalized (models the epoch-boundary reward leak): a phantom state
+        // write plus the durable undo-record, committed exactly as
+        // `execute_block_journaled_durable` would, with chain meta left at the
+        // finalized tip (height 1).
+        let phantom = b"acc/phantom-reward".to_vec();
+        let rk = solen_storage::eager_revert_key(2);
+        {
+            let store_arc = engine.store();
+            let mut store = store_arc.write().unwrap();
+            store.put(&phantom, b"leaked").unwrap();
+            // Undo = delete the phantom (no prior value) AND delete the record itself.
+            let pairs: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+                vec![(phantom.clone(), None), (rk.clone(), None)];
+            store.put(&rk, &borsh::to_vec(&pairs).unwrap()).unwrap();
+            store.commit_root();
+        }
+        let drifted = engine.store().read().unwrap().state_root();
+        assert_ne!(drifted, tip_root, "store drifted (leaked eager-commit)");
+
+        // SIMULATE RESTART: clone the durable store into a fresh store and build a
+        // NEW engine — no in-memory journal/pending/chain survives.
+        let mut restarted_store = MemoryStore::new();
+        for (k, v) in engine.store().read().unwrap().scan_all().unwrap() {
+            restarted_store.put(&k, &v).unwrap();
+        }
+        drop(engine);
+        let engine2 = ConsensusEngine::with_validators(
+            config,
+            Box::new(restarted_store),
+            Mempool::new(1000),
+            vs,
+        );
+
+        // Boot reconcile must have replayed the durable revert back to the tip.
+        assert_eq!(engine2.height(), 1, "restart restored the finalized height");
+        assert_eq!(
+            engine2.store().read().unwrap().state_root(),
+            tip_root,
+            "boot reconcile repaired the store to the true finalized-tip root"
+        );
+        assert!(
+            engine2
+                .store()
+                .read()
+                .unwrap()
+                .get(&phantom)
+                .unwrap()
+                .is_none(),
+            "the leaked eager write was undone"
+        );
+        assert!(
+            engine2.store().read().unwrap().get(&rk).unwrap().is_none(),
+            "the durable eager-revert record was consumed by the repair"
+        );
+        // The boot placeholder now carries the corrected root, not the leaked one,
+        // so applying the real canonical block 2 on top will agree.
+        assert_eq!(
+            engine2.latest_block().unwrap().result.state_root,
+            tip_root,
+            "boot placeholder carries the corrected root, not the leaked one"
         );
     }
 

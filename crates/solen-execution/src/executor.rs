@@ -615,6 +615,69 @@ impl BlockExecutor {
         (result, revert)
     }
 
+    /// Like `execute_block_journaled`, but ALSO persists the block's reverse-delta
+    /// durably, in the SAME atomic write batch as the eager writes, under
+    /// `eager_revert_key(height)`. This makes a superseded eager-commit undoable
+    /// even after a process restart (when the in-memory rollback journal is gone).
+    ///
+    /// Used by the PRODUCE path: production commits eagerly before finalization,
+    /// so a superseded attempt (re-proposal, backup proposer, competing block,
+    /// epoch-boundary strand) would otherwise leak durable state. On an epoch
+    /// boundary the leaked writes include the reward distribution, so a restart
+    /// then boots with height N-1 but N's trie state — the exact wedge that
+    /// stranded mainnet validator5 at block 1,336,900 on 2026-08-06 and could
+    /// only be cleared by copying a checkpoint from another node.
+    ///
+    /// The undo-record is removed by the engine when the block finalizes (it is
+    /// then canonical and must NOT be undone) or applied to repair drift at boot
+    /// / before producing. The record is excluded from the state root
+    /// (`EAGER_REVERT_PREFIX`), so carrying one never causes divergence.
+    pub fn execute_block_journaled_durable(
+        &self,
+        store: &mut dyn StateStore,
+        operations: &[UserOperation],
+        height: u64,
+    ) -> (BlockResult, BlockRevert) {
+        let (mut result, changes) = self.stage_block(&*store, operations, height);
+
+        // Capture the pre-commit values of the touched keys (the revert), then
+        // fold the durable undo-record into the SAME batch so the eager writes
+        // and the means to undo them are committed atomically — a crash leaves
+        // either both or neither, never eager writes with no undo.
+        let mut revert: BlockRevert = changes
+            .keys()
+            .map(|k| (k.clone(), store.get(k).ok().flatten()))
+            .collect();
+        // Applying the revert must also remove the durable record itself.
+        let rk = solen_storage::eager_revert_key(height);
+        revert.insert(rk.clone(), None);
+
+        // Serialize as an ordered Vec (borsh over HashMap is order-unstable;
+        // ordering is irrelevant to consensus here since the record is excluded
+        // from the state root and only ever read back by this same node, but a
+        // stable encoding keeps it debuggable).
+        let mut pairs: Vec<(Vec<u8>, Option<Vec<u8>>)> = revert.clone().into_iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let encoded = borsh::to_vec(&pairs).unwrap_or_default();
+
+        let mut batch = changes;
+        batch.insert(rk, Some(encoded));
+        if let Err(e) = store.apply_batch_atomic(&batch, true) {
+            tracing::error!(error = %e, height, "atomic durable-journaled block commit failed");
+        }
+
+        result.state_root = store.state_root();
+        store.commit_root();
+        (result, revert)
+    }
+
+    /// Decode a durable eager-revert record (written by
+    /// `execute_block_journaled_durable`) back into a `BlockRevert`.
+    pub fn decode_eager_revert(bytes: &[u8]) -> Option<BlockRevert> {
+        let pairs: Vec<(Vec<u8>, Option<Vec<u8>>)> = borsh::from_slice(bytes).ok()?;
+        Some(pairs.into_iter().collect())
+    }
+
     /// Execute a block and commit it ONLY if the resulting state root matches
     /// `expected_root`. On mismatch the block's writes are reverted via a cheap
     /// reverse-delta over just the touched keys (NOT a full-store snapshot —

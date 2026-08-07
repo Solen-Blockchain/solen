@@ -3,6 +3,32 @@
 use solen_types::Hash;
 use thiserror::Error;
 
+/// Reserved key prefix for a DURABLE undo-record of an eager-committed but
+/// not-yet-finalized block (see `executor::execute_block_journaled_durable`).
+///
+/// The produce path commits a block's writes to the live store eagerly, before
+/// finalization. If that attempt is superseded (re-proposal, backup proposer,
+/// competing block, epoch-boundary strand) the eager writes leak. In-memory
+/// reverts undo this within a process, but a RESTART loses them, leaving the
+/// store durably drifted (mainnet validator5, 2026-08-06: height stuck at
+/// N-1 while the trie already held N's epoch-transition state). Persisting the
+/// revert under this prefix, atomically in the same write batch as the eager
+/// writes, makes the undo survive a restart.
+///
+/// MUST be excluded from the state root (like other `__…__`/`block/` meta) — a
+/// node carrying one of these must not diverge from a node that doesn't. Keep
+/// this in sync with the exclusion lists in `memory::is_non_state_key` and
+/// `rocks::compute_state_root`.
+pub const EAGER_REVERT_PREFIX: &[u8] = b"__eager_revert__/";
+
+/// Build the durable eager-revert key for a given block height (big-endian so
+/// the key order matches height order under a prefix scan).
+pub fn eager_revert_key(height: u64) -> Vec<u8> {
+    let mut k = EAGER_REVERT_PREFIX.to_vec();
+    k.extend_from_slice(&height.to_be_bytes());
+    k
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("key not found")]

@@ -196,6 +196,7 @@ fn is_non_state_key(key: &[u8]) -> bool {
         || key.starts_with(b"source/")
         || key.starts_with(b"__finalized_checkpoint__")
         || key.starts_with(b"__last_attestation__")
+        || key.starts_with(crate::traits::EAGER_REVERT_PREFIX)
 }
 
 fn hash_leaf(key: &[u8], value: &[u8]) -> Hash {

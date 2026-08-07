@@ -73,6 +73,7 @@ impl RocksStore {
                 || k.starts_with(b"source/")
                 || k.starts_with(b"__finalized_checkpoint__")
                 || k.starts_with(b"__last_attestation__")
+                || k.starts_with(crate::traits::EAGER_REVERT_PREFIX)
             {
                 continue;
             }
@@ -165,6 +166,7 @@ impl StateStore for CheckpointStore {
                 || k.starts_with(b"source/")
                 || k.starts_with(b"__finalized_checkpoint__")
                 || k.starts_with(b"__last_attestation__")
+                || k.starts_with(crate::traits::EAGER_REVERT_PREFIX)
             {
                 continue;
             }

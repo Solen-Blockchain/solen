@@ -11,4 +11,4 @@ pub use memory::MemoryStore;
 pub use overlay::OverlayStore;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStore;
-pub use traits::{StateStore, StorageError};
+pub use traits::{eager_revert_key, StateStore, StorageError, EAGER_REVERT_PREFIX};

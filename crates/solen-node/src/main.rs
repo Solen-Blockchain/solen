@@ -1004,6 +1004,15 @@ async fn main() -> anyhow::Result<()> {
         *engine.finalized_checkpoints().write().unwrap() = loaded;
     }
 
+    // Boot self-heal: if our persisted tip conflicts with the 2/3-attested
+    // finalized checkpoint at that same height, our store is corrupt at an
+    // authoritative point — flag a resync now so the recovery tiers repair it
+    // before we produce/attest with a bad tip (backstops the durable eager-revert
+    // boot reconcile for drift that left no local undo-record).
+    if engine.reconcile_tip_with_finalized_checkpoint() {
+        warn!("boot: requested resync — persisted tip disagreed with the attested finalized checkpoint");
+    }
+
     // Syncing flag: start in sync mode for multi-validator networks to prevent
     // producing blocks before we've caught up with the network.
     let is_multi = engine.active_validator_count() > 1;

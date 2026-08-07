@@ -647,6 +647,46 @@ impl ConsensusEngine {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Boot self-heal: if a 2/3-attested finalized checkpoint exists AT our
+    /// current tip height and our store's root disagrees with it, our persisted
+    /// tip is corrupt at an authoritative point — request a resync instead of
+    /// participating (proposing / attesting / serving) with a bad tip. Returns
+    /// true if a conflict was found and a resync was requested.
+    ///
+    /// Complements the durable eager-revert boot reconcile (which undoes a
+    /// produce-path leak with a local undo-record): this covers drift that left
+    /// NO local record — a crash mid-commit, or a sync-path advance — by trusting
+    /// the supermajority-attested checkpoint over the local store. It fires only
+    /// on a DEFINITIVE same-height root conflict (never on a mere "we're behind"),
+    /// so a healthy node is unaffected. Checkpoints land at epoch boundaries, so
+    /// this is a boundary-anchored check; the accept-path restore is what
+    /// prevents the wedge in the first place.
+    pub fn reconcile_tip_with_finalized_checkpoint(&self) -> bool {
+        let tip = self.height();
+        if tip == 0 {
+            return false;
+        }
+        let expected = {
+            let cp = self.finalized_checkpoints.read().unwrap();
+            match &cp.latest {
+                Some(c) if c.height == tip => c.state_root,
+                _ => return false, // no attested checkpoint at our exact tip
+            }
+        };
+        let ours = self.store.read().unwrap().state_root();
+        if ours != expected {
+            warn!(
+                tip,
+                ours = ?&ours[..4],
+                expected = ?&expected[..4],
+                "boot: store tip root conflicts with the 2/3-attested finalized checkpoint — requesting resync"
+            );
+            self.request_resync();
+            return true;
+        }
+        false
+    }
+
     /// Check and clear the resync flag.
     pub fn take_resync_request(&self) -> bool {
         self.needs_resync
@@ -2349,6 +2389,16 @@ impl ConsensusEngine {
             // On mismatch the block is reverted (cheap reverse-delta), so the
             // store stays clean at the previous height instead of being left
             // corrupted by a half-applied divergent block.
+            //
+            // BUT the "execute on OUR height-1 state" assumption below only holds
+            // if the store actually reflects the finalized tip. A leaked eager-
+            // commit from a superseded PRODUCE attempt at THIS height (rewards at
+            // an epoch boundary) leaves the store drifted, so executing the peer's
+            // canonical block on it double-applies and yields a mismatch — making
+            // us REJECT the canonical block and wedge (validator5, block
+            // 1,344,600, 2026-08-06). Restore to the finalized tip first (no-op in
+            // the common, undrifted case) so the base state is truly canonical.
+            self.restore_store_to_finalized_tip();
             let exec_result = {
                 let mut store = self.store.write().unwrap();
                 self.executor.execute_block_checked(
@@ -2870,6 +2920,12 @@ impl ConsensusEngine {
         // self-corrects when the correct chain's blocks arrive. Previously the
         // mismatching block was committed and left in place, which permanently
         // diverged the node and forced a full-snapshot re-download to recover.
+        //
+        // Restore to the finalized tip first (no-op when undrifted): a leaked
+        // eager-commit from a superseded produce at this height would otherwise
+        // make the canonical synced block mismatch and be rejected, driving a
+        // needless resync loop (the validator5 wedge class).
+        self.restore_store_to_finalized_tip();
         let exec_result = {
             let mut store = self.store.write().unwrap();
             self.executor.execute_block_checked(
@@ -4676,6 +4732,152 @@ mod tests {
             engine.height(),
             h,
             "height unchanged after rejected rollback"
+        );
+    }
+
+    /// Accept-path atomic restore (validator5 wedge fix, 2026-08-06): a CANONICAL
+    /// block received from a peer must still finalize when our store is polluted
+    /// by a leaked eager-commit at that height. finalize_pending_block must
+    /// restore the store to the finalized tip BEFORE executing the peer's block —
+    /// otherwise the canonical block executes on drifted state, mismatches, and is
+    /// wrongly rejected, wedging the node.
+    #[test]
+    fn accept_path_restores_before_executing_canonical_peer_block() {
+        let kps: Vec<Keypair> = (0..5).map(|_| Keypair::generate()).collect();
+        let ids: Vec<[u8; 32]> = kps.iter().map(|k| k.public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0, // v2 active
+            ..Default::default()
+        };
+        let engine = ConsensusEngine::with_validators(
+            config,
+            Box::new(MemoryStore::new()),
+            Mempool::new(1000),
+            vs,
+        );
+
+        // Establish a real finalized tip: produce block 1 and finalize it (4/5),
+        // so `chain` has a tip for restore_store_to_finalized_tip to target.
+        let p1 = engine.produce_block();
+        let hash1 = block_hash(&p1.header);
+        engine.accept_attestation(ids[1], 1, hash1);
+        engine.accept_attestation(ids[2], 1, hash1);
+        engine.accept_attestation(ids[3], 1, hash1);
+        engine.accept_attestation(ids[4], 1, hash1);
+        assert_eq!(engine.height(), 1, "finalized tip at height 1");
+
+        let head_h = engine.height();
+        let next_h = head_h + 1;
+        let (parent_hash, parent_ts) = engine
+            .get_block(head_h)
+            .map(|b| (block_hash(&b.header), b.header.timestamp_ms))
+            .unwrap_or(([0u8; 32], 0));
+        let tip_root = engine.store().read().unwrap().state_root();
+
+        // Simulate OUR leaked eager-commit at height `next_h`: pollute the store
+        // and stash the matching candidate (already-executed, with its revert) in
+        // v2_blocks so restore_store_to_finalized_tip can undo it.
+        let phantom = b"acc/phantom-leak".to_vec();
+        {
+            let store_arc = engine.store();
+            let mut store = store_arc.write().unwrap();
+            store.put(&phantom, b"leaked").unwrap();
+            store.commit_root();
+        }
+        let drifted_root = engine.store().read().unwrap().state_root();
+        assert_ne!(
+            drifted_root, tip_root,
+            "store drifted (leaked eager-commit)"
+        );
+        let mut leaked_header = BlockHeader {
+            height: next_h,
+            epoch: next_h / crate::epoch::EPOCH_LENGTH,
+            parent_hash,
+            state_root: drifted_root,
+            transactions_root: [0u8; 32],
+            receipts_root: [0u8; 32],
+            proposer: ids[0], // us — the superseded produce
+            timestamp_ms: parent_ts + 6000,
+            proposer_signature: vec![],
+        };
+        let leaked_bh = block_hash(&leaked_header);
+        leaked_header.proposer_signature = kps[0].sign(&leaked_bh).to_vec();
+        let mut revert: solen_execution::executor::BlockRevert = std::collections::HashMap::new();
+        revert.insert(phantom.clone(), None); // undo = delete (no prior value)
+        engine
+            .v2_blocks
+            .write()
+            .unwrap()
+            .entry(next_h)
+            .or_default()
+            .insert(
+                leaked_bh,
+                PendingBlock {
+                    header: leaked_header,
+                    operations: vec![],
+                    proposed_at: std::time::Instant::now(),
+                    already_executed: true,
+                    result: None,
+                    revert: Some(revert),
+                    mismatch_count: 0,
+                },
+            );
+
+        // A peer (ids[1]) proposes the CANONICAL block at next_h: empty block, so
+        // its true root equals the clean tip root.
+        let mut canonical = BlockHeader {
+            height: next_h,
+            epoch: next_h / crate::epoch::EPOCH_LENGTH,
+            parent_hash,
+            state_root: tip_root,
+            transactions_root: [0u8; 32],
+            receipts_root: [0u8; 32],
+            proposer: ids[1],
+            timestamp_ms: parent_ts + 6000,
+            proposer_signature: vec![],
+        };
+        let canonical_hash = block_hash(&canonical);
+        canonical.proposer_signature = kps[1].sign(&canonical_hash).to_vec();
+        assert_ne!(canonical_hash, leaked_bh);
+        assert!(
+            engine.accept_block(&canonical, &[]),
+            "canonical peer block accepted as candidate"
+        );
+
+        // 4/5 vote for the canonical hash (2/3 quorum) → v2 finalizes it via
+        // finalize_pending_block.
+        engine.accept_attestation(ids[1], next_h, canonical_hash);
+        engine.accept_attestation(ids[2], next_h, canonical_hash);
+        engine.accept_attestation(ids[3], next_h, canonical_hash);
+        engine.accept_attestation(ids[4], next_h, canonical_hash);
+
+        // With the accept-path restore, the canonical block finalized despite the
+        // leaked eager-commit; without it, the node would be stuck at head_h.
+        assert_eq!(
+            engine.height(),
+            next_h,
+            "canonical peer block finalized — accept path restored the store first (no wedge)"
+        );
+        assert_eq!(
+            block_hash(&engine.get_block(next_h).unwrap().header),
+            canonical_hash,
+            "the finalized block is the canonical one"
+        );
+        assert!(
+            !engine.resync_requested(),
+            "must NOT latch into resync — the store was locally repairable"
+        );
+        assert!(
+            engine
+                .store()
+                .read()
+                .unwrap()
+                .get(&phantom)
+                .unwrap()
+                .is_none(),
+            "the leaked eager write was undone by the accept-path restore"
         );
     }
 }

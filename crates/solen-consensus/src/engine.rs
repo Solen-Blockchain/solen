@@ -740,6 +740,19 @@ impl ConsensusEngine {
 
         // Set chain to a single marker block at the snapshot height so height() returns correctly.
         {
+            // The marker's result.state_root MUST carry the real restored root.
+            // restore_store_to_finalized_tip() (the accept-path guard added for the
+            // 2026-08-06 v5 fork) reads chain.last().result.state_root as the finalized
+            // tip target. Leaving it [0;32] here — while the store holds the real root —
+            // makes that guard see false "drift" after every snapshot resync, latch
+            // needs_resync, and re-trigger resync forever → node hang (mainnet 2026-08-08,
+            // validator9/11). The boot path (with_validators) already sets the real root
+            // in this field, which is why a restart clears the hang. Keep the two paths
+            // consistent: header and result both carry the restored root.
+            let restored_root = {
+                let store = self.store.read().unwrap();
+                store.state_root()
+            };
             let mut chain = self.chain.write().unwrap();
             chain.clear();
             chain.push(FinalizedBlock {
@@ -747,10 +760,7 @@ impl ConsensusEngine {
                     height,
                     epoch,
                     parent_hash: [0u8; 32],
-                    state_root: {
-                        let store = self.store.read().unwrap();
-                        store.state_root()
-                    },
+                    state_root: restored_root,
                     transactions_root: [0u8; 32],
                     receipts_root: [0u8; 32],
                     proposer: self.config.validator_id,
@@ -758,7 +768,7 @@ impl ConsensusEngine {
                     proposer_signature: vec![],
                 },
                 result: BlockResult {
-                    state_root: [0u8; 32],
+                    state_root: restored_root,
                     receipts: vec![],
                     gas_used: 0,
                 },
@@ -4878,6 +4888,77 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the leaked eager write was undone by the accept-path restore"
+        );
+    }
+
+    /// Regression (mainnet 2026-08-08, validator9/11 hang): after a snapshot
+    /// resync, `reset_to_height` installs a marker block for the restored height.
+    /// Its `result.state_root` MUST carry the real restored root, because the
+    /// accept-path guard `restore_store_to_finalized_tip()` reads exactly that
+    /// field as the finalized-tip target. If the marker leaves it `[0;32]` while
+    /// the store holds the real root, the guard sees false "drift", finds nothing
+    /// to undo, and latches `needs_resync` — which re-triggers snapshot resync in
+    /// an infinite loop that hangs the node (RPC-dead, CPU-spinning). The boot
+    /// path (with_validators) already sets the real root here — which is why a
+    /// restart clears the hang; this keeps the live-resync path consistent. The
+    /// v5 soak never snapshot-resynced, so this path had zero coverage.
+    #[test]
+    fn resync_marker_result_root_prevents_false_drift_resync_loop() {
+        let ids: Vec<[u8; 32]> = (0..3).map(|_| Keypair::generate().public_key()).collect();
+        let vs = ValidatorSet::new(ids.iter().map(|id| ValidatorInfo::new(*id, 100)).collect());
+        let config = EngineConfig {
+            validator_id: ids[0],
+            fork_choice_v2_height: 0,
+            ..Default::default()
+        };
+
+        // A store with real, non-empty state so the restored root is not [0;32].
+        let mut store = MemoryStore::new();
+        let seed_acct = {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(b"seed");
+            id
+        };
+        apply_genesis(
+            &mut store,
+            vec![GenesisAccount {
+                id: seed_acct,
+                balance: 1_000_000,
+                auth_methods: vec![],
+            }],
+        )
+        .unwrap();
+        let engine =
+            ConsensusEngine::with_validators(config, Box::new(store), Mempool::new(1000), vs);
+        let real_root = engine.store().read().unwrap().state_root();
+        assert_ne!(real_root, [0u8; 32], "store holds real genesis state");
+
+        // Simulate a completed snapshot resync at some restored height: the store
+        // already holds `real_root`; reset_to_height installs the marker block.
+        engine.reset_to_height(5, 0);
+
+        // (1) The marker's result.state_root must equal the real restored root —
+        // the exact field restore_store_to_finalized_tip targets. With the old
+        // [0;32] marker this assertion fails.
+        let marker_result_root = engine.chain.read().unwrap().last().unwrap().result.state_root;
+        assert_eq!(
+            marker_result_root, real_root,
+            "resync marker result.state_root must carry the real restored root"
+        );
+
+        // (2) Behavioral proof: the accept-path guard must see NO drift on a
+        // freshly restored store and must NOT latch a resync. With the old marker
+        // it latches needs_resync → the infinite resync loop / hang.
+        assert!(!engine.resync_requested(), "precondition: no resync pending");
+        engine.restore_store_to_finalized_tip();
+        assert!(
+            !engine.resync_requested(),
+            "a freshly snapshot-restored store must not be seen as drifted (no false resync loop)"
+        );
+        assert_eq!(
+            engine.store().read().unwrap().state_root(),
+            real_root,
+            "restore must not mutate a clean restored store"
         );
     }
 }

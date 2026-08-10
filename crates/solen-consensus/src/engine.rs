@@ -4940,7 +4940,14 @@ mod tests {
         // (1) The marker's result.state_root must equal the real restored root —
         // the exact field restore_store_to_finalized_tip targets. With the old
         // [0;32] marker this assertion fails.
-        let marker_result_root = engine.chain.read().unwrap().last().unwrap().result.state_root;
+        let marker_result_root = engine
+            .chain
+            .read()
+            .unwrap()
+            .last()
+            .unwrap()
+            .result
+            .state_root;
         assert_eq!(
             marker_result_root, real_root,
             "resync marker result.state_root must carry the real restored root"
@@ -4949,7 +4956,10 @@ mod tests {
         // (2) Behavioral proof: the accept-path guard must see NO drift on a
         // freshly restored store and must NOT latch a resync. With the old marker
         // it latches needs_resync → the infinite resync loop / hang.
-        assert!(!engine.resync_requested(), "precondition: no resync pending");
+        assert!(
+            !engine.resync_requested(),
+            "precondition: no resync pending"
+        );
         engine.restore_store_to_finalized_tip();
         assert!(
             !engine.resync_requested(),

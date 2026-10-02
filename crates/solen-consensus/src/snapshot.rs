@@ -71,44 +71,43 @@ pub fn create_snapshot(
         .map_err(|e| SnapshotError::Storage(e.to_string()))?;
     let entry_count = entries.len() as u64;
 
-    // Serialize entries to uncompressed buffer.
-    let mut raw = Vec::new();
-    raw.extend_from_slice(&entry_count.to_le_bytes());
+    // Header goes first in the output buffer; the encoder appends the
+    // compressed body directly after it (no separate copy of the body).
+    let mut header = Vec::with_capacity(HEADER_SIZE);
+    header.extend_from_slice(MAGIC);
+    header.extend_from_slice(&VERSION.to_le_bytes());
+    header.extend_from_slice(&height.to_le_bytes());
+    header.extend_from_slice(&epoch.to_le_bytes());
+    header.extend_from_slice(&state_root);
 
-    for (key, val) in &entries {
-        raw.extend_from_slice(&(key.len() as u32).to_le_bytes());
-        raw.extend_from_slice(key);
-        raw.extend_from_slice(&(val.len() as u32).to_le_bytes());
-        raw.extend_from_slice(val);
+    // Stream entries straight into the encoder, consuming them as we go.
+    // Previously the whole state was first copied into an uncompressed `raw`
+    // buffer (plus Vec growth overshoot) while `entries` was still alive —
+    // ~3 full copies of state resident at once, a multi-GB spike every
+    // refresh on every node. The uncompressed byte stream is identical.
+    let mut encoder = DeflateEncoder::new(header, Compression::best());
+    let mut uncompressed_size = 0usize;
+    encoder.write_all(&entry_count.to_le_bytes())?;
+    uncompressed_size += 8;
+    for (key, val) in entries {
+        encoder.write_all(&(key.len() as u32).to_le_bytes())?;
+        encoder.write_all(&key)?;
+        encoder.write_all(&(val.len() as u32).to_le_bytes())?;
+        encoder.write_all(&val)?;
+        uncompressed_size += 8 + key.len() + val.len();
     }
-
-    let uncompressed_size = raw.len();
-
-    // Compress.
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(&raw)?;
-    let compressed = encoder.finish()?;
-
-    // Build output: header + compressed data.
-    let mut output = Vec::with_capacity(HEADER_SIZE + compressed.len());
-    output.extend_from_slice(MAGIC);
-    output.extend_from_slice(&VERSION.to_le_bytes());
-    output.extend_from_slice(&height.to_le_bytes());
-    output.extend_from_slice(&epoch.to_le_bytes());
-    output.extend_from_slice(&state_root);
-
-    // Extra header fields: compressed size and uncompressed size for info.
-    output.extend_from_slice(&compressed);
+    let output = encoder.finish()?;
+    let compressed_len = output.len() - HEADER_SIZE;
 
     info!(
         height,
         epoch,
         entries = entry_count,
-        compressed = compressed.len(),
+        compressed = compressed_len,
         uncompressed = uncompressed_size,
         ratio = format!(
             "{:.1}x",
-            uncompressed_size as f64 / compressed.len().max(1) as f64
+            uncompressed_size as f64 / compressed_len.max(1) as f64
         ),
         "snapshot created"
     );
@@ -464,6 +463,43 @@ mod tests {
                 Some((i * 3).to_le_bytes().to_vec()),
             );
         }
+    }
+
+    /// The streaming encoder must emit exactly the byte stream the old
+    /// buffer-then-compress code produced, so snapshots stay readable by every
+    /// restoring node. Rebuild the legacy uncompressed layout by hand and
+    /// compare it to the decompressed body (plus the header bytes).
+    #[test]
+    fn streamed_snapshot_payload_matches_legacy_layout() {
+        use std::io::Read;
+        let mut store = MemoryStore::new();
+        for i in 0u32..500 {
+            let val = vec![(i % 251) as u8; (i % 37) as usize];
+            store.put(&i.to_be_bytes(), &val).unwrap();
+        }
+        let data = create_snapshot(&store, 7, 3).unwrap();
+
+        let mut legacy = Vec::new();
+        let entries = store.scan_all().unwrap();
+        legacy.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        for (k, v) in &entries {
+            legacy.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            legacy.extend_from_slice(k);
+            legacy.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            legacy.extend_from_slice(v);
+        }
+
+        let mut body = Vec::new();
+        DeflateDecoder::new(&data[HEADER_SIZE..])
+            .read_to_end(&mut body)
+            .unwrap();
+        assert_eq!(body, legacy, "uncompressed snapshot payload changed");
+
+        assert_eq!(&data[..4], MAGIC);
+        assert_eq!(&data[4..8], &VERSION.to_le_bytes());
+        assert_eq!(&data[8..16], &7u64.to_le_bytes());
+        assert_eq!(&data[16..24], &3u64.to_le_bytes());
+        assert_eq!(&data[24..56], &store.state_root());
     }
 
     #[test]

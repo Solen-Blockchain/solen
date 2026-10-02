@@ -1706,7 +1706,11 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    {
+    // The index store is read only by the explorer API. With the explorer
+    // disabled (--explorer-port 0, e.g. validators) nobody can query it, so
+    // skip the indexer entirely: its startup replay walks the whole chain from
+    // height 1 and pinned a core for hours on every restart.
+    if explorer_port > 0 {
         let engine_for_idx = engine.clone();
         let idx_store = index_store.clone();
         let idx_cancel = shutdown_rx.clone();
